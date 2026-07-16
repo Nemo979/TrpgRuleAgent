@@ -1,0 +1,145 @@
+# TrpgRuleAgent
+
+TrpgRuleAgent 是一个面向跑团规则的可扩展 Agent 平台。第一版聚焦 Pathfinder 1E，目标是提供基于证据的规则问答、结构化引用和可追踪的多轮工具调用。
+
+> 项目不分发 Pathfinder 规则正文。使用者需要自行提供有权使用的 PF1E CHM 文件；源文件、解析结果和向量索引默认只保存在本机。
+
+## 当前里程碑
+
+第一条可运行纵向链路已经建立，并已接入本地 BGE 向量检索：
+
+```text
+CLI -> Pi Agent Runtime -> search_rules/read_rules 工具
+    -> Python Retrieval Service -> BGE + Chroma -> PF Rule Pack
+```
+
+仓库内 Rule Pack 只有明确标注的演示数据，用于验证工程链路，不能作为真实 PF 规则依据。本地可从用户持有的 CHM 导入真实父文档；原始 CHM、解包文件和生成索引均位于 Git 忽略的 `data/` 目录。
+
+## 目录
+
+```text
+apps/cli                       流式命令行入口
+packages/agent                 Agent、工具预算、引用注册表和 Prompt
+packages/rules-client          检索服务客户端
+packages/rules-types           跨语言接口对应的 TypeScript 类型
+services/retrieval-python      Python 检索、索引与评测服务
+rulepacks/pathfinder-1e        PF 规则包定义、演示资料和检索评测集
+```
+
+## 快速开始
+
+### 环境要求
+
+- Node.js 22.19+
+- Python 3.9+
+- PF1E CHM 文件（由使用者自行合法取得）
+- CHM 解包工具：macOS 执行 `brew install chmlib`；Ubuntu 执行 `sudo apt-get install libchm-bin`
+- 一个兼容 OpenAI Chat Completions 协议、并支持工具调用的模型
+
+### 1. 克隆并一键构建规则索引
+
+```bash
+git clone https://github.com/Nemo979/TrpgRuleAgent.git
+cd TrpgRuleAgent
+npm run setup:pf -- "/absolute/path/to/Pathfinder.chm"
+```
+
+这个命令会自动安装 Node.js/Python 依赖、导入 CHM 并建立向量索引。首次下载嵌入模型和构建索引需要一些时间；过程可以断点续建。
+
+### 2. 配置模型
+
+安装脚本会创建 `.env`。填写模型端点和密钥：
+
+```dotenv
+LLM_PROVIDER=custom-openai
+LLM_MODEL=your-model-id
+LLM_API=openai-completions
+LLM_BASE_URL=https://your-provider.example/v1
+LLM_API_KEY=your-api-key
+LLM_CONTEXT_WINDOW=128000
+LLM_MAX_TOKENS=8192
+LLM_REASONING=false
+RETRIEVAL_BASE_URL=http://127.0.0.1:8765
+RULESET_ID=pathfinder-1e
+```
+
+`.env` 已被 Git 忽略。不要把真实密钥填写到 `.env.example` 或提交到版本控制。如果本机 Pi Agent 已保存相同提供商的凭据，也可以删除 `LLM_API_KEY`，改用：
+
+```dotenv
+LLM_PI_AUTH_PROVIDER=deepseek
+```
+
+### 3. 启动
+
+一个命令同时启动检索服务和交互式 Agent：
+
+```bash
+npm start
+```
+
+直接输入问题即可；输入 `/exit` 退出。也可以执行单次问答：
+
+```bash
+npm start -- "什么时候会触发借机攻击？"
+```
+
+如果希望分别观察服务日志，仍可在两个终端分别运行 `npm run retrieval:pf` 和 `npm run cli`。
+
+## 演示模式（无需规则文件）
+
+仓库包含少量明确标注的合成演示数据，只用于验证调用链路，不能作为真实 PF 规则依据：
+
+```bash
+npm install --ignore-scripts
+cp .env.example .env
+# 编辑 .env 后，在终端一运行：
+npm run retrieval:dev
+# 在终端二运行：
+npm run cli
+```
+
+## 数据规模与评测
+
+当前验证过的本地数据规模为 2,140 篇父文档、29,629 个向量子块。BGE 模型为 512 维，本地 Chroma 索引约 380MB。所有生成数据位于 Git 忽略的 `data/` 目录，详见 [数据边界](docs/data-policy.md)。
+
+验证真实规则检索质量：
+
+```bash
+npm run eval:retrieval:pf
+```
+
+评测会报告 Hit@5、MRR 和每道题的首条规则路径，并将明细写入本地 `data/pathfinder-1e/generated/retrieval-eval.json`。
+
+当前 85 题人工标注评测中，纯向量为 Hit@5 78.8% / MRR 0.638，BM25 + 向量混合召回为 Hit@5 96.5% / MRR 0.821。评测包含 77 道核心规则题和 8 道明确询问可选资料的题目；它用于检索回归，不等同于最终答案准确率。详见 [检索评测](docs/retrieval-evaluation.md)。
+
+## 开发与验证
+
+```bash
+npm run check
+npm run test:python
+npm run eval:retrieval:pf:vector
+npm run eval:retrieval:pf
+```
+
+## 安全与许可
+
+- `.env`、`data/`、`.venv/`、模型缓存和向量索引均不会提交。
+- GitHub 仓库只包含合成演示文本，不包含 PF1E 规则正文。
+- 使用者负责确认其规则资料、模型服务和生成内容的使用权限。
+- 源代码使用 [MIT License](LICENSE)。规则资料不属于本许可证授权范围。
+
+## 第一版边界
+
+- 只支持 `pathfinder-1e` Rule Pack。
+- Agent 每次提问最多搜索 3 次、读取 8 篇规则文档、执行 8 次规则工具。
+- 搜索工具只返回摘要；完整父文档必须通过 `read_rules` 按需读取。
+- 每篇已读取文档获得稳定引用编号，例如 `[S1]`。
+- 最终来源列表由程序持有的引用注册表生成，而不是依赖模型编造路径。
+
+## 下一步
+
+1. 为当前 3 道检索漏召回题增加结构化章节切块或重排器实验。
+2. 增加答案级评测，验证事实、引用、工具预算和无依据结论率。
+3. 为导入报告增加重复内容和异常编码审计。
+4. 增加 SSE Web API、React 调试界面和 Agent Trace。
+5. 增加车卡工作流和确定性合法性校验器，再抽取通用 Rule Pack SDK。

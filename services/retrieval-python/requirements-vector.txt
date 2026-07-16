@@ -1,0 +1,4 @@
+chromadb==1.5.9
+fastembed==0.7.4
+numpy==1.26.4
+urllib3==1.26.20

@@ -1,0 +1,10 @@
+{
+  "name": "@trpg-rule-agent/rules-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@trpg-rule-agent/rules-types": "0.1.0"
+  }
+}

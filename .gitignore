@@ -1,0 +1,12 @@
+node_modules/
+dist/
+coverage/
+.env
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+data/
+vector_store/
+sessions/

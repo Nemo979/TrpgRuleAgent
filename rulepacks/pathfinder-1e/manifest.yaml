@@ -1,0 +1,24 @@
+id: pathfinder-1e
+name: Pathfinder First Edition
+category: ttrpg
+language: zh-CN
+version: "1e-v2.24-sc"
+capabilities:
+  - rule_qa
+default_source_policy: official_first
+retrieval:
+  child_chunk_size: 500
+  child_chunk_overlap: 50
+  search_limit: 10
+  read_limit: 8
+sources:
+  - id: crb
+    name: 核心规则书
+    priority: 100
+  - id: faq
+    name: FAQ
+    priority: 90
+local_import:
+  format: chm
+  redistributable: false
+  sha256: 7500feb56e2c0acb9cebe0aff3ae729a217cf0ed97fc7ee9ee54dd69f07ca05a

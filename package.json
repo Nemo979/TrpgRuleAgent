@@ -1,0 +1,36 @@
+{
+  "name": "trpg-rule-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "setup:pf": "bash scripts/setup-pf.sh",
+    "start": "bash scripts/start.sh",
+    "check": "tsc --noEmit && npm run test",
+    "test": "vitest run",
+    "test:python": "PYTHONPATH=services/retrieval-python/src python3 -m unittest discover -s services/retrieval-python/tests -v",
+    "rules:import:pf-chm": "bash scripts/import-pf-chm.sh",
+    "rules:import:pf": "PYTHONPATH=services/retrieval-python/src python3 -m trpg_retrieval.importers.chm --extracted data/pathfinder-1e/extracted --output data/pathfinder-1e/generated/documents.jsonl --report data/pathfinder-1e/generated/import-report.json",
+    "vector:install": ".venv/bin/python -m pip install -r services/retrieval-python/requirements-vector.txt",
+    "vector:build:pf": "PYTHONPATH=services/retrieval-python/src .venv/bin/python -m trpg_retrieval.vector_index --documents data/pathfinder-1e/generated/documents.jsonl --index-dir data/pathfinder-1e/vector-index-fastembed --cache-dir data/fastembed-cache",
+    "eval:retrieval:pf": "PYTHONPATH=services/retrieval-python/src .venv/bin/python -m trpg_retrieval.evaluation --documents data/pathfinder-1e/generated/documents.jsonl --index-dir data/pathfinder-1e/vector-index-fastembed --cases rulepacks/pathfinder-1e/evals/retrieval.jsonl --report data/pathfinder-1e/generated/retrieval-eval.json",
+    "eval:retrieval:pf:vector": "PYTHONPATH=services/retrieval-python/src .venv/bin/python -m trpg_retrieval.evaluation --documents data/pathfinder-1e/generated/documents.jsonl --index-dir data/pathfinder-1e/vector-index-fastembed --cases rulepacks/pathfinder-1e/evals/retrieval.jsonl --backend chroma --report data/pathfinder-1e/generated/retrieval-eval-vector.json",
+    "retrieval:dev": "PYTHONPATH=services/retrieval-python/src python3 -m trpg_retrieval.api --documents rulepacks/pathfinder-1e/fixtures/documents.jsonl",
+    "retrieval:pf": "PYTHONPATH=services/retrieval-python/src .venv/bin/python -m trpg_retrieval.api --documents data/pathfinder-1e/generated/documents.jsonl --backend hybrid --index-dir data/pathfinder-1e/vector-index-fastembed",
+    "retrieval:pf:lexical": "PYTHONPATH=services/retrieval-python/src python3 -m trpg_retrieval.api --documents data/pathfinder-1e/generated/documents.jsonl --backend lexical",
+    "cli": "node --env-file=.env --import tsx apps/cli/src/index.ts"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.12.4",
+    "tsx": "4.21.0",
+    "typescript": "5.9.3",
+    "vitest": "4.1.9"
+  }
+}

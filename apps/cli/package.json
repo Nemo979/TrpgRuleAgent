@@ -1,0 +1,10 @@
+{
+  "name": "@trpg-rule-agent/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@trpg-rule-agent/agent": "0.1.0",
+    "@trpg-rule-agent/rules-client": "0.1.0"
+  }
+}
