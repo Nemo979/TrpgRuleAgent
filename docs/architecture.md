@@ -4,12 +4,43 @@
 
 第一版只支持 Pathfinder 1E，但核心模块不能依赖某一本规则书。增加规则集时，应以 Rule Pack、资料索引和领域工具为主，而不是复制 Agent。
 
+Node 侧 Agent 采用项目自有的 Agent Runtime，零第三方运行时依赖：只使用 Node.js 22.19+ 内置的 fetch、AbortSignal、Web Streams 与标准语言能力。TypeScript、Vitest、tsx 仅作为开发依赖存在。
+
+## 自有 Agent Runtime
+
+`packages/agent` 按职责分为三层：
+
+```text
+packages/agent/src/
+  core/         业务无关的 Agent 内核：消息模型、AgentEvent、ToolRegistry、
+                JSON Schema 校验子集、AgentError、Agent Loop（AgentRuntime）
+  providers/    ModelProvider 实现与注册表；首版为 OpenAI-compatible
+                Chat Completions 流式 Provider（含零依赖 SSE 解析器）
+  rule-agent/   TRPG 规则领域层：search_rules/read_rules 工具、工具预算、
+                Citation Registry、系统 Prompt 与环境变量配置
+```
+
+### 消息模型与 Provider 边界
+
+内部消息只有 `system`、`user`、`assistant`、`tool` 四种角色；assistant 消息携带完整文本、工具调用列表和可选 usage。Agent Loop 只消费内部 `ModelEvent`（`text_delta`、`tool_call_start`、`tool_call_arguments_delta`、`tool_call_end`、`usage`、`finish`），不感知任何厂商数据结构。
+
+`ModelProvider` 是可扩展接口：Provider 负责把厂商流式协议转换为 `ModelEvent`。首版 Provider 通过 `POST {baseUrl}/chat/completions`（`stream=true`）访问 OpenAI-compatible 服务，SSE 解析支持跨 chunk 行、单 chunk 多事件、`[DONE]`、按 index 分片到达的 tool_calls/name/arguments。API Key 通过执行上下文传入 Provider，不写入消息、事件、日志或错误文本。`ProviderRegistry` 是扩展点，未来在 `providers/` 注册新实现即可。
+
+### 工具循环与事件流
+
+`AgentRuntime.run()` 返回 `AsyncIterable<AgentEvent>`，事件类型包括 `turn_start`、`text_delta`、`tool_start`、`tool_end`、`tool_error`、`turn_end`、`error`。流程为：加入用户消息 -> 调用 Provider -> 流式输出文本、聚合工具调用 -> 用内置 JSON Schema 子集校验参数（失败不执行工具）-> 顺序执行工具（保持引用编号与预算确定性）-> 写入 tool 消息 -> 再调模型，直到没有工具调用或达到最大模型轮次。AbortSignal 全程传递给模型请求与规则客户端。
+
+错误统一为 `AgentError`，类别包括 `configuration_error`、`provider_http_error`、`provider_protocol_error`、`invalid_tool_call`、`unknown_tool`、`tool_execution_error`、`limit_exceeded`、`aborted`。Provider 对外抛出前会脱敏整个可观察错误链：顶层 `message` 与 `cause.message` 都会把 API Key 替换为 `[REDACTED]`；`cause` 为 Error 时只保留 name 与已脱敏 message（丢弃可能残留密钥的 stack、嵌套 cause），非 Error 的 cause 直接丢弃。这样即使日志打印完整错误链也不会泄露 API Key。首版不自动重试模型请求，避免工具重复执行。
+
+CLI 只是 `AgentEvent` 的一个消费者；未来的 Web Gateway 或小程序适配层同样订阅这条事件流（例如转成 SSE/WebSocket 下发），不需要改动 Agent 内核。云端多租户与自定义 Base URL 的安全代理不在本阶段范围内。
+
 ## 在线问答链路
 
 ```text
 User
   -> CLI/Web Adapter
-  -> Pi Agent Runtime
+  -> Agent Runtime (packages/agent/core)
+  -> OpenAI-compatible ModelProvider
   -> search_rules
   -> Retrieval API
   -> vector + BM25 child candidate search

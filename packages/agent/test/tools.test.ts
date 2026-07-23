@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { RulesClient } from "@trpg-rule-agent/rules-client";
 import type { RuleDocument, RuleSearchHit } from "@trpg-rule-agent/rules-types";
-import { ToolBudget } from "../src/budget.ts";
-import { CitationRegistry } from "../src/citations.ts";
-import { createRuleTools } from "../src/tools.ts";
+import { ToolBudget } from "../src/rule-agent/budget.ts";
+import { CitationRegistry } from "../src/rule-agent/citations.ts";
+import { createRuleTools } from "../src/rule-agent/tools.ts";
 
 const searchHit: RuleSearchHit = {
   id: "pf1e-combat",
@@ -31,18 +31,13 @@ function createTools() {
     maxSearchCalls: 3,
     maxDocumentsRead: 8,
   });
-  const tools = createRuleTools({
+  const [search, read] = createRuleTools({
     client: new RulesClient("http://127.0.0.1:8765"),
     rulesetId: "pathfinder-1e",
     citations,
     budget,
   });
-  const search = tools.find((tool) => tool.name === "search_rules");
-  const read = tools.find((tool) => tool.name === "read_rules");
-  if (!search || !read) {
-    throw new Error("rule tools are incomplete");
-  }
-  return { search, read, citations };
+  return { search, read, citations, budget };
 }
 
 describe("rule tools integration", () => {
@@ -51,7 +46,7 @@ describe("rule tools integration", () => {
   });
 
   it("搜索候选后读取完整父文档并注册稳定引用", async () => {
-    const fetchMock = vi.fn().mockImplementation(async (url: string, init: RequestInit) => {
+    const fetchMock = vi.fn().mockImplementation(async (url: string, _init: RequestInit) => {
       if (url.endsWith("/search")) {
         return new Response(JSON.stringify({ data: [searchHit] }), { status: 200 });
       }
@@ -63,13 +58,14 @@ describe("rule tools integration", () => {
     vi.stubGlobal("fetch", fetchMock);
     const { search, read, citations } = createTools();
 
-    const searchResult = await search.execute("search-1", {
-      query: "什么时候触发借机攻击",
-      limit: 5,
-    });
-    const readResult = await read.execute("read-1", {
-      ids: [searchHit.id, searchHit.id],
-    });
+    const searchResult = await search.execute(
+      { query: "什么时候触发借机攻击", limit: 5 },
+      { toolCallId: "search-1" },
+    );
+    const readResult = await read.execute(
+      { ids: [searchHit.id, searchHit.id] },
+      { toolCallId: "read-1" },
+    );
 
     expect(searchResult.content[0]).toMatchObject({
       type: "text",
@@ -112,11 +108,43 @@ describe("rule tools integration", () => {
     const { search } = createTools();
 
     for (let index = 0; index < 3; index += 1) {
-      await search.execute(`search-${index}`, { query: `query-${index}` });
+      await search.execute({ query: `query-${index}` }, { toolCallId: `search-${index}` });
     }
 
-    await expect(search.execute("search-4", { query: "too-many" }))
+    await expect(search.execute({ query: "too-many" }, { toolCallId: "search-4" }))
       .rejects.toThrow("本轮最多允许搜索 3 次");
     expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("预算重置后可以继续搜索（新一轮用户问题）", async () => {
+    const fetchMock = vi.fn().mockImplementation(async () =>
+      new Response(JSON.stringify({ data: [] }), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const { search, budget } = createTools();
+
+    for (let index = 0; index < 3; index += 1) {
+      await search.execute({ query: `query-${index}` }, { toolCallId: `search-${index}` });
+    }
+    budget.reset();
+    await expect(search.execute({ query: "next-turn" }, { toolCallId: "search-next" }))
+      .resolves.toBeDefined();
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("AbortSignal 透传给规则客户端请求", async () => {
+    const fetchMock = vi.fn().mockImplementation(async () =>
+      new Response(JSON.stringify({ data: [] }), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const { search } = createTools();
+    const controller = new AbortController();
+
+    await search.execute({ query: "q" }, { toolCallId: "s", signal: controller.signal });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:8765/search",
+      expect.objectContaining({ signal: controller.signal }),
+    );
   });
 });

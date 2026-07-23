@@ -9,9 +9,13 @@ TrpgRuleAgent 是一个面向跑团规则的可扩展 Agent 平台。第一版�
 第一条可运行纵向链路已经建立，并已接入本地 BGE 向量检索：
 
 ```text
-CLI -> Pi Agent Runtime -> search_rules/read_rules 工具
+CLI -> 自有 Agent Runtime（零第三方运行时依赖）
+    -> ModelProvider（OpenAI-compatible Chat Completions 流式）
+    -> search_rules/read_rules 工具
     -> Python Retrieval Service -> BGE + Chroma -> PF Rule Pack
 ```
+
+Node 侧 Agent Core、规则 Agent 和 CLI 不依赖任何第三方运行时包，只使用 Node.js 22.19+ 内置的 fetch、AbortSignal 与 Web Streams；TypeScript、Vitest、tsx 仅作为开发依赖。ModelProvider 是可扩展接口，首版支持 OpenAI-compatible Chat Completions 协议（`LLM_PROVIDER=openai-compatible`）。
 
 仓库内 Rule Pack 只有明确标注的演示数据，用于验证工程链路，不能作为真实 PF 规则依据。本地可从用户持有的 CHM 导入真实父文档；原始 CHM、解包文件和生成索引均位于 Git 忽略的 `data/` 目录。
 
@@ -19,7 +23,7 @@ CLI -> Pi Agent Runtime -> search_rules/read_rules 工具
 
 ```text
 apps/cli                       流式命令行入口
-packages/agent                 Agent、工具预算、引用注册表和 Prompt
+packages/agent                 自有 Agent Runtime（core/ 业务无关内核、providers/ 模型接入、rule-agent/ 规则领域层）
 packages/rules-client          检索服务客户端
 packages/rules-types           跨语言接口对应的 TypeScript 类型
 services/retrieval-python      Python 检索、索引与评测服务
@@ -51,9 +55,8 @@ npm run setup:pf -- "/absolute/path/to/Pathfinder.chm"
 安装脚本会创建 `.env`。填写模型端点和密钥：
 
 ```dotenv
-LLM_PROVIDER=custom-openai
+LLM_PROVIDER=openai-compatible
 LLM_MODEL=your-model-id
-LLM_API=openai-completions
 LLM_BASE_URL=https://your-provider.example/v1
 LLM_API_KEY=your-api-key
 LLM_CONTEXT_WINDOW=128000
@@ -63,11 +66,7 @@ RETRIEVAL_BASE_URL=http://127.0.0.1:8765
 RULESET_ID=pathfinder-1e
 ```
 
-`.env` 已被 Git 忽略。不要把真实密钥填写到 `.env.example` 或提交到版本控制。如果本机 Pi Agent 已保存相同提供商的凭据，也可以删除 `LLM_API_KEY`，改用：
-
-```dotenv
-LLM_PI_AUTH_PROVIDER=deepseek
-```
+`LLM_MODEL`、`LLM_BASE_URL`、`LLM_API_KEY` 为必填项，缺失时 CLI 会给出明确的配置错误。`.env` 已被 Git 忽略。不要把真实密钥填写到 `.env.example` 或提交到版本控制。
 
 ### 3. 启动
 

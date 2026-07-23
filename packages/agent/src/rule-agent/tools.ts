@@ -1,23 +1,45 @@
-import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { Type } from "typebox";
 import type { RulesClient } from "@trpg-rule-agent/rules-client";
 import type { RuleDocument, RuleSearchHit } from "@trpg-rule-agent/rules-types";
+import type { JsonSchema } from "../core/schema.ts";
+import type { ToolDefinition } from "../core/tools.ts";
 import { ToolBudget } from "./budget.ts";
 import { CitationRegistry } from "./citations.ts";
 
-const searchParameters = Type.Object({
-  query: Type.String({ description: "用于规则库检索的独立、明确查询" }),
-  limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 10 })),
-  sourceIds: Type.Optional(Type.Array(Type.String(), { maxItems: 10 })),
-});
+const searchParameters: JsonSchema = {
+  type: "object",
+  properties: {
+    query: { type: "string", description: "用于规则库检索的独立、明确查询" },
+    limit: { type: "integer", minimum: 1, maximum: 10 },
+    sourceIds: { type: "array", items: { type: "string" }, maxItems: 10 },
+  },
+  required: ["query"],
+  additionalProperties: false,
+};
 
-const readParameters = Type.Object({
-  ids: Type.Array(Type.String(), {
-    minItems: 1,
-    maxItems: 8,
-    description: "search_rules 返回的规则文档 ID",
-  }),
-});
+const readParameters: JsonSchema = {
+  type: "object",
+  properties: {
+    ids: {
+      type: "array",
+      items: { type: "string" },
+      minItems: 1,
+      maxItems: 8,
+      description: "search_rules 返回的规则文档 ID",
+    },
+  },
+  required: ["ids"],
+  additionalProperties: false,
+};
+
+export interface SearchToolParams {
+  query: string;
+  limit?: number;
+  sourceIds?: string[];
+}
+
+export interface ReadToolParams {
+  ids: string[];
+}
 
 export interface SearchToolDetails {
   query: string;
@@ -36,13 +58,17 @@ export interface RuleToolsOptions {
   budget: ToolBudget;
 }
 
-export function createRuleTools(options: RuleToolsOptions): AgentTool[] {
-  const searchTool: AgentTool<typeof searchParameters, SearchToolDetails> = {
+export function createRuleTools(options: RuleToolsOptions): [
+  ToolDefinition<SearchToolParams>,
+  ToolDefinition<ReadToolParams>,
+] {
+  const searchTool: ToolDefinition<SearchToolParams> = {
     name: "search_rules",
     label: "搜索 PF 规则",
-    description: "按语义搜索 Pathfinder 规则。只返回候选摘要；需要引用或核对原文时必须继续调用 read_rules。",
+    description:
+      "按语义搜索 Pathfinder 规则。只返回候选摘要；需要引用或核对原文时必须继续调用 read_rules。",
     parameters: searchParameters,
-    async execute(_toolCallId, params, signal) {
+    async execute(params, context) {
       options.budget.consumeSearch();
       const hits = await options.client.search(
         {
@@ -51,7 +77,7 @@ export function createRuleTools(options: RuleToolsOptions): AgentTool[] {
           limit: params.limit ?? 8,
           ...(params.sourceIds ? { sourceIds: params.sourceIds } : {}),
         },
-        signal,
+        context.signal,
       );
 
       const text = hits.length === 0
@@ -66,22 +92,22 @@ export function createRuleTools(options: RuleToolsOptions): AgentTool[] {
 
       return {
         content: [{ type: "text", text }],
-        details: { query: params.query, hits },
+        details: { query: params.query, hits } satisfies SearchToolDetails,
       };
     },
   };
 
-  const readTool: AgentTool<typeof readParameters, ReadToolDetails> = {
+  const readTool: ToolDefinition<ReadToolParams> = {
     name: "read_rules",
     label: "读取完整 PF 规则",
     description: "根据搜索结果 ID 读取完整规则文档，并为每篇文档分配可验证的引用编号。",
     parameters: readParameters,
-    async execute(_toolCallId, params, signal) {
+    async execute(params, context) {
       const uniqueIds = [...new Set(params.ids)];
       options.budget.consumeRead(uniqueIds.length);
       const documents = await options.client.read(
         { rulesetId: options.rulesetId, ids: uniqueIds },
-        signal,
+        context.signal,
       );
       const registered = documents.map((document) => options.citations.register(document));
       const text = registered.map(({ label, document }) => [
@@ -99,7 +125,7 @@ export function createRuleTools(options: RuleToolsOptions): AgentTool[] {
             label,
             fullPath: document.fullPath,
           })),
-        },
+        } satisfies ReadToolDetails,
       };
     },
   };
