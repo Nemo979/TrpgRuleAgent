@@ -7,6 +7,17 @@ import type {
   RuleSource,
 } from "@trpg-rule-agent/rules-types";
 
+/**
+ * 检索能力抽象：本地 Python 服务、云端向量服务或测试 fake 都实现同一契约。
+ * Gateway/Agent 不感知具体部署位置。
+ */
+export interface RulesProvider {
+  health(signal?: AbortSignal): Promise<HealthResponse>;
+  search(input: RuleSearchRequest, signal?: AbortSignal): Promise<RuleSearchHit[]>;
+  read(input: ReadRulesRequest, signal?: AbortSignal): Promise<RuleDocument[]>;
+  sources(rulesetId: string, signal?: AbortSignal): Promise<RuleSource[]>;
+}
+
 export class RulesClientError extends Error {
   readonly status: number;
 
@@ -17,7 +28,7 @@ export class RulesClientError extends Error {
   }
 }
 
-export class RulesClient {
+export class RulesClient implements RulesProvider {
   readonly baseUrl: string;
 
   constructor(baseUrl: string) {

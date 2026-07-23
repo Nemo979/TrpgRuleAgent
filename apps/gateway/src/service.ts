@@ -7,6 +7,7 @@ import {
   type AgentRunContext,
   type RuleAgentConfig,
 } from "@trpg-rule-agent/agent";
+import type { RulesProvider } from "@trpg-rule-agent/rules-client";
 import { RulesClient } from "@trpg-rule-agent/rules-client";
 import type { GatewayConfig } from "./config.ts";
 import {
@@ -47,8 +48,8 @@ export type AgentFactory = (
 export interface CreateRuleAgentFactoryOptions {
   /** 检索服务地址：唯一由服务端注入的连接项，客户端不可覆盖。 */
   retrievalBaseUrl: string;
-  /** 测试可注入 RulesClient；默认按 retrievalBaseUrl 创建。 */
-  client?: RulesClient;
+  /** 可注入任意 RulesProvider；默认按 retrievalBaseUrl 创建 HTTP 客户端。 */
+  client?: RulesProvider;
 }
 
 /** 生产用 AgentFactory：session 配置 + 服务端 retrievalBaseUrl -> createRuleAgent。 */

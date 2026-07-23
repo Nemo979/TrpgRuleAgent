@@ -1,4 +1,4 @@
-import type { RulesClient } from "@trpg-rule-agent/rules-client";
+import type { RulesProvider } from "@trpg-rule-agent/rules-client";
 import type { AgentEvent } from "../core/events.ts";
 import type { AgentMessage } from "../core/messages.ts";
 import type { ModelProvider, ProviderRegistry } from "../core/provider.ts";
@@ -27,7 +27,7 @@ const MAX_MODEL_TURNS = 12;
 
 export interface CreateRuleAgentOptions {
   config: RuleAgentConfig;
-  client: RulesClient;
+  client: RulesProvider;
   /** 测试或扩展时可直接注入 Provider；默认按 config.provider 从 Registry 创建。 */
   provider?: ModelProvider;
   registry?: ProviderRegistry;

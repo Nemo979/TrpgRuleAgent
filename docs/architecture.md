@@ -69,6 +69,10 @@ apps/gateway/src/
 
 协议与限制详见 [Gateway API](gateway-api.md)。核心不变量：模型 Key 的生命周期等于一次 turn 请求；模型连接配置（provider/model/baseUrl/rulesetId）由用户创建会话时提交、逐会话生效，`retrievalBaseUrl` 始终由服务端注入；SessionStore 不存在凭据字段；失败 turn 不污染会话历史。
 
+### 检索服务部署抽象
+
+`packages/rules-client` 暴露 `RulesProvider` 契约，`RulesClient` 是其零依赖 HTTP 实现。`RETRIEVAL_BASE_URL` 可以指向本地 Python 检索服务，也可以指向满足同一 JSON 接口的云端向量/混合检索服务；Gateway 和 Agent 不需要感知部署位置。后续接入特定云向量数据库时，只需新增一个 `RulesProvider` 实现，不改变规则 Agent、Gateway API 或前端宿主。
+
 ### 阶段六：Gateway 生产基础加固
 
 Gateway 增加了可配置的单进程来源限流：默认每个 `remoteAddress` 在 60 秒内最多 120 个非健康检查/非 OPTIONS 请求，超限返回 `429 rate_limited` 与 `Retry-After`。该机制只保护单进程资源，不假设多实例共享状态；多实例生产部署仍应在反向代理或 API Gateway 层配置共享限流。原有请求体、输入长度、CORS、BYOK 和错误脱敏边界保持不变。

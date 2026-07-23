@@ -1,4 +1,4 @@
-import type { RulesClient } from "@trpg-rule-agent/rules-client";
+import type { RulesProvider } from "@trpg-rule-agent/rules-client";
 import type { RuleDocument, RuleSearchHit } from "@trpg-rule-agent/rules-types";
 import type { JsonSchema } from "../core/schema.ts";
 import type { ToolDefinition } from "../core/tools.ts";
@@ -52,7 +52,7 @@ export interface ReadToolDetails {
 }
 
 export interface RuleToolsOptions {
-  client: RulesClient;
+  client: RulesProvider;
   rulesetId: string;
   citations: CitationRegistry;
   budget: ToolBudget;
