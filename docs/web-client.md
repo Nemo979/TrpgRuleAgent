@@ -242,7 +242,7 @@ SDK 内置可选的 `WeChatTransport`（`packages/gateway-client/src/wechat-tran
 ```ts
 import { GatewayClient, WeChatTransport } from "@trpg-rule-agent/gateway-client";
 
-// 以下封装位于未来的 apps/miniprogram（宿主侧），SDK 本身不包含任何 wx 调用。
+// 以下封装已由 apps/miniprogram/src/wx-host.ts 的 createWeChatAdapters 提供（宿主侧），SDK 本身不包含任何 wx 调用；现在可直接复用 createWeChatAdapters + MiniProgramSession。
 const transport = new WeChatTransport({
   baseUrl: "https://gateway.example.com",
   request: (p) =>
@@ -267,13 +267,22 @@ const transport = new WeChatTransport({
 const client = new GatewayClient({ transport }); // 之后的用法与浏览器完全相同
 ```
 
-> 注意：部分基础库版本的 `onHeadersReceived` 不含 `statusCode`，宿主适配层需自行兜底，并保证“先 `onHeaders` 后首个 chunk”的调用顺序。本仓库刻意**不包含**真正的小程序工程（`apps/miniprogram` 属于未来工作），SDK 侧只交付传输层与契约测试。
+> 注意：部分基础库版本的 `onHeadersReceived` 不含 `statusCode`，宿主适配层需自行兜底，并保证“先 `onHeaders` 后首个 chunk”的调用顺序。`apps/miniprogram` 提供接入骨架（适配边界 `createWeChatAdapters` + 会话门面 `MiniProgramSession` + 纯 Node 测试），完整小程序工程仍由开发者在微信开发者工具中创建；SDK 侧只交付传输层与契约测试。
+
+### 接入步骤简述
+
+1. 在微信开发者工具中自行创建小程序工程（仓库不含完整工程）。
+2. 把 `apps/miniprogram/src/` 源码复制进工程，注入一行宿主适配：`host = { request: (o) => wx.request(o) }`，经 `createWeChatAdapters(host)` 得到 SDK 所需适配接口。
+3. 在小程序后台把 Gateway 域名配置为 request 合法域名（**HTTPS 必须**，基础库 ≥ 2.20.1 支持 `enableChunked`）；BYOK 模型端点由 Gateway 转发，无需配置模型厂商域名。
+4. 页面 `onUnload` 必须调用 `MiniProgramSession.destroy()`，清空内存凭据与会话、停止后续状态回调。
+
+完整页面绑定示例与部署前提见 [apps/miniprogram/README.md](../apps/miniprogram/README.md)。
 
 ## 未来扩展
 
 `GatewayTransport` 是与 DOM 解耦的抽象，因此接入新的宿主只需新增一个传输实现，而 `GatewayClient` 与协议层完全复用：
 
-- **微信小程序**：传输层 `WeChatTransport` 已就绪（见上节），剩余工作只是小程序视图层与 `wx.request` 适配器封装（`apps/miniprogram`）。
+- **微信小程序**：传输层 `WeChatTransport` 与接入骨架 `apps/miniprogram`（适配边界 + 会话门面 + 纯 Node 测试）均已就绪，剩余工作是开发者侧的视图层（WXML/WXSS）与工程配置（request 合法域名、HTTPS、基础库 ≥ 2.20.1 支持 enableChunked）。
 - **其他宿主**：任何提供 `fetch` 语义或可分块读取响应的环境，都可实现 `GatewayTransport` 接入。
 
 这一分层保证 Agent Core 与 Gateway 的“零第三方运行时依赖”约束保持不变：SDK 自身同样零运行时依赖，新宿主只贡献一个薄传输层，不引入运行时耦合。

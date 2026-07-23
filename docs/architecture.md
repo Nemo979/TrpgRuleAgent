@@ -95,9 +95,24 @@ packages/gateway-client/src/
                  deleteSession/disconnect/reset/status），token 存于 #private 字段
 ```
 
+`apps/miniprogram`（宿主接入骨架，非完整可发布工程；仅依赖 @trpg-rule-agent/gateway-client，不引入微信 SDK）：
+
+```text
+apps/miniprogram/src/
+  wx-host.ts         宿主适配边界：定义最小结构化声明 WxHost / WxHostRequestOptions /
+                     WxHostRequestTask（不引用 wx 全局），并导出 createWeChatAdapters(host)，
+                     把宿主注入的 wx.request 封装为 SDK 需要的 WeChatRequestAdapter 与
+                     WeChatStreamAdapter（保证“先 onHeaders 后首个 chunk”；宿主 fail/onError
+                     错误对象在边界被丢弃，只向 SDK 传固定文案占位错误）
+  session-facade.ts  页面级会话门面 MiniProgramSession：API Key 仅存 #private 内存字段，
+                     绝不写入 wx Storage/URL/日志/持久化；生命周期（connect/send/stop/
+                     newSession/destroy）负责内存凭据与状态清理
+apps/miniprogram/test/  纯 Node/Vitest 单测（wx-adapter / session-facade / security），无需微信环境
+```
+
 传输抽象 `GatewayTransport` 与 DOM 解耦：`GatewayClient` 只消费 `request`/`stream` 两个能力，具体传输可替换（浏览器 `BrowserTransport`、小程序 `WeChatTransport`、测试 mock），协议层与客户端逻辑完全复用。
 
-小程序接入边界：`WeChatTransport` 保持与 `BrowserTransport` 相同的 Transport 契约——`AbortSignal` 取消归一化为 `TransportError("aborted")`、其余传输失败归一化为 `TransportError("network")`（错误绝不携带 URL/请求头/API Key/底层 cause）；API Key 仍只在 `GatewayClient.runTurn` 每次调用时经 `X-Model-Api-Key` 头传入，不写入 Transport 实例状态或任何持久化介质。仓库当前只交付 SDK 传输层与契约测试，真正的小程序工程（`apps/miniprogram` 视图层与 `wx.request` 适配器封装）属于未来工作，接入细节见 [Web 客户端文档](web-client.md)“微信小程序接入”。
+小程序接入边界：`WeChatTransport` 保持与 `BrowserTransport` 相同的 Transport 契约——`AbortSignal` 取消归一化为 `TransportError("aborted")`、其余传输失败归一化为 `TransportError("network")`（错误绝不携带 URL/请求头/API Key/底层 cause）；API Key 仍只在 `GatewayClient.runTurn` 每次调用时经 `X-Model-Api-Key` 头传入，不写入 Transport 实例状态或任何持久化介质。该骨架（`apps/miniprogram`）已交付，分层为：Page（开发者创建）→ `MiniProgramSession`（会话门面：凭据内存态与生命周期清理）→ `GatewayClient`/`WeChatTransport`（协议复用，SSE 解析与错误分类零复制）→ `createWeChatAdapters`（宿主适配边界，唯一由开发者注入 `wx.request` 的位置）。强调：仓库仍不包含完整小程序工程；`wx` 错误对象在适配边界被丢弃、绝不透传；API Key / session token 不进入 Storage / URL / 日志。接入细节见 [Web 客户端文档](web-client.md)“微信小程序接入”与 apps/miniprogram/README.md。
 
 ### apps/web（state / controller / view 分离）
 
