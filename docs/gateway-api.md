@@ -26,7 +26,7 @@ npm run gateway
 | `GATEWAY_SESSION_TTL_MS` | `1800000`（30 分钟） | 会话空闲 TTL，每次访问续期 |
 | `GATEWAY_RATE_LIMIT_MAX_REQUESTS` | `120` | 单进程、单来源限流窗口内最大请求数；健康检查和 OPTIONS 不计入 |
 | `GATEWAY_RATE_LIMIT_WINDOW_MS` | `60000` | 单进程来源限流窗口（毫秒） |
-| `RETRIEVAL_BASE_URL` | `http://127.0.0.1:8765` | 规则检索服务地址；可替换为云端向量/混合检索服务的 HTTPS 地址 |
+| `RETRIEVAL_BASE_URL` | `http://127.0.0.1:8765` | 规则检索服务地址；可替换为云端向量/混合检索服务的 HTTPS 地址；不得携带 userinfo、query 或 fragment |
 | `RETRIEVAL_API_KEY` | 空 | 可选，Gateway 访问云端检索服务的服务端令牌；不会下发给客户端或写入会话 |
 | `GATEWAY_ALLOWED_ORIGINS` | 空 | CORS Origin 白名单，逗号分隔；为空则不允许任何跨域来源 |
 | `GATEWAY_MODEL_BASE_URL_ALLOWLIST` | 空 | 模型 Base URL **前缀**白名单，逗号分隔（如 `https://api.openai.com/v1`）。按 origin + 路径边界匹配：`/v1` 命中 `/v1`、`/v1/chat`，不命中 `/v1x` 或 `/admin`。条目本身必须为 HTTPS、不含 userinfo/query/fragment |

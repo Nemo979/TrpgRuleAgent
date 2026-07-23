@@ -66,6 +66,19 @@ function parsePositiveInt(value: string | undefined, fallback: number, name: str
   return parsed;
 }
 
+function parseRetrievalBaseUrl(value: string | undefined): string {
+  const raw = value ?? DEFAULT_RETRIEVAL_BASE_URL;
+  try {
+    const url = new URL(raw);
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+      throw new Error();
+    }
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    throw new GatewayError(500, "configuration_error", "环境变量 RETRIEVAL_BASE_URL 必须是有效的 HTTP(S) 地址");
+  }
+}
+
 /**
  * 从环境变量加载 Gateway 配置。
  * 凭据类变量（LLM_API_KEY）与全局模型变量（LLM_MODEL/LLM_BASE_URL）在此被刻意忽略。
@@ -107,7 +120,7 @@ export function loadGatewayConfig(env: NodeJS.ProcessEnv): GatewayConfig {
       DEFAULT_RATE_LIMIT_WINDOW_MS,
       "GATEWAY_RATE_LIMIT_WINDOW_MS",
     ),
-    retrievalBaseUrl: env.RETRIEVAL_BASE_URL ?? DEFAULT_RETRIEVAL_BASE_URL,
+    retrievalBaseUrl: parseRetrievalBaseUrl(env.RETRIEVAL_BASE_URL),
     ...(env.RETRIEVAL_API_KEY ? { retrievalApiKey: env.RETRIEVAL_API_KEY } : {}),
     allowedRulesets,
     defaultRulesetId,

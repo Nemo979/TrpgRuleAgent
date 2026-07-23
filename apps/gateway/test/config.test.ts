@@ -12,4 +12,13 @@ describe("loadGatewayConfig retrieval credentials", () => {
     const config = loadGatewayConfig({});
     expect(config).not.toHaveProperty("retrievalApiKey");
   });
+
+  it("rejects retrieval URLs carrying credentials or query parameters", () => {
+    expect(() => loadGatewayConfig({ RETRIEVAL_BASE_URL: "https://user:pass@rules.example/api" })).toThrow(
+      "RETRIEVAL_BASE_URL",
+    );
+    expect(() => loadGatewayConfig({ RETRIEVAL_BASE_URL: "https://rules.example/api?token=secret" })).toThrow(
+      "RETRIEVAL_BASE_URL",
+    );
+  });
 });
