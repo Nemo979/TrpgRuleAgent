@@ -63,10 +63,15 @@ apps/gateway/src/
                       不依赖 Provider 自觉；sources 含 documentId）
   service.ts          编排：会话（BYOK 连接配置绑定会话）、并发互斥（409）、
                       per-turn Key 注入、按会话配置建 Agent、成功才写回历史
+  rate-limit.ts        单进程来源限流（生产多实例应在反向代理层做共享限流）
   server.ts / index.ts  路由与进程入口
 ```
 
 协议与限制详见 [Gateway API](gateway-api.md)。核心不变量：模型 Key 的生命周期等于一次 turn 请求；模型连接配置（provider/model/baseUrl/rulesetId）由用户创建会话时提交、逐会话生效，`retrievalBaseUrl` 始终由服务端注入；SessionStore 不存在凭据字段；失败 turn 不污染会话历史。
+
+### 阶段六：Gateway 生产基础加固
+
+Gateway 增加了可配置的单进程来源限流：默认每个 `remoteAddress` 在 60 秒内最多 120 个非健康检查/非 OPTIONS 请求，超限返回 `429 rate_limited` 与 `Retry-After`。该机制只保护单进程资源，不假设多实例共享状态；多实例生产部署仍应在反向代理或 API Gateway 层配置共享限流。原有请求体、输入长度、CORS、BYOK 和错误脱敏边界保持不变。
 
 ## 阶段三：共享 Gateway 客户端 SDK 与 Web 调试 UI
 

@@ -25,6 +25,8 @@ function testConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
     allowLocalhostModel: false,
     maxBodyBytes: 16 * 1024,
     maxInputChars: 8000,
+    rateLimitMaxRequests: 120,
+    rateLimitWindowMs: 60_000,
     retrievalBaseUrl: "http://127.0.0.1:8765",
     allowedRulesets: ["pathfinder-1e", "demo"],
     defaultRulesetId: "pathfinder-1e",
@@ -144,7 +146,12 @@ async function startGateway(
   const config = testConfig(configOverrides);
   const sessions = new InMemorySessionStore({ ttlMs: config.sessionTtlMs });
   const service = new GatewayService({ config, sessions, createAgent: factory });
-  const server = createGatewayServer({ service, allowedOrigins: config.allowedOrigins });
+  const server = createGatewayServer({
+    service,
+    allowedOrigins: config.allowedOrigins,
+    rateLimitMaxRequests: config.rateLimitMaxRequests,
+    rateLimitWindowMs: config.rateLimitWindowMs,
+  });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address() as AddressInfo;
   const handle: TestServer = {

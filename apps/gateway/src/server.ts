@@ -2,11 +2,14 @@ import { createServer, type Server } from "node:http";
 import { assertNoCredentialQuery } from "./credentials.ts";
 import { GatewayError } from "./errors.ts";
 import { applySecurityHeaders, handleCors, sendError } from "./http.ts";
+import { RequestRateLimiter } from "./rate-limit.ts";
 import type { GatewayService } from "./service.ts";
 
 export interface CreateGatewayServerOptions {
   service: GatewayService;
   allowedOrigins: string[];
+  rateLimitMaxRequests?: number;
+  rateLimitWindowMs?: number;
 }
 
 /**
@@ -15,6 +18,10 @@ export interface CreateGatewayServerOptions {
  */
 export function createGatewayServer(options: CreateGatewayServerOptions): Server {
   const { service, allowedOrigins } = options;
+  const limiter =
+    options.rateLimitMaxRequests && options.rateLimitWindowMs
+      ? new RequestRateLimiter(options.rateLimitWindowMs, options.rateLimitMaxRequests)
+      : undefined;
 
   return createServer((req, res) => {
     void (async () => {
@@ -25,6 +32,13 @@ export function createGatewayServer(options: CreateGatewayServerOptions): Server
 
       try {
         const url = new URL(req.url ?? "/", "http://gateway.internal");
+        if (limiter && req.method !== "OPTIONS" && url.pathname !== "/health") {
+          const source = req.socket.remoteAddress ?? "unknown";
+          if (!limiter.allow(source)) {
+            res.setHeader("Retry-After", "60");
+            throw new GatewayError(429, "rate_limited", "请求过于频繁，请稍后再试");
+          }
+        }
         const route = `${req.method ?? "GET"} ${url.pathname}`;
 
         if (url.pathname.startsWith("/v1/")) {

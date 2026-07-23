@@ -22,6 +22,8 @@ function main(): void {
   const server = createGatewayServer({
     service,
     allowedOrigins: config.allowedOrigins,
+    rateLimitMaxRequests: config.rateLimitMaxRequests,
+    rateLimitWindowMs: config.rateLimitWindowMs,
   });
 
   server.listen(config.port, config.host, () => {

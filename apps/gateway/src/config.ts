@@ -23,6 +23,10 @@ export interface GatewayConfig {
   maxBodyBytes: number;
   /** 单次 turn 输入字符数上限。 */
   maxInputChars: number;
+  /** 单个来源在窗口内允许的请求数（健康检查与 OPTIONS 除外）。 */
+  rateLimitMaxRequests: number;
+  /** 请求限流窗口（毫秒）。 */
+  rateLimitWindowMs: number;
   /** 检索服务地址：始终由服务端注入，客户端不可覆盖。 */
   retrievalBaseUrl: string;
   /** 允许客户端选择的规则集集合。 */
@@ -34,6 +38,8 @@ export interface GatewayConfig {
 export const DEFAULT_SESSION_TTL_MS = 30 * 60 * 1000;
 export const DEFAULT_MAX_BODY_BYTES = 16 * 1024;
 export const DEFAULT_MAX_INPUT_CHARS = 8000;
+export const DEFAULT_RATE_LIMIT_MAX_REQUESTS = 120;
+export const DEFAULT_RATE_LIMIT_WINDOW_MS = 60_000;
 const DEFAULT_RETRIEVAL_BASE_URL = "http://127.0.0.1:8765";
 const DEFAULT_RULESET_ID = "pathfinder-1e";
 
@@ -89,6 +95,16 @@ export function loadGatewayConfig(env: NodeJS.ProcessEnv): GatewayConfig {
     allowLocalhostModel: env.GATEWAY_ALLOW_LOCALHOST_MODEL === "true",
     maxBodyBytes: DEFAULT_MAX_BODY_BYTES,
     maxInputChars: DEFAULT_MAX_INPUT_CHARS,
+    rateLimitMaxRequests: parsePositiveInt(
+      env.GATEWAY_RATE_LIMIT_MAX_REQUESTS,
+      DEFAULT_RATE_LIMIT_MAX_REQUESTS,
+      "GATEWAY_RATE_LIMIT_MAX_REQUESTS",
+    ),
+    rateLimitWindowMs: parsePositiveInt(
+      env.GATEWAY_RATE_LIMIT_WINDOW_MS,
+      DEFAULT_RATE_LIMIT_WINDOW_MS,
+      "GATEWAY_RATE_LIMIT_WINDOW_MS",
+    ),
     retrievalBaseUrl: env.RETRIEVAL_BASE_URL ?? DEFAULT_RETRIEVAL_BASE_URL,
     allowedRulesets,
     defaultRulesetId,
