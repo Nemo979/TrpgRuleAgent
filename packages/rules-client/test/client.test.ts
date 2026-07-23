@@ -2,6 +2,36 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { RulesClient, RulesClientError } from "../src/index.ts";
 
 describe("RulesClient", () => {
+  it("supports injected fetch and cloud request headers", async () => {
+    const calls: RequestInit[] = [];
+    const client = new RulesClient("https://rules.example", {
+      headers: { authorization: "Bearer server-token" },
+      fetch: async (_input, init) => {
+        calls.push(init ?? {});
+        return new Response(JSON.stringify({ data: { status: "ok", documentCount: 0, rulesets: [] } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    await expect(client.health()).resolves.toEqual({ status: "ok", documentCount: 0, rulesets: [] });
+    expect(calls[0]?.headers).toMatchObject({ authorization: "Bearer server-token" });
+    expect(calls[0]?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("turns an unresponsive cloud service into a 504 error", async () => {
+    const client = new RulesClient("https://rules.example", {
+      timeoutMs: 5,
+      fetch: async (_input, init) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+        }),
+    });
+
+    await expect(client.health()).rejects.toMatchObject({ status: 504, message: "检索服务请求超时" });
+  });
+
   afterEach(() => {
     vi.unstubAllGlobals();
   });

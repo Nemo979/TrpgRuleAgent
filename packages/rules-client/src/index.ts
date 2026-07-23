@@ -28,11 +28,29 @@ export class RulesClientError extends Error {
   }
 }
 
+export interface RulesClientOptions {
+  /** 用于云端检索服务的服务端鉴权头；不会暴露给浏览器。 */
+  headers?: Record<string, string>;
+  /** 请求超时（毫秒）；默认 15 秒。 */
+  timeoutMs?: number;
+  /** 测试或运行时适配器可注入 fetch，默认使用全局 fetch。 */
+  fetch?: typeof fetch;
+}
+
 export class RulesClient implements RulesProvider {
   readonly baseUrl: string;
+  private readonly headers: Record<string, string>;
+  private readonly timeoutMs: number;
+  private readonly fetchImpl: typeof fetch;
 
-  constructor(baseUrl: string) {
+  constructor(baseUrl: string, options: RulesClientOptions = {}) {
     this.baseUrl = baseUrl.replace(/\/$/, "");
+    this.headers = { ...options.headers };
+    this.timeoutMs = options.timeoutMs ?? 15_000;
+    this.fetchImpl = options.fetch ?? fetch;
+    if (!Number.isInteger(this.timeoutMs) || this.timeoutMs <= 0) {
+      throw new RangeError("RulesClient timeoutMs must be a positive integer");
+    }
   }
 
   health(signal?: AbortSignal): Promise<HealthResponse> {
@@ -67,18 +85,45 @@ export class RulesClient implements RulesProvider {
   }
 
   private async request<T>(path: string, init: RequestInit): Promise<T> {
-    const response = await fetch(`${this.baseUrl}${path}`, {
-      ...init,
-      headers: {
-        "content-type": "application/json",
-        ...init.headers,
-      },
-    });
-
-    const body = (await response.json()) as { data?: T; error?: string };
-    if (!response.ok || body.data === undefined) {
-      throw new RulesClientError(body.error ?? `Request failed: ${response.status}`, response.status);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const externalSignal = init.signal;
+    const abort = (): void => controller.abort();
+    externalSignal?.addEventListener("abort", abort, { once: true });
+    try {
+      const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+        ...init,
+        signal: controller.signal,
+        headers: {
+          "content-type": "application/json",
+          ...this.headers,
+          ...init.headers,
+        },
+      });
+      let body: { data?: T; error?: string };
+      try {
+        body = (await response.json()) as { data?: T; error?: string };
+      } catch {
+        throw new RulesClientError("检索服务返回了无效响应", response.status);
+      }
+      if (!response.ok || body.data === undefined) {
+        throw new RulesClientError(body.error ?? `Request failed: ${response.status}`, response.status);
+      }
+      return body.data;
+    } catch (error) {
+      if (error instanceof RulesClientError) {
+        throw error;
+      }
+      if (externalSignal?.aborted) {
+        throw new RulesClientError("检索请求已取消", 499);
+      }
+      if (controller.signal.aborted) {
+        throw new RulesClientError("检索服务请求超时", 504);
+      }
+      throw new RulesClientError("检索服务不可用", 503);
+    } finally {
+      clearTimeout(timer);
+      externalSignal?.removeEventListener("abort", abort);
     }
-    return body.data;
   }
 }
