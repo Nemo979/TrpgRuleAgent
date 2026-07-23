@@ -36,6 +36,16 @@ export {
 export { BrowserTransport, type BrowserTransportOptions } from "./browser-transport.ts";
 
 export {
+  WeChatTransport,
+  type WeChatTransportOptions,
+  type WeChatRequestAdapter,
+  type WeChatRequestParams,
+  type WeChatRequestTask,
+  type WeChatStreamAdapter,
+  type WeChatStreamParams,
+} from "./wechat-transport.ts";
+
+export {
   GatewayClient,
   type GatewayClientOptions,
   type GatewaySessionStatus,

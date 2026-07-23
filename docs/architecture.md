@@ -88,11 +88,16 @@ packages/gateway-client/src/
                  （只携带 network/aborted 归一化分类，绝不透出头/URL/cause）
   browser-transport.ts  BrowserTransport：fetch + ReadableStream 实现；
                  redirect:"error" 防 SSRF、credentials:"omit"
+  wechat-transport.ts   WeChatTransport（可选）：微信小程序传输实现；不依赖 wx 全局，
+                 由宿主注入最小适配接口（WeChatRequestAdapter / WeChatStreamAdapter），
+                 把回调式分块推送适配为 AsyncIterable<Uint8Array>
   client.ts      GatewayClient：高层 API（createSession/runTurn/abort/
                  deleteSession/disconnect/reset/status），token 存于 #private 字段
 ```
 
-传输抽象 `GatewayTransport` 与 DOM 解耦：`GatewayClient` 只消费 `request`/`stream` 两个能力，具体传输可替换（浏览器 `BrowserTransport`、测试 mock、未来的 `WeChatTransport`），协议层与客户端逻辑完全复用。
+传输抽象 `GatewayTransport` 与 DOM 解耦：`GatewayClient` 只消费 `request`/`stream` 两个能力，具体传输可替换（浏览器 `BrowserTransport`、小程序 `WeChatTransport`、测试 mock），协议层与客户端逻辑完全复用。
+
+小程序接入边界：`WeChatTransport` 保持与 `BrowserTransport` 相同的 Transport 契约——`AbortSignal` 取消归一化为 `TransportError("aborted")`、其余传输失败归一化为 `TransportError("network")`（错误绝不携带 URL/请求头/API Key/底层 cause）；API Key 仍只在 `GatewayClient.runTurn` 每次调用时经 `X-Model-Api-Key` 头传入，不写入 Transport 实例状态或任何持久化介质。仓库当前只交付 SDK 传输层与契约测试，真正的小程序工程（`apps/miniprogram` 视图层与 `wx.request` 适配器封装）属于未来工作，接入细节见 [Web 客户端文档](web-client.md)“微信小程序接入”。
 
 ### apps/web（state / controller / view 分离）
 

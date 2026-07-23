@@ -15,6 +15,7 @@
 - **协议层与 SDK 实现解耦**：SDK 只依赖 Gateway 的公开 wire 协议（见 `docs/gateway-api.md`），不导入 `apps/gateway` 或 `packages/agent` 的任何内部类型。
 - **GatewayTransport 抽象**：一个与 DOM/宿主尽量解耦的传输接口（`request` + `stream`）。具体传输实现可替换，GatewayClient 完全不感知底层。
 - **BrowserTransport**：基于原生 `fetch` + `ReadableStream` 的浏览器实现。
+- **WeChatTransport（可选）**：面向微信小程序宿主的传输实现；微信能力（`wx.request` 等）由宿主封装成最小适配接口注入，SDK 不依赖 `wx` 全局对象（见下文“微信小程序接入”）。
 
 为什么不使用 `EventSource`？
 
@@ -221,11 +222,58 @@ http://localhost:5173/?mock=1
 
 > mock 分支以 `import.meta.env.DEV` 静态门控：生产构建时该条件被替换为 `false`，整个分支（含动态 `import("./mock-transport.ts")`）被 tree-shake 移除，**生产 bundle 不含任何 mock 代码 / token / fixture**（可用 `grep -r "MockTransport\|mock-transport" apps/web/dist/` 验证为空）。生产环境访问 `?mock=1` 无效，永远走真实路径。
 
+## 微信小程序接入（WeChatTransport）
+
+SDK 内置可选的 `WeChatTransport`（`packages/gateway-client/src/wechat-transport.ts`），
+让微信小程序宿主复用同一套 `GatewayClient` / SSE 协议 / typed 事件 / 错误分类 / 脱敏逻辑。
+
+### 边界与不变量
+
+- **SDK 不依赖 `wx` 全局对象，也不引入微信 SDK / 任何运行时第三方依赖**。微信能力由宿主封装成两个最小适配器注入：
+  - `request: WeChatRequestAdapter` —— 普通 JSON 请求（宿主用 `wx.request` 封装，回调式 `success/fail`，返回可 `abort` 的任务对象）；
+  - `streamRequest: WeChatStreamAdapter` —— 分块流式请求（宿主用 `wx.request({ enableChunked: true })` + `RequestTask.onHeadersReceived/onChunkReceived` 封装，回调 `onHeaders/onChunkReceived/onComplete/onError`）。
+- `WeChatTransport` 把回调式分块推送适配为与 `BrowserTransport` 相同的 `AsyncIterable<Uint8Array>`，SSE 解析（`parseSseFrames`）、事件白名单投影、`done` 终止判定全部复用，不假设 Node 或浏览器专有 API。
+- **契约与 BrowserTransport 一致**：`AbortSignal` 取消 → `TransportError("aborted")`；其余传输层失败 → `TransportError("network")`；错误只携带归一化分类与固定文案，**绝不携带 URL、请求头、API Key 或底层 cause**（宿主的 `fail/onError` 错误对象会被丢弃而非透传）。
+- **API Key 仍只由 `GatewayClient.runTurn` 每次调用传入**，仅经 `X-Model-Api-Key` 请求头发出；`WeChatTransport` 实例不保存任何凭据，也不触碰小程序 Storage。
+- `baseUrl` **必填且必须是绝对 http(s) URL**（小程序没有“同源相对路径”概念），域名需在小程序后台配置为 request 合法域名。
+
+### 宿主接入示意
+
+```ts
+import { GatewayClient, WeChatTransport } from "@trpg-rule-agent/gateway-client";
+
+// 以下封装位于未来的 apps/miniprogram（宿主侧），SDK 本身不包含任何 wx 调用。
+const transport = new WeChatTransport({
+  baseUrl: "https://gateway.example.com",
+  request: (p) =>
+    wx.request({
+      url: p.url, method: p.method, header: p.header, data: p.data,
+      dataType: "其他", responseType: "text",   // 关闭自动 JSON 解析，返回纯文本
+      success: (res) => p.success({ statusCode: res.statusCode, data: res.data }),
+      fail: p.fail,
+    }),
+  streamRequest: (p) => {
+    const task = wx.request({
+      url: p.url, method: p.method, header: p.header, data: p.data,
+      enableChunked: true,
+      success: () => p.onComplete(), fail: p.onError,
+    });
+    task.onHeadersReceived((res) => p.onHeaders({ statusCode: res.statusCode, header: res.header }));
+    task.onChunkReceived((res) => p.onChunkReceived(res.data));
+    return task;
+  },
+});
+
+const client = new GatewayClient({ transport }); // 之后的用法与浏览器完全相同
+```
+
+> 注意：部分基础库版本的 `onHeadersReceived` 不含 `statusCode`，宿主适配层需自行兜底，并保证“先 `onHeaders` 后首个 chunk”的调用顺序。本仓库刻意**不包含**真正的小程序工程（`apps/miniprogram` 属于未来工作），SDK 侧只交付传输层与契约测试。
+
 ## 未来扩展
 
 `GatewayTransport` 是与 DOM 解耦的抽象，因此接入新的宿主只需新增一个传输实现，而 `GatewayClient` 与协议层完全复用：
 
-- **微信小程序**：新增 `WeChatTransport`，基于 `wx.request` + 手动分块读取流式响应，再配一个小程序视图层；`GatewayClient`、typed 事件、错误分类、脱敏逻辑均无需改动。
+- **微信小程序**：传输层 `WeChatTransport` 已就绪（见上节），剩余工作只是小程序视图层与 `wx.request` 适配器封装（`apps/miniprogram`）。
 - **其他宿主**：任何提供 `fetch` 语义或可分块读取响应的环境，都可实现 `GatewayTransport` 接入。
 
 这一分层保证 Agent Core 与 Gateway 的“零第三方运行时依赖”约束保持不变：SDK 自身同样零运行时依赖，新宿主只贡献一个薄传输层，不引入运行时耦合。

@@ -26,7 +26,9 @@ apps/cli                       流式命令行入口
 apps/gateway                   BYOK Agent Gateway（HTTP/SSE，模型 Key 由客户端每次请求携带，服务端零持久化）
 apps/web                       基于 Vite 的浏览器调试 UI（零运行时依赖，静态产物；详见 [Web 客户端](docs/web-client.md)）
 packages/agent                 自有 Agent Runtime（core/ 业务无关内核、providers/ 模型接入、rule-agent/ 规则领域层）
-packages/gateway-client        BYOK Gateway 共享客户端 SDK（零运行时依赖；[Web 客户端](docs/web-client.md) 介绍）
+packages/gateway-client        BYOK Gateway 共享客户端 SDK（零运行时依赖；内置 BrowserTransport 与可选的
+                               微信小程序 WeChatTransport——不依赖 wx 全局，由宿主注入最小适配接口；
+                               [Web 客户端](docs/web-client.md) 介绍）
 packages/rules-client          检索服务客户端
 packages/rules-types           跨语言接口对应的 TypeScript 类型
 services/retrieval-python      Python 检索、索引与评测服务
@@ -111,6 +113,8 @@ npm run web:preview
 ```
 
 Web UI 默认走真实 Gateway（同源相对路径，建议生产用同源反向代理避免 CORS 与凭据跨域）；仅当【开发模式（`import.meta.env.DEV`）+ URL 带 `?mock=1`】双条件同时满足时，才动态加载内置 mock 传输做无后端演示。该分支以 `import.meta.env.DEV` 静态门控被 tree-shake，因此**生产构建 / `web:preview` 中 `?mock=1` 无效，且产物不含任何 mock 代码**。API Key 与 session token 只在浏览器内存、刷新即丢失，绝不写入 `localStorage`/`cookie` 等。启动方式、安全模型、CORS 与同源反代部署详见 [Web 客户端](docs/web-client.md)。
+
+SDK 另内置可选的 `WeChatTransport`，供未来微信小程序宿主（`apps/miniprogram`，暂未创建）复用同一套 `GatewayClient` 与 SSE 协议：微信能力由宿主封装成最小适配接口注入，SDK 不依赖 `wx` 全局、不引入微信 SDK；错误归一化与“API Key 仅随 `runTurn` 每次经请求头传入、绝不落盘”的边界与浏览器端完全一致。接入说明见 [Web 客户端](docs/web-client.md) 的“微信小程序接入”。
 
 ## 演示模式（无需规则文件）
 

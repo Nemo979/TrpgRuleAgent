@@ -48,6 +48,20 @@ describe("源码静态安全断言", () => {
     expect(content).toContain('redirect: "error"');
   });
 
+  it("wechat-transport.ts 不引用 wx 全局对象（微信能力只能由宿主注入）", () => {
+    const content = readFileSync(join(SRC_DIR, "wechat-transport.ts"), "utf8");
+    const code = stripComments(content);
+    expect(code).not.toMatch(/\bwx\s*[.[]/);
+    expect(code).not.toContain("globalThis.wx");
+  });
+
+  it("wechat-transport.ts 不把 apiKey/凭据写入实例字段", () => {
+    const content = readFileSync(join(SRC_DIR, "wechat-transport.ts"), "utf8");
+    expect(content).not.toContain("this.#apiKey");
+    expect(content).not.toContain("apiKey =");
+    expect(content).not.toContain("token =");
+  });
+
   it("client.ts 不把 apiKey 写入任何实例字段", () => {
     const content = readFileSync(join(SRC_DIR, "client.ts"), "utf8");
     expect(content).not.toContain("this.#apiKey");
