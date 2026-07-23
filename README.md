@@ -9,9 +9,13 @@ TrpgRuleAgent 是一个面向跑团规则的可扩展 Agent 平台。第一版�
 第一条可运行纵向链路已经建立，并已接入本地 BGE 向量检索：
 
 ```text
-CLI -> Pi Agent Runtime -> search_rules/read_rules 工具
+CLI -> 自有 Agent Runtime（零第三方运行时依赖）
+    -> ModelProvider（OpenAI-compatible Chat Completions 流式）
+    -> search_rules/read_rules 工具
     -> Python Retrieval Service -> BGE + Chroma -> PF Rule Pack
 ```
+
+Node 侧 Agent Core、规则 Agent 和 CLI 不依赖任何第三方运行时包，只使用 Node.js 22.19+ 内置的 fetch、AbortSignal 与 Web Streams；TypeScript、Vitest、tsx 仅作为开发依赖。ModelProvider 是可扩展接口，首版支持 OpenAI-compatible Chat Completions 协议（`LLM_PROVIDER=openai-compatible`）。
 
 仓库内 Rule Pack 只有明确标注的演示数据，用于验证工程链路，不能作为真实 PF 规则依据。本地可从用户持有的 CHM 导入真实父文档；原始 CHM、解包文件和生成索引均位于 Git 忽略的 `data/` 目录。
 
@@ -19,7 +23,13 @@ CLI -> Pi Agent Runtime -> search_rules/read_rules 工具
 
 ```text
 apps/cli                       流式命令行入口
-packages/agent                 Agent、工具预算、引用注册表和 Prompt
+apps/gateway                   BYOK Agent Gateway（HTTP/SSE，模型 Key 由客户端每次请求携带，服务端零持久化）
+apps/web                       基于 Vite 的浏览器调试 UI（零运行时依赖，静态产物；详见 [Web 客户端](docs/web-client.md)）
+apps/miniprogram               微信小程序宿主接入骨架（非完整可发布工程；含适配边界 createWeChatAdapters 与页面级门面 MiniProgramSession；详见 [Web 客户端](docs/web-client.md) 与 apps/miniprogram/README.md）
+packages/agent                 自有 Agent Runtime（core/ 业务无关内核、providers/ 模型接入、rule-agent/ 规则领域层）
+packages/gateway-client        BYOK Gateway 共享客户端 SDK（零运行时依赖；内置 BrowserTransport 与可选的
+                               微信小程序 WeChatTransport——不依赖 wx 全局，由宿主注入最小适配接口；
+                               [Web 客户端](docs/web-client.md) 介绍）
 packages/rules-client          检索服务客户端
 packages/rules-types           跨语言接口对应的 TypeScript 类型
 services/retrieval-python      Python 检索、索引与评测服务
@@ -51,23 +61,20 @@ npm run setup:pf -- "/absolute/path/to/Pathfinder.chm"
 安装脚本会创建 `.env`。填写模型端点和密钥：
 
 ```dotenv
-LLM_PROVIDER=custom-openai
+LLM_PROVIDER=openai-compatible
 LLM_MODEL=your-model-id
-LLM_API=openai-completions
 LLM_BASE_URL=https://your-provider.example/v1
 LLM_API_KEY=your-api-key
 LLM_CONTEXT_WINDOW=128000
 LLM_MAX_TOKENS=8192
 LLM_REASONING=false
 RETRIEVAL_BASE_URL=http://127.0.0.1:8765
+# 云端检索服务可选鉴权令牌，仅由 Gateway 服务端读取
+RETRIEVAL_API_KEY=
 RULESET_ID=pathfinder-1e
 ```
 
-`.env` 已被 Git 忽略。不要把真实密钥填写到 `.env.example` 或提交到版本控制。如果本机 Pi Agent 已保存相同提供商的凭据，也可以删除 `LLM_API_KEY`，改用：
-
-```dotenv
-LLM_PI_AUTH_PROVIDER=deepseek
-```
+`LLM_MODEL`、`LLM_BASE_URL`、`LLM_API_KEY` 为必填项，缺失时 CLI 会给出明确的配置错误。`.env` 已被 Git 忽略。不要把真实密钥填写到 `.env.example` 或提交到版本控制。
 
 ### 3. 启动
 
@@ -84,6 +91,33 @@ npm start -- "什么时候会触发借机攻击？"
 ```
 
 如果希望分别观察服务日志，仍可在两个终端分别运行 `npm run retrieval:pf` 和 `npm run cli`。
+
+### 4.（可选）启动 BYOK Gateway
+
+为浏览器前端提供 HTTP/SSE 接口：
+
+```bash
+npm run gateway
+```
+
+Gateway 采用 BYOK（Bring Your Own Key）模型：用户在创建会话时提交自己的模型连接配置（`provider`/`model`/`baseUrl`/`rulesetId`，经服务端白名单严格校验），每个会话用自己的配置创建 Agent；服务端不读取 `LLM_API_KEY`/`LLM_MODEL`/`LLM_BASE_URL`，模型 Key 由前端页面内存持有并通过每次请求的 `X-Model-Api-Key` 头传入，服务端不落任何持久化。接口协议与安全边界详见 [Gateway API](docs/gateway-api.md)。
+
+### 5.（可选）启动 Web 调试 UI
+
+浏览器调试界面基于共享 SDK `@trpg-rule-agent/gateway-client`（零运行时依赖），构建产物为纯静态文件：
+
+```bash
+# 开发服务器（默认 http://localhost:5173）
+npm run web:dev
+# 构建静态产物到 apps/web/dist
+npm run web:build
+# 本地预览构建产物
+npm run web:preview
+```
+
+Web UI 默认走真实 Gateway（同源相对路径，建议生产用同源反向代理避免 CORS 与凭据跨域）；仅当【开发模式（`import.meta.env.DEV`）+ URL 带 `?mock=1`】双条件同时满足时，才动态加载内置 mock 传输做无后端演示。该分支以 `import.meta.env.DEV` 静态门控被 tree-shake，因此**生产构建 / `web:preview` 中 `?mock=1` 无效，且产物不含任何 mock 代码**。API Key 与 session token 只在浏览器内存、刷新即丢失，绝不写入 `localStorage`/`cookie` 等。启动方式、安全模型、CORS 与同源反代部署详见 [Web 客户端](docs/web-client.md)。
+
+SDK 另内置可选的 `WeChatTransport`，并由 `apps/miniprogram` 提供宿主接入骨架（非完整可发布工程）：其中包含 `createWeChatAdapters`（`wx-host.ts`，把宿主注入的 `wx.request` 封装成 SDK 需要的最小适配接口）与页面级会话门面 `MiniProgramSession`（`session-facade.ts`，负责内存态凭据与生命周期清理）。开发者需在微信开发者工具中自行创建小程序工程、粘贴/绑定 `wx` 适配器、配置 request 合法域名与 HTTPS；错误归一化与“API Key 仅随 `runTurn` 每次经请求头传入、绝不落盘”的边界与浏览器端完全一致。接入说明见 [Web 客户端](docs/web-client.md) 的“微信小程序接入”与 [apps/miniprogram/README.md](apps/miniprogram/README.md)。
 
 ## 演示模式（无需规则文件）
 
@@ -141,5 +175,5 @@ npm run eval:retrieval:pf
 1. 为当前 3 道检索漏召回题增加结构化章节切块或重排器实验。
 2. 增加答案级评测，验证事实、引用、工具预算和无依据结论率。
 3. 为导入报告增加重复内容和异常编码审计。
-4. 增加 SSE Web API、React 调试界面和 Agent Trace。
+4. 在 BYOK Gateway 之上增加 React 调试界面和 Agent Trace。
 5. 增加车卡工作流和确定性合法性校验器，再抽取通用 Rule Pack SDK。

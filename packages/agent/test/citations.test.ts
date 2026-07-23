@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { RuleDocument } from "@trpg-rule-agent/rules-types";
-import { CitationRegistry } from "../src/citations.ts";
+import { CitationRegistry } from "../src/rule-agent/citations.ts";
 
 const document: RuleDocument = {
   id: "doc-1",

@@ -5,10 +5,7 @@
   "type": "module",
   "exports": "./src/index.ts",
   "dependencies": {
-    "@earendil-works/pi-agent-core": "0.80.6",
-    "@earendil-works/pi-ai": "0.80.6",
     "@trpg-rule-agent/rules-client": "0.1.0",
-    "@trpg-rule-agent/rules-types": "0.1.0",
-    "typebox": "1.1.38"
+    "@trpg-rule-agent/rules-types": "0.1.0"
   }
 }

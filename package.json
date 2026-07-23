@@ -10,8 +10,12 @@
   "scripts": {
     "setup:pf": "bash scripts/setup-pf.sh",
     "start": "bash scripts/start.sh",
-    "check": "tsc --noEmit && npm run test",
+    "check": "tsc --noEmit && npm run web:typecheck && npm run test && npm run web:build",
     "test": "vitest run",
+    "web:typecheck": "tsc --noEmit -p apps/web/tsconfig.json",
+    "web:dev": "npm run dev --workspace @trpg-rule-agent/web",
+    "web:build": "npm run build --workspace @trpg-rule-agent/web",
+    "web:preview": "npm run preview --workspace @trpg-rule-agent/web",
     "test:python": "PYTHONPATH=services/retrieval-python/src python3 -m unittest discover -s services/retrieval-python/tests -v",
     "rules:import:pf-chm": "bash scripts/import-pf-chm.sh",
     "rules:import:pf": "PYTHONPATH=services/retrieval-python/src python3 -m trpg_retrieval.importers.chm --extracted data/pathfinder-1e/extracted --output data/pathfinder-1e/generated/documents.jsonl --report data/pathfinder-1e/generated/import-report.json",
@@ -22,7 +26,8 @@
     "retrieval:dev": "PYTHONPATH=services/retrieval-python/src python3 -m trpg_retrieval.api --documents rulepacks/pathfinder-1e/fixtures/documents.jsonl",
     "retrieval:pf": "PYTHONPATH=services/retrieval-python/src .venv/bin/python -m trpg_retrieval.api --documents data/pathfinder-1e/generated/documents.jsonl --backend hybrid --index-dir data/pathfinder-1e/vector-index-fastembed",
     "retrieval:pf:lexical": "PYTHONPATH=services/retrieval-python/src python3 -m trpg_retrieval.api --documents data/pathfinder-1e/generated/documents.jsonl --backend lexical",
-    "cli": "node --env-file=.env --import tsx apps/cli/src/index.ts"
+    "cli": "node --env-file=.env --import tsx apps/cli/src/index.ts",
+    "gateway": "node --env-file=.env --import tsx apps/gateway/src/index.ts"
   },
   "engines": {
     "node": ">=22.19.0"
