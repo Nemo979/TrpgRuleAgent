@@ -24,7 +24,9 @@ Node 侧 Agent Core、规则 Agent 和 CLI 不依赖任何第三方运行时包�
 ```text
 apps/cli                       流式命令行入口
 apps/gateway                   BYOK Agent Gateway（HTTP/SSE，模型 Key 由客户端每次请求携带，服务端零持久化）
+apps/web                       基于 Vite 的浏览器调试 UI（零运行时依赖，静态产物；详见 [Web 客户端](docs/web-client.md)）
 packages/agent                 自有 Agent Runtime（core/ 业务无关内核、providers/ 模型接入、rule-agent/ 规则领域层）
+packages/gateway-client        BYOK Gateway 共享客户端 SDK（零运行时依赖；[Web 客户端](docs/web-client.md) 介绍）
 packages/rules-client          检索服务客户端
 packages/rules-types           跨语言接口对应的 TypeScript 类型
 services/retrieval-python      Python 检索、索引与评测服务
@@ -94,6 +96,21 @@ npm run gateway
 ```
 
 Gateway 采用 BYOK（Bring Your Own Key）模型：用户在创建会话时提交自己的模型连接配置（`provider`/`model`/`baseUrl`/`rulesetId`，经服务端白名单严格校验），每个会话用自己的配置创建 Agent；服务端不读取 `LLM_API_KEY`/`LLM_MODEL`/`LLM_BASE_URL`，模型 Key 由前端页面内存持有并通过每次请求的 `X-Model-Api-Key` 头传入，服务端不落任何持久化。接口协议与安全边界详见 [Gateway API](docs/gateway-api.md)。
+
+### 5.（可选）启动 Web 调试 UI
+
+浏览器调试界面基于共享 SDK `@trpg-rule-agent/gateway-client`（零运行时依赖），构建产物为纯静态文件：
+
+```bash
+# 开发服务器（默认 http://localhost:5173）
+npm run web:dev
+# 构建静态产物到 apps/web/dist
+npm run web:build
+# 本地预览构建产物
+npm run web:preview
+```
+
+Web UI 默认走真实 Gateway（同源相对路径，建议生产用同源反向代理避免 CORS 与凭据跨域）；仅当【开发模式（`import.meta.env.DEV`）+ URL 带 `?mock=1`】双条件同时满足时，才动态加载内置 mock 传输做无后端演示。该分支以 `import.meta.env.DEV` 静态门控被 tree-shake，因此**生产构建 / `web:preview` 中 `?mock=1` 无效，且产物不含任何 mock 代码**。API Key 与 session token 只在浏览器内存、刷新即丢失，绝不写入 `localStorage`/`cookie` 等。启动方式、安全模型、CORS 与同源反代部署详见 [Web 客户端](docs/web-client.md)。
 
 ## 演示模式（无需规则文件）
 

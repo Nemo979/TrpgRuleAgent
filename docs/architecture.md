@@ -68,6 +68,46 @@ apps/gateway/src/
 
 协议与限制详见 [Gateway API](gateway-api.md)。核心不变量：模型 Key 的生命周期等于一次 turn 请求；模型连接配置（provider/model/baseUrl/rulesetId）由用户创建会话时提交、逐会话生效，`retrievalBaseUrl` 始终由服务端注入；SessionStore 不存在凭据字段；失败 turn 不污染会话历史。
 
+## 阶段三：共享 Gateway 客户端 SDK 与 Web 调试 UI
+
+在 Gateway 之上新增两套可复用产物：`packages/gateway-client`（共享 SDK）与 `apps/web`（调试 UI）。两者共同把“API Key 永不离开宿主内存”的 BYOK 边界延伸到浏览器/小程序等前端宿主。
+
+### packages/gateway-client（分层）
+
+SDK 零运行时依赖，只依赖 Gateway 的公开 wire 协议（不导入 `apps/gateway` 或 `packages/agent` 内部类型），按职责分为：
+
+```text
+packages/gateway-client/src/
+  protocol.ts    公开线协议类型：GatewayEvent / GatewaySource / GatewayWireError /
+                 SessionCreateOptions / SessionModelConfig / SessionCreateResponse
+  errors.ts      GatewayClientError + GatewayClientErrorCode（typed 错误分类）、
+                 redactSecret / [REDACTED] 兜底脱敏、isGatewayClientError 守卫
+  sse.ts         零依赖 SSE 帧解析（parseSseFrames）+ 事件投影（decodeGatewayEvent），
+                 未知字段丢弃、未知类型视为 protocol_error、error/tool_error 再兜底脱敏
+  transport.ts   GatewayTransport 抽象（request + stream）+ TransportError
+                 （只携带 network/aborted 归一化分类，绝不透出头/URL/cause）
+  browser-transport.ts  BrowserTransport：fetch + ReadableStream 实现；
+                 redirect:"error" 防 SSRF、credentials:"omit"
+  client.ts      GatewayClient：高层 API（createSession/runTurn/abort/
+                 deleteSession/disconnect/reset/status），token 存于 #private 字段
+```
+
+传输抽象 `GatewayTransport` 与 DOM 解耦：`GatewayClient` 只消费 `request`/`stream` 两个能力，具体传输可替换（浏览器 `BrowserTransport`、测试 mock、未来的 `WeChatTransport`），协议层与客户端逻辑完全复用。
+
+### apps/web（state / controller / view 分离）
+
+基于 Vite 的 vanilla TypeScript/CSS 调试台，Vite 仅作为 devDependency，构建产出 `apps/web/dist` 纯静态文件。内部遵循单向数据流：
+
+```text
+main.ts        装配：传输层 -> GatewayClient -> ChatController -> ChatView -> 状态机
+state.ts       纯函数 reducer（流式累加、固化、工具时间线、来源、错误、重置），可单测
+controller.ts  ChatController：把 UI 意图翻译为 GatewayClient 调用、把事件派发为 Action
+view.ts        ChatView：只用 textContent 渲染模型输出，禁 innerHTML / Markdown 注入
+mock-transport.ts  仅【开发模式 + ?mock=1】双条件下动态注入的 MockTransport（生产被 tree-shake，不参与生产、不弱化安全）
+```
+
+安全边界：API Key 与 session token 只存于页面内存变量，刷新即丢失；绝不写入 `localStorage`/`sessionStorage`/`IndexedDB`/`cookie`/DOM `dataset`，也不进 URL/日志/错误/`status()` 快照；模型输出只经 `textContent` 写入 DOM。默认走真实 `BrowserTransport`（同源相对路径），仅当【开发模式（`import.meta.env.DEV`）+ `?mock=1`】双条件同时满足时才动态加载 `MockTransport` 做无后端演示；该分支被静态门控 tree-shake，故生产构建 / `web:preview` 中 `?mock=1` 无效且产物不含任何 mock 代码。CORS 与同源反代部署、启动脚本与 `GatewayClient` 最小用法详见 [Web 客户端文档](web-client.md)。
+
 ## 在线问答链路
 
 ```text
