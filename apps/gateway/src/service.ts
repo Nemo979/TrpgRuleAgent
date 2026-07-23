@@ -48,13 +48,21 @@ export type AgentFactory = (
 export interface CreateRuleAgentFactoryOptions {
   /** 检索服务地址：唯一由服务端注入的连接项，客户端不可覆盖。 */
   retrievalBaseUrl: string;
+  /** 可选的检索服务鉴权令牌，仅附加到 Gateway -> 检索服务请求。 */
+  retrievalApiKey?: string;
   /** 可注入任意 RulesProvider；默认按 retrievalBaseUrl 创建 HTTP 客户端。 */
   client?: RulesProvider;
 }
 
 /** 生产用 AgentFactory：session 配置 + 服务端 retrievalBaseUrl -> createRuleAgent。 */
 export function createRuleAgentFactory(options: CreateRuleAgentFactoryOptions): AgentFactory {
-  const rulesClient = options.client ?? new RulesClient(options.retrievalBaseUrl);
+  const rulesClient =
+    options.client ??
+    new RulesClient(options.retrievalBaseUrl, {
+      ...(options.retrievalApiKey
+        ? { headers: { authorization: `Bearer ${options.retrievalApiKey}` } }
+        : {}),
+    });
   return (config, initialMessages) => {
     const agentConfig: RuleAgentConfig = {
       provider: config.provider,

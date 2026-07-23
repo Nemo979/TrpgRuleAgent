@@ -71,7 +71,7 @@ apps/gateway/src/
 
 ### 检索服务部署抽象
 
-`packages/rules-client` 暴露 `RulesProvider` 契约，`RulesClient` 是其零依赖 HTTP 实现。`RETRIEVAL_BASE_URL` 可以指向本地 Python 检索服务，也可以指向满足同一 JSON 接口的云端向量/混合检索服务；Gateway 和 Agent 不需要感知部署位置。云端部署可通过服务端注入 `RulesClientOptions.headers` 传递检索服务鉴权头，并由客户端统一提供超时、取消和无效响应处理。后续接入特定云向量数据库时，只需新增一个 `RulesProvider` 实现，不改变规则 Agent、Gateway API 或前端宿主。
+`packages/rules-client` 暴露 `RulesProvider` 契约，`RulesClient` 是其零依赖 HTTP 实现。`RETRIEVAL_BASE_URL` 可以指向本地 Python 检索服务，也可以指向满足同一 JSON 接口的云端向量/混合检索服务；Gateway 和 Agent 不需要感知部署位置。云端部署可通过服务端环境变量 `RETRIEVAL_API_KEY` 注入检索服务鉴权头，并由客户端统一提供超时、取消和无效响应处理；该令牌不会进入会话、SSE 或浏览器。后续接入特定云向量数据库时，只需新增一个 `RulesProvider` 实现，不改变规则 Agent、Gateway API 或前端宿主。
 
 ### 阶段六：Gateway 生产基础加固
 

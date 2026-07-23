@@ -16,7 +16,10 @@ function main(): void {
   const service = new GatewayService({
     config,
     sessions: new InMemorySessionStore({ ttlMs: config.sessionTtlMs }),
-    createAgent: createRuleAgentFactory({ retrievalBaseUrl: config.retrievalBaseUrl }),
+    createAgent: createRuleAgentFactory({
+      retrievalBaseUrl: config.retrievalBaseUrl,
+      ...(config.retrievalApiKey ? { retrievalApiKey: config.retrievalApiKey } : {}),
+    }),
   });
 
   const server = createGatewayServer({

@@ -29,6 +29,8 @@ export interface GatewayConfig {
   rateLimitWindowMs: number;
   /** 检索服务地址：始终由服务端注入，客户端不可覆盖。 */
   retrievalBaseUrl: string;
+  /** 可选的云端检索服务鉴权令牌；仅用于服务端到服务端请求。 */
+  retrievalApiKey?: string;
   /** 允许客户端选择的规则集集合。 */
   allowedRulesets: string[];
   /** rulesetId 缺省时的默认规则集（必须属于 allowedRulesets）。 */
@@ -106,6 +108,7 @@ export function loadGatewayConfig(env: NodeJS.ProcessEnv): GatewayConfig {
       "GATEWAY_RATE_LIMIT_WINDOW_MS",
     ),
     retrievalBaseUrl: env.RETRIEVAL_BASE_URL ?? DEFAULT_RETRIEVAL_BASE_URL,
+    ...(env.RETRIEVAL_API_KEY ? { retrievalApiKey: env.RETRIEVAL_API_KEY } : {}),
     allowedRulesets,
     defaultRulesetId,
   };
