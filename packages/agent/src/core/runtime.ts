@@ -5,14 +5,23 @@ import type { ModelConfig, ModelProvider } from "./provider.ts";
 import { validateSchema } from "./schema.ts";
 import { ToolRegistry, toolResultText, type ToolResult } from "./tools.ts";
 
+/**
+ * 单次 run 调用的执行上下文。API Key 只在一次 turn 请求生命周期内存在：
+ * 不进入 options、messages、session、events 或 config。
+ */
+export interface AgentRunContext {
+  apiKey: string;
+  signal?: AbortSignal;
+}
+
 export interface AgentRuntimeOptions {
   provider: ModelProvider;
   model: ModelConfig;
   baseUrl: string;
-  /** API Key 通过执行上下文注入，不进入消息与事件。 */
-  getApiKey: () => string;
   systemPrompt: string;
   tools: ToolRegistry;
+  /** 恢复历史会话（如 Gateway 会话）；为空时以 system prompt 初始化。 */
+  initialMessages?: AgentMessage[];
   /** 单个用户问题允许的最大模型调用次数，超出即 limit_exceeded。 */
   maxModelTurns?: number;
 }
@@ -36,10 +45,24 @@ export class AgentRuntime {
   constructor(options: AgentRuntimeOptions) {
     this.options = options;
     this.maxModelTurns = options.maxModelTurns ?? DEFAULT_MAX_MODEL_TURNS;
-    this.messages.push({ role: "system", content: options.systemPrompt });
+    if (options.initialMessages && options.initialMessages.length > 0) {
+      this.messages.push(...options.initialMessages);
+    } else {
+      this.messages.push({ role: "system", content: options.systemPrompt });
+    }
   }
 
-  async *run(userInput: string, signal?: AbortSignal): AsyncGenerator<AgentEvent> {
+  /**
+   * 执行一个用户 turn。apiKey 从本次调用的 context 获取，
+   * 只用于构造 ProviderContext，不落入任何持久状态。
+   *
+   * 终止性错误（provider/abort/limit 等 error 事件）会回滚本轮
+   * 新增的所有消息，避免会话留下半截历史；tool_error 属于模型
+   * 可恢复流程，不触发回滚。
+   */
+  async *run(userInput: string, context: AgentRunContext): AsyncGenerator<AgentEvent> {
+    const signal = context.signal;
+    const checkpoint = this.messages.length;
     yield { type: "turn_start" };
     try {
       this.messages.push({ role: "user", content: userInput });
@@ -65,7 +88,7 @@ export class AgentRuntime {
           },
           {
             baseUrl: this.options.baseUrl,
-            apiKey: this.options.getApiKey(),
+            apiKey: context.apiKey,
             ...(signal ? { signal } : {}),
           },
         );
@@ -101,6 +124,8 @@ export class AgentRuntime {
         }
       }
     } catch (error) {
+      // 终止性错误：回滚本轮新增消息，保持会话历史一致。
+      this.messages.length = checkpoint;
       yield { type: "error", error: toAgentError(error) };
     }
   }

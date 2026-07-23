@@ -40,4 +40,4 @@ export {
   type ProviderContext,
 } from "./provider.ts";
 export type { AgentEvent } from "./events.ts";
-export { AgentRuntime, type AgentRuntimeOptions } from "./runtime.ts";
+export { AgentRuntime, type AgentRunContext, type AgentRuntimeOptions } from "./runtime.ts";

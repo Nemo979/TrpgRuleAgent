@@ -78,6 +78,8 @@ describe("OpenAICompatibleProvider", () => {
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("https://llm.example/v1/chat/completions");
     expect(init.method).toBe("POST");
+    // 禁止自动跟随 30x：防止允许端点重定向到内网绕过 Gateway 白名单（SSRF）。
+    expect(init.redirect).toBe("error");
     expect((init.headers as Record<string, string>).authorization).toBe("Bearer secret-test-key");
     const body = JSON.parse(init.body as string);
     expect(body).toMatchObject({
@@ -206,6 +208,29 @@ describe("OpenAICompatibleProvider", () => {
     const error = await pending.catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(AgentError);
     expect((error as AgentError).category).toBe("aborted");
+  });
+
+  it("设置 redirect:\"error\" 禁止自动重定向，重定向失败仍走统一脱敏", async () => {
+    const secret = "sk-redirect-secret-123";
+    // redirect:"error" 时 fetch 收到 30x 会 reject；模拟底层抛错且 message 含 Key。
+    const fetchMock = vi.fn().mockImplementation((_url: string, init: RequestInit) => {
+      expect(init.redirect).toBe("error");
+      return Promise.reject(new TypeError(`unexpected redirect while using key ${secret}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const error = await collect(new OpenAICompatibleProvider().stream(request, {
+      ...context,
+      apiKey: secret,
+    })).catch((caught: unknown) => caught) as AgentError;
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(error).toBeInstanceOf(AgentError);
+    expect(error.category).toBe("provider_http_error");
+    expect(error.message).not.toContain(secret);
+    expect(error.message).toContain(REDACTED);
+    const cause = error.cause as Error;
+    expect(cause.message).not.toContain(secret);
   });
 
   it("助手历史消息中的工具调用会转换为厂商格式", async () => {

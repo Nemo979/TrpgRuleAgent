@@ -1,7 +1,8 @@
 import type { RulesClient } from "@trpg-rule-agent/rules-client";
 import type { AgentEvent } from "../core/events.ts";
+import type { AgentMessage } from "../core/messages.ts";
 import type { ModelProvider, ProviderRegistry } from "../core/provider.ts";
-import { AgentRuntime } from "../core/runtime.ts";
+import { AgentRuntime, type AgentRunContext } from "../core/runtime.ts";
 import { ToolRegistry } from "../core/tools.ts";
 import { createDefaultProviderRegistry } from "../providers/index.ts";
 import { ToolBudget } from "./budget.ts";
@@ -30,12 +31,15 @@ export interface CreateRuleAgentOptions {
   /** 测试或扩展时可直接注入 Provider；默认按 config.provider 从 Registry 创建。 */
   provider?: ModelProvider;
   registry?: ProviderRegistry;
+  /** 恢复历史会话消息（如 Gateway 会话）。 */
+  initialMessages?: AgentMessage[];
 }
 
 export interface RuleAgentRuntime {
   runtime: AgentRuntime;
   citations: CitationRegistry;
-  run(input: string, signal?: AbortSignal): AsyncIterable<AgentEvent>;
+  /** apiKey 与可选 signal 由每次调用的 context 提供，不驻留在 runtime。 */
+  run(input: string, context: AgentRunContext): AsyncIterable<AgentEvent>;
   /** 每个用户问题前重置当轮预算和引用。 */
   resetTurnState(): void;
 }
@@ -61,16 +65,16 @@ export function createRuleAgent(options: CreateRuleAgentOptions): RuleAgentRunti
     provider,
     model: options.config.model,
     baseUrl: options.config.baseUrl,
-    getApiKey: () => options.config.apiKey,
     systemPrompt: SYSTEM_PROMPT,
     tools,
+    ...(options.initialMessages ? { initialMessages: options.initialMessages } : {}),
     maxModelTurns: MAX_MODEL_TURNS,
   });
 
   return {
     runtime,
     citations,
-    run: (input, signal) => runtime.run(input, signal),
+    run: (input, context) => runtime.run(input, context),
     resetTurnState() {
       citations.clear();
       budget.reset();

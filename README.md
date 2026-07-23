@@ -23,6 +23,7 @@ Node 侧 Agent Core、规则 Agent 和 CLI 不依赖任何第三方运行时包�
 
 ```text
 apps/cli                       流式命令行入口
+apps/gateway                   BYOK Agent Gateway（HTTP/SSE，模型 Key 由客户端每次请求携带，服务端零持久化）
 packages/agent                 自有 Agent Runtime（core/ 业务无关内核、providers/ 模型接入、rule-agent/ 规则领域层）
 packages/rules-client          检索服务客户端
 packages/rules-types           跨语言接口对应的 TypeScript 类型
@@ -84,6 +85,16 @@ npm start -- "什么时候会触发借机攻击？"
 
 如果希望分别观察服务日志，仍可在两个终端分别运行 `npm run retrieval:pf` 和 `npm run cli`。
 
+### 4.（可选）启动 BYOK Gateway
+
+为浏览器前端提供 HTTP/SSE 接口：
+
+```bash
+npm run gateway
+```
+
+Gateway 采用 BYOK（Bring Your Own Key）模型：用户在创建会话时提交自己的模型连接配置（`provider`/`model`/`baseUrl`/`rulesetId`，经服务端白名单严格校验），每个会话用自己的配置创建 Agent；服务端不读取 `LLM_API_KEY`/`LLM_MODEL`/`LLM_BASE_URL`，模型 Key 由前端页面内存持有并通过每次请求的 `X-Model-Api-Key` 头传入，服务端不落任何持久化。接口协议与安全边界详见 [Gateway API](docs/gateway-api.md)。
+
 ## 演示模式（无需规则文件）
 
 仓库包含少量明确标注的合成演示数据，只用于验证调用链路，不能作为真实 PF 规则依据：
@@ -140,5 +151,5 @@ npm run eval:retrieval:pf
 1. 为当前 3 道检索漏召回题增加结构化章节切块或重排器实验。
 2. 增加答案级评测，验证事实、引用、工具预算和无依据结论率。
 3. 为导入报告增加重复内容和异常编码审计。
-4. 增加 SSE Web API、React 调试界面和 Agent Trace。
+4. 在 BYOK Gateway 之上增加 React 调试界面和 Agent Trace。
 5. 增加车卡工作流和确定性合法性校验器，再抽取通用 Rule Pack SDK。

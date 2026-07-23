@@ -49,6 +49,11 @@ export class OpenAICompatibleProvider implements ModelProvider {
           authorization: `Bearer ${context.apiKey}`,
         },
         body: JSON.stringify(buildRequestBody(request)),
+        // 禁止自动跟随 30x：即便初始 baseUrl 命中 Gateway allowlist，
+        // 允许端点仍可能重定向到内网地址，绕过 URL 策略造成 SSRF。
+        // redirect:"error" 让 fetch 在收到重定向时直接抛错，由下方 catch
+        // 归一为 provider_http_error 并在 stream() 出口统一脱敏。
+        redirect: "error",
         ...(context.signal ? { signal: context.signal } : {}),
       });
     } catch (error) {

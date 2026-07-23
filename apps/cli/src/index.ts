@@ -4,7 +4,9 @@ import {
   AgentError,
   createRuleAgent,
   loadRuleAgentConfig,
+  loadRuleAgentCredentials,
   type RuleAgentConfig,
+  type RuleAgentCredentials,
 } from "@trpg-rule-agent/agent";
 import { RulesClient } from "@trpg-rule-agent/rules-client";
 
@@ -14,8 +16,10 @@ function fail(message: string): never {
 }
 
 let config: RuleAgentConfig;
+let credentials: RuleAgentCredentials;
 try {
   config = loadRuleAgentConfig(process.env);
+  credentials = loadRuleAgentCredentials(process.env);
 } catch (error) {
   fail(error instanceof AgentError ? `配置错误：${error.message}` : String(error));
 }
@@ -32,7 +36,7 @@ async function answer(input: string): Promise<boolean> {
   agent.resetTurnState();
   stdout.write("助手：");
   let succeeded = true;
-  for await (const event of agent.run(input)) {
+  for await (const event of agent.run(input, { apiKey: credentials.apiKey })) {
     switch (event.type) {
       case "text_delta":
         stdout.write(event.delta);

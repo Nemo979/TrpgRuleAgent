@@ -84,7 +84,6 @@ function createRuntime(
     provider,
     model: { id: "test-model" },
     baseUrl: "https://llm.example/v1",
-    getApiKey: () => "test-key",
     systemPrompt: "系统提示",
     tools: registry,
     ...(maxModelTurns !== undefined ? { maxModelTurns } : {}),
@@ -108,7 +107,7 @@ describe("AgentRuntime", () => {
     const provider = scriptedProvider([textScript("最终答案")]);
     const runtime = createRuntime(provider, []);
 
-    const events = await collect(runtime.run("问题"));
+    const events = await collect(runtime.run("问题", { apiKey: "test-key" }));
 
     expect(types(events)).toEqual(["turn_start", "text_delta", "turn_end"]);
     expect(runtime.messages.at(-1)).toMatchObject({ role: "assistant", content: "最终答案" });
@@ -125,7 +124,7 @@ describe("AgentRuntime", () => {
     const { tool, execute } = echoTool();
     const runtime = createRuntime(provider, [tool as ToolDefinition<never>]);
 
-    const events = await collect(runtime.run("问题"));
+    const events = await collect(runtime.run("问题", { apiKey: "test-key" }));
 
     expect(types(events)).toEqual(["turn_start", "tool_start", "tool_end", "text_delta", "turn_end"]);
     expect(execute).toHaveBeenCalledWith(
@@ -155,7 +154,7 @@ describe("AgentRuntime", () => {
     const { tool, execute } = echoTool();
     const runtime = createRuntime(provider, [tool as ToolDefinition<never>]);
 
-    const events = await collect(runtime.run("问题"));
+    const events = await collect(runtime.run("问题", { apiKey: "test-key" }));
 
     expect(types(events)).toEqual([
       "turn_start",
@@ -184,7 +183,7 @@ describe("AgentRuntime", () => {
     const { tool } = echoTool(execute);
     const runtime = createRuntime(provider, [tool as ToolDefinition<never>]);
 
-    await collect(runtime.run("问题"));
+    await collect(runtime.run("问题", { apiKey: "test-key" }));
     expect(order).toEqual(["1", "2"]);
   });
 
@@ -195,7 +194,7 @@ describe("AgentRuntime", () => {
     ]);
     const runtime = createRuntime(provider, []);
 
-    const events = await collect(runtime.run("问题"));
+    const events = await collect(runtime.run("问题", { apiKey: "test-key" }));
 
     const toolError = events.find((event) => event.type === "tool_error");
     expect(toolError).toBeDefined();
@@ -213,7 +212,7 @@ describe("AgentRuntime", () => {
     const { tool, execute } = echoTool();
     const runtime = createRuntime(provider, [tool as ToolDefinition<never>]);
 
-    const events = await collect(runtime.run("问题"));
+    const events = await collect(runtime.run("问题", { apiKey: "test-key" }));
 
     const toolError = events.find((event) => event.type === "tool_error");
     expect(toolError?.type === "tool_error" && toolError.error.category).toBe("invalid_tool_call");
@@ -228,7 +227,7 @@ describe("AgentRuntime", () => {
     const { tool, execute } = echoTool();
     const runtime = createRuntime(provider, [tool as ToolDefinition<never>]);
 
-    const events = await collect(runtime.run("问题"));
+    const events = await collect(runtime.run("问题", { apiKey: "test-key" }));
 
     const toolError = events.find((event) => event.type === "tool_error");
     expect(toolError?.type === "tool_error" && toolError.error.category).toBe("invalid_tool_call");
@@ -245,7 +244,7 @@ describe("AgentRuntime", () => {
     ]);
     const runtime = createRuntime(provider, [tool as ToolDefinition<never>]);
 
-    const events = await collect(runtime.run("问题"));
+    const events = await collect(runtime.run("问题", { apiKey: "test-key" }));
 
     const toolError = events.find((event) => event.type === "tool_error");
     expect(toolError?.type === "tool_error" && toolError.error.category).toBe("tool_execution_error");
@@ -261,7 +260,7 @@ describe("AgentRuntime", () => {
     ]);
     const runtime = createRuntime(provider, [tool as ToolDefinition<never>]);
 
-    const events = await collect(runtime.run("问题"));
+    const events = await collect(runtime.run("问题", { apiKey: "test-key" }));
 
     const toolError = events.find((event) => event.type === "tool_error");
     expect(toolError?.type === "tool_error" && toolError.error.category).toBe("limit_exceeded");
@@ -273,7 +272,7 @@ describe("AgentRuntime", () => {
     const provider = scriptedProvider([toolScript("call_x", "echo", '{"value":"loop"}')]);
     const runtime = createRuntime(provider, [tool as ToolDefinition<never>], 2);
 
-    const events = await collect(runtime.run("问题"));
+    const events = await collect(runtime.run("问题", { apiKey: "test-key" }));
 
     const last = events.at(-1);
     expect(last?.type).toBe("error");
@@ -287,7 +286,7 @@ describe("AgentRuntime", () => {
     const controller = new AbortController();
     controller.abort();
 
-    const events = await collect(runtime.run("问题", controller.signal));
+    const events = await collect(runtime.run("问题", { apiKey: "test-key", signal: controller.signal }));
 
     expect(types(events)).toEqual(["turn_start", "error"]);
     const last = events.at(-1);
@@ -309,7 +308,7 @@ describe("AgentRuntime", () => {
     const runtime = createRuntime(provider, [tool as ToolDefinition<never>]);
     const controller = new AbortController();
 
-    await collect(runtime.run("问题", controller.signal));
+    await collect(runtime.run("问题", { apiKey: "test-key", signal: controller.signal }));
 
     expect(provider.calls[0]?.context.signal).toBe(controller.signal);
     expect(contexts[0]?.signal).toBe(controller.signal);
@@ -325,7 +324,7 @@ describe("AgentRuntime", () => {
     const provider = scriptedProvider([toolScript("call_1", "echo", '{"value":"x"}')]);
     const runtime = createRuntime(provider, [tool as ToolDefinition<never>]);
 
-    const events = await collect(runtime.run("问题", controller.signal));
+    const events = await collect(runtime.run("问题", { apiKey: "test-key", signal: controller.signal }));
 
     const last = events.at(-1);
     expect(last?.type === "error" && last.error.category).toBe("aborted");
@@ -342,10 +341,106 @@ describe("AgentRuntime", () => {
     };
     const runtime = createRuntime(provider, []);
 
-    const events = await collect(runtime.run("问题"));
+    const events = await collect(runtime.run("问题", { apiKey: "test-key" }));
 
     const last = events.at(-1);
     expect(last?.type === "error" && last.error.category).toBe("provider_http_error");
+  });
+
+  it("成功 turn 保留本轮消息，历史随多轮累积", async () => {
+    const provider = scriptedProvider([textScript("答一"), textScript("答二")]);
+    const runtime = createRuntime(provider, []);
+
+    await collect(runtime.run("问题一", { apiKey: "test-key" }));
+    // system + user + assistant
+    expect(runtime.messages).toHaveLength(3);
+
+    await collect(runtime.run("问题二", { apiKey: "test-key" }));
+    // + user + assistant
+    expect(runtime.messages).toHaveLength(5);
+    expect(runtime.messages.map((m) => m.role)).toEqual([
+      "system", "user", "assistant", "user", "assistant",
+    ]);
+  });
+
+  it("Provider 失败（终止性 error）回滚本轮新增消息", async () => {
+    const provider: ModelProvider = {
+      id: "failing",
+      // eslint-disable-next-line require-yield
+      async *stream() {
+        throw new AgentError("provider_http_error", "模型服务返回 HTTP 500", { status: 500 });
+      },
+    };
+    const runtime = createRuntime(provider, []);
+    const before = runtime.messages.length;
+
+    const events = await collect(runtime.run("问题", { apiKey: "test-key" }));
+
+    expect(events.at(-1)?.type).toBe("error");
+    // user 消息与任何中间消息全部回滚，会话历史保持一致。
+    expect(runtime.messages).toHaveLength(before);
+    expect(runtime.messages.some((m) => m.role === "user")).toBe(false);
+  });
+
+  it("Abort（终止性 error）回滚本轮新增消息", async () => {
+    const controller = new AbortController();
+    const execute = vi.fn().mockImplementation(async () => {
+      controller.abort();
+      throw new DOMException("The operation was aborted.", "AbortError");
+    });
+    const { tool } = echoTool(execute);
+    const provider = scriptedProvider([toolScript("call_1", "echo", '{"value":"x"}')]);
+    const runtime = createRuntime(provider, [tool as ToolDefinition<never>]);
+    const before = runtime.messages.length;
+
+    const events = await collect(
+      runtime.run("问题", { apiKey: "test-key", signal: controller.signal }),
+    );
+
+    const last = events.at(-1);
+    expect(last?.type === "error" && last.error.category).toBe("aborted");
+    // user / assistant(工具调用) 等本轮消息全部回滚。
+    expect(runtime.messages).toHaveLength(before);
+  });
+
+  it("tool_error 属于可恢复流程：不回滚本轮消息", async () => {
+    const provider = scriptedProvider([
+      toolScript("call_1", "nope", "{}"),
+      textScript("修正后的回答"),
+    ]);
+    const runtime = createRuntime(provider, []);
+
+    const events = await collect(runtime.run("问题", { apiKey: "test-key" }));
+
+    expect(events.at(-1)?.type).toBe("turn_end");
+    // 历史完整保留：system + user + assistant(tool call) + tool(错误回执) + assistant(最终)。
+    expect(runtime.messages.map((m) => m.role)).toEqual([
+      "system", "user", "assistant", "tool", "assistant",
+    ]);
+  });
+
+  it("initialMessages 恢复历史会话且不再注入 system prompt", async () => {
+    const registry = new ToolRegistry();
+    const provider = scriptedProvider([textScript("继续回答")]);
+    const runtime = new AgentRuntime({
+      provider,
+      model: { id: "test-model" },
+      baseUrl: "https://llm.example/v1",
+      systemPrompt: "不应被使用",
+      tools: registry,
+      initialMessages: [
+        { role: "system", content: "历史系统提示" },
+        { role: "user", content: "旧问题" },
+        { role: "assistant", content: "旧回答", toolCalls: [] },
+      ],
+    });
+
+    await collect(runtime.run("新问题", { apiKey: "test-key" }));
+
+    expect(runtime.messages[0]).toEqual({ role: "system", content: "历史系统提示" });
+    expect(runtime.messages.filter((m) => m.role === "system")).toHaveLength(1);
+    expect(runtime.messages).toHaveLength(5);
+    expect(provider.calls[0]?.request.messages).toHaveLength(4);
   });
 
   it("usage 写入 assistant 消息", async () => {
@@ -356,7 +451,7 @@ describe("AgentRuntime", () => {
     ]]);
     const runtime = createRuntime(provider, []);
 
-    await collect(runtime.run("问题"));
+    await collect(runtime.run("问题", { apiKey: "test-key" }));
 
     expect(runtime.messages.at(-1)).toMatchObject({
       role: "assistant",

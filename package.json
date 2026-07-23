@@ -22,7 +22,8 @@
     "retrieval:dev": "PYTHONPATH=services/retrieval-python/src python3 -m trpg_retrieval.api --documents rulepacks/pathfinder-1e/fixtures/documents.jsonl",
     "retrieval:pf": "PYTHONPATH=services/retrieval-python/src .venv/bin/python -m trpg_retrieval.api --documents data/pathfinder-1e/generated/documents.jsonl --backend hybrid --index-dir data/pathfinder-1e/vector-index-fastembed",
     "retrieval:pf:lexical": "PYTHONPATH=services/retrieval-python/src python3 -m trpg_retrieval.api --documents data/pathfinder-1e/generated/documents.jsonl --backend lexical",
-    "cli": "node --env-file=.env --import tsx apps/cli/src/index.ts"
+    "cli": "node --env-file=.env --import tsx apps/cli/src/index.ts",
+    "gateway": "node --env-file=.env --import tsx apps/gateway/src/index.ts"
   },
   "engines": {
     "node": ">=22.19.0"

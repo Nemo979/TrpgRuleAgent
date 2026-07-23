@@ -11,7 +11,12 @@ export {
 // TRPG Rule Agent：规则工具、预算、引用与配置。
 export { ToolBudget, type ToolBudgetLimits } from "./rule-agent/budget.ts";
 export { CitationRegistry, type RegisteredCitation } from "./rule-agent/citations.ts";
-export { loadRuleAgentConfig, type RuleAgentConfig } from "./rule-agent/config.ts";
+export {
+  loadRuleAgentConfig,
+  loadRuleAgentCredentials,
+  type RuleAgentConfig,
+  type RuleAgentCredentials,
+} from "./rule-agent/config.ts";
 export {
   createRuleTools,
   type ReadToolDetails,

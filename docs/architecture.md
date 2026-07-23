@@ -32,7 +32,41 @@ packages/agent/src/
 
 错误统一为 `AgentError`，类别包括 `configuration_error`、`provider_http_error`、`provider_protocol_error`、`invalid_tool_call`、`unknown_tool`、`tool_execution_error`、`limit_exceeded`、`aborted`。Provider 对外抛出前会脱敏整个可观察错误链：顶层 `message` 与 `cause.message` 都会把 API Key 替换为 `[REDACTED]`；`cause` 为 Error 时只保留 name 与已脱敏 message（丢弃可能残留密钥的 stack、嵌套 cause），非 Error 的 cause 直接丢弃。这样即使日志打印完整错误链也不会泄露 API Key。首版不自动重试模型请求，避免工具重复执行。
 
-CLI 只是 `AgentEvent` 的一个消费者；未来的 Web Gateway 或小程序适配层同样订阅这条事件流（例如转成 SSE/WebSocket 下发），不需要改动 Agent 内核。云端多租户与自定义 Base URL 的安全代理不在本阶段范围内。
+CLI 只是 `AgentEvent` 的一个消费者；`apps/gateway` 是第二个消费者，把同一条事件流投影为 SSE 下发给浏览器，不需要改动 Agent 内核。
+
+### 凭据边界（BYOK）
+
+模型 API Key 不属于配置：`RuleAgentConfig` 只含非敏感项，凭据单独定义为 `RuleAgentCredentials`。`AgentRuntime.run(input, context)` 通过每次调用的 `AgentRunContext { apiKey, signal }` 获取 Key，仅用于构造一次 ProviderContext，不写入 options、messages、session 或事件。CLI 经 `loadRuleAgentCredentials` 从 `LLM_API_KEY` 读取；Gateway 则从每次请求的 `X-Model-Api-Key` 头读取，服务端零持久化。
+
+每个 turn 开始时 Runtime 记录消息 checkpoint：provider/abort/limit 等终止性错误会回滚本轮全部新增消息，保证会话历史不残留半截 turn；`tool_error` 属于模型可自行恢复的流程，不触发回滚。
+
+脱敏是纵深防御而非单点信任：内置 `OpenAICompatibleProvider` 通过 `redactAgentError` 对错误链脱敏，但 `ModelProvider` 是可扩展接口，自定义 Provider 未必如此。因此 Gateway 在 SSE 出口对 `error`/`tool_error` 的 `message` 基于本次 `X-Model-Api-Key` **再兜底脱敏一次**。此外，模型请求使用 `fetch(redirect:"error")` 禁止自动跟随 30x，避免允许端点重定向到内网绕过 Base URL 白名单（SSRF）。
+
+## BYOK Agent Gateway
+
+`apps/gateway` 只使用 Node 22 内置 `http`/`crypto`/`url` 与 workspace 包：
+
+```text
+apps/gateway/src/
+  config.ts           环境变量 -> GatewayConfig（刻意不含凭据，也不含全局模型配置）
+  credentials.ts      凭据边界：Key 仅限 X-Model-Api-Key 头；body/query 凭据字段一律 400
+  session-config.ts   SessionCreateRequest 严格校验 -> SessionConnectionConfig
+                      （provider/model/baseUrl/rulesetId；拒绝未知字段与 retrievalBaseUrl）
+  endpoint-policy.ts  ModelEndpointPolicy 契约 + AllowlistModelEndpointPolicy
+                      （HTTPS、禁 userinfo/query/fragment、origin+路径边界前缀匹配、
+                      条目自校验、GATEWAY_ALLOW_LOCALHOST_MODEL 开发开关）
+  session-store.ts    SessionStore 全异步接口 + InMemorySessionStore（token 只存 SHA-256
+                      摘要、快照含连接配置/消息/版本、空闲 TTL 续期且进行中 turn 免删、
+                      可注入时钟；未来可换 Redis/加密存储）
+  sse.ts              AgentEvent -> 公共事件显式白名单投影（错误只留 category/message，
+                      并在出口基于本次 apiKey 对 error/tool_error message 兜底脱敏、
+                      不依赖 Provider 自觉；sources 含 documentId）
+  service.ts          编排：会话（BYOK 连接配置绑定会话）、并发互斥（409）、
+                      per-turn Key 注入、按会话配置建 Agent、成功才写回历史
+  server.ts / index.ts  路由与进程入口
+```
+
+协议与限制详见 [Gateway API](gateway-api.md)。核心不变量：模型 Key 的生命周期等于一次 turn 请求；模型连接配置（provider/model/baseUrl/rulesetId）由用户创建会话时提交、逐会话生效，`retrievalBaseUrl` 始终由服务端注入；SessionStore 不存在凭据字段；失败 turn 不污染会话历史。
 
 ## 在线问答链路
 
