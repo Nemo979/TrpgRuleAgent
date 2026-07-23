@@ -108,6 +108,7 @@ apps/miniprogram/src/
                      绝不写入 wx Storage/URL/日志/持久化；生命周期（connect/send/stop/
                      newSession/destroy）负责内存凭据与状态清理
 apps/miniprogram/test/  纯 Node/Vitest 单测（wx-adapter / session-facade / security），无需微信环境
+apps/miniprogram/example/  可复制的 Page/WXML/WXSS 与 app.json 示例（非完整发布工程）
 ```
 
 传输抽象 `GatewayTransport` 与 DOM 解耦：`GatewayClient` 只消费 `request`/`stream` 两个能力，具体传输可替换（浏览器 `BrowserTransport`、小程序 `WeChatTransport`、测试 mock），协议层与客户端逻辑完全复用。

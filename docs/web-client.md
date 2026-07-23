@@ -282,7 +282,7 @@ const client = new GatewayClient({ transport }); // 之后的用法与浏览器�
 
 `GatewayTransport` 是与 DOM 解耦的抽象，因此接入新的宿主只需新增一个传输实现，而 `GatewayClient` 与协议层完全复用：
 
-- **微信小程序**：传输层 `WeChatTransport` 与接入骨架 `apps/miniprogram`（适配边界 + 会话门面 + 纯 Node 测试）均已就绪，剩余工作是开发者侧的视图层（WXML/WXSS）与工程配置（request 合法域名、HTTPS、基础库 ≥ 2.20.1 支持 enableChunked）。
+- **微信小程序**：传输层 `WeChatTransport`、接入骨架 `apps/miniprogram` 和可复制的 `example/` 页面（WXML/WXSS + app 配置模板）均已就绪，剩余工作是开发者侧的工程配置（request 合法域名、HTTPS、基础库 ≥ 2.20.1 支持 enableChunked）与产品化视图调整。
 - **其他宿主**：任何提供 `fetch` 语义或可分块读取响应的环境，都可实现 `GatewayTransport` 接入。
 
 这一分层保证 Agent Core 与 Gateway 的“零第三方运行时依赖”约束保持不变：SDK 自身同样零运行时依赖，新宿主只贡献一个薄传输层，不引入运行时耦合。

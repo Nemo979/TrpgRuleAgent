@@ -117,3 +117,13 @@ npx vitest run apps/miniprogram
 覆盖：API Key 生命周期、重复建会话清理旧会话、发送/停止、新会话、
 卸载清理、异常脱敏、宿主适配器不向 SDK 泄漏 wx 错误，以及
 「src 不引用 wx 全局 / 不触碰 Storage」的静态安全断言。
+
+## 可复制页面示例
+
+`example/` 提供一个非生产小程序页面示例：
+
+- `app.json.example` / `sitemap.json`：最小工程配置模板；
+- `pages/chat/index.js`：绑定 `MiniProgramSession` 的页面生命周期；
+- `pages/chat/index.wxml` / `index.wxss`：连接配置、消息列表、流式输出和操作按钮。
+
+复制到微信开发者工具创建的工程后，将 `src/` 编译或复制到 `lib/`，再把 Gateway HTTPS 域名加入 request 合法域名。示例不保存 API Key，`onUnload` 会销毁会话；正式产品应自行增加输入校验、域名配置和错误提示策略。

@@ -1,0 +1,24 @@
+<view class="page">
+  <view class="card config-card">
+    <input class="input" password value="{{apiKeyInput}}" placeholder="模型 API Key" bindinput="onApiKeyInput" />
+    <input class="input" value="{{gatewayBaseUrl}}" placeholder="Gateway HTTPS 地址" bindinput="onGatewayInput" />
+    <input class="input" value="{{modelBaseUrl}}" placeholder="模型 Base URL" bindinput="onModelBaseInput" />
+    <input class="input" value="{{modelId}}" placeholder="模型 ID" bindinput="onModelInput" />
+    <button type="primary" loading="{{chat.connection === 'connecting'}}" disabled="{{chat.connection === 'connecting'}}" bindtap="onConnectTap">连接</button>
+  </view>
+
+  <scroll-view class="messages" scroll-y>
+    <block wx:for="{{chat.messages}}" wx:key="id">
+      <view class="message {{item.role}}">{{item.content}}</view>
+    </block>
+    <view wx:if="{{chat.streamingText}}" class="message assistant">{{chat.streamingText}}</view>
+    <view wx:if="{{chat.error}}" class="error">{{chat.error.message}}</view>
+  </scroll-view>
+
+  <view class="composer">
+    <input class="input composer-input" value="{{input}}" placeholder="输入问题" bindinput="onInput" confirm-type="send" bindconfirm="onSendTap" />
+    <button size="mini" disabled="{{!chat.connected || chat.generating}}" bindtap="onSendTap">发送</button>
+    <button size="mini" disabled="{{!chat.generating}}" bindtap="onStopTap">停止</button>
+    <button size="mini" bindtap="onNewSessionTap">新会话</button>
+  </view>
+</view>
