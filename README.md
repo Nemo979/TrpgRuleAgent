@@ -21,6 +21,8 @@ Node 侧 Agent Core、规则 Agent 和 CLI 不依赖任何第三方运行时包�
 
 ## 目录
 
+项目当前状态、架构边界和后续迭代计划见 [项目现状](docs/project-status.md)。
+
 ```text
 apps/cli                       流式命令行入口
 apps/gateway                   BYOK Agent Gateway（HTTP/SSE，模型 Key 由客户端每次请求携带，服务端零持久化）
