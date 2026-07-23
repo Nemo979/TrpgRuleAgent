@@ -77,6 +77,8 @@ apps/gateway/src/
 
 Gateway 增加了可配置的单进程来源限流：默认每个 `remoteAddress` 在 60 秒内最多 120 个非健康检查/非 OPTIONS 请求，超限返回 `429 rate_limited` 与 `Retry-After`。该机制只保护单进程资源，不假设多实例共享状态；多实例生产部署仍应在反向代理或 API Gateway 层配置共享限流。原有请求体、输入长度、CORS、BYOK 和错误脱敏边界保持不变。
 
+Gateway 同时提供 `/health`（进程存活）与 `/ready`（检索依赖可用）两个探针，云端检索不可用时 `/ready` 返回 503，但不会泄露 URL 或鉴权信息。
+
 ## 阶段三：共享 Gateway 客户端 SDK 与 Web 调试 UI
 
 在 Gateway 之上新增两套可复用产物：`packages/gateway-client`（共享 SDK）与 `apps/web`（调试 UI）。两者共同把“API Key 永不离开宿主内存”的 BYOK 边界延伸到浏览器/小程序等前端宿主。

@@ -52,6 +52,10 @@ npm run gateway
 { "data": { "status": "ok" } }
 ```
 
+### GET /ready
+
+检查 Gateway 及其配置的检索服务是否可用。检索服务不可用时返回 `503`；该接口不会返回检索服务 URL 或鉴权信息。
+
 ### POST /v1/sessions
 
 创建会话并绑定本会话的模型连接配置（BYOK 自定义模型）。请求体：

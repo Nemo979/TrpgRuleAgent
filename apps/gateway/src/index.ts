@@ -2,6 +2,7 @@ import { loadGatewayConfig } from "./config.ts";
 import { createGatewayServer } from "./server.ts";
 import { GatewayService, createRuleAgentFactory } from "./service.ts";
 import { InMemorySessionStore } from "./session-store.ts";
+import { RulesClient } from "@trpg-rule-agent/rules-client";
 
 /**
  * BYOK Gateway 入口。
@@ -12,14 +13,20 @@ import { InMemorySessionStore } from "./session-store.ts";
  */
 function main(): void {
   const config = loadGatewayConfig(process.env);
+  const retrievalProvider = new RulesClient(config.retrievalBaseUrl, {
+    ...(config.retrievalApiKey
+      ? { headers: { authorization: `Bearer ${config.retrievalApiKey}` } }
+      : {}),
+  });
 
   const service = new GatewayService({
     config,
     sessions: new InMemorySessionStore({ ttlMs: config.sessionTtlMs }),
     createAgent: createRuleAgentFactory({
       retrievalBaseUrl: config.retrievalBaseUrl,
-      ...(config.retrievalApiKey ? { retrievalApiKey: config.retrievalApiKey } : {}),
+      client: retrievalProvider,
     }),
+    retrievalProvider,
   });
 
   const server = createGatewayServer({

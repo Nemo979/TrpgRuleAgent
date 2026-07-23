@@ -32,7 +32,7 @@ export function createGatewayServer(options: CreateGatewayServerOptions): Server
 
       try {
         const url = new URL(req.url ?? "/", "http://gateway.internal");
-        if (limiter && req.method !== "OPTIONS" && url.pathname !== "/health") {
+        if (limiter && req.method !== "OPTIONS" && !["/health", "/ready"].includes(url.pathname)) {
           const source = req.socket.remoteAddress ?? "unknown";
           if (!limiter.allow(source)) {
             res.setHeader("Retry-After", "60");
@@ -48,6 +48,9 @@ export function createGatewayServer(options: CreateGatewayServerOptions): Server
         switch (route) {
           case "GET /health":
             service.handleHealth(res);
+            return;
+          case "GET /ready":
+            await service.handleReadiness(res);
             return;
           case "POST /v1/sessions":
             await service.handleCreateSession(req, res);

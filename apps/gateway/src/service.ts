@@ -99,6 +99,8 @@ export interface GatewayServiceDependencies {
   endpointPolicy?: ModelEndpointPolicy;
   /** 会话创建时校验 provider 的可用 ID 集合；默认取自默认 Provider Registry。 */
   providerIds?: string[];
+  /** 可选检索服务探针；未配置时 readiness 与进程存活一致。 */
+  retrievalProvider?: RulesProvider;
 }
 
 /**
@@ -112,6 +114,7 @@ export class GatewayService {
   private readonly createAgent: AgentFactory;
   private readonly endpointPolicy: ModelEndpointPolicy;
   private readonly providerIds: string[];
+  private readonly retrievalProvider: RulesProvider | undefined;
 
   constructor(deps: GatewayServiceDependencies) {
     this.config = deps.config;
@@ -124,6 +127,20 @@ export class GatewayService {
         allowLocalhost: deps.config.allowLocalhostModel,
       });
     this.providerIds = deps.providerIds ?? createDefaultProviderRegistry().ids();
+    this.retrievalProvider = deps.retrievalProvider;
+  }
+
+  async handleReadiness(res: ServerResponse): Promise<void> {
+    if (!this.retrievalProvider) {
+      sendJson(res, 200, { status: "ok", retrieval: "unconfigured" });
+      return;
+    }
+    try {
+      await this.retrievalProvider.health();
+      sendJson(res, 200, { status: "ok", retrieval: "ok" });
+    } catch {
+      sendJson(res, 503, { status: "degraded", retrieval: "unavailable" });
+    }
   }
 
   handleHealth(res: ServerResponse): void {
