@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trpg-rule-app"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.116,<1",
+  "httpx>=0.28,<1",
+  "openai>=1.99,<2",
+  "pydantic>=2.11,<3",
+  "pdfplumber>=0.11,<1",
+  "pypdf>=5.9,<6",
+  "python-multipart>=0.0.20,<1",
+  "PyYAML>=6.0,<7",
+  "uvicorn[standard]>=0.35,<1",
+]
+
+[project.scripts]
+trpg-app = "trpg_app.main:run"
+trpg-library = "trpg_app.admin:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

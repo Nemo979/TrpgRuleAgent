@@ -1,0 +1,15 @@
+shared_password_env: TRPG_SHARED_PASSWORD
+session_secret_env: TRPG_SESSION_SECRET
+library_root: data/libraries
+cookie_secure: false
+session_ttl_seconds: 86400
+max_concurrent_turns: 2
+
+models:
+  - id: local-mock
+    label: Local Mock
+    base_url: http://127.0.0.1:8999/v1
+    model: mock-model
+    api_key_env: LOCAL_MOCK_API_KEY
+    context_window: 32000
+    max_output_tokens: 2048

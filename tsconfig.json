@@ -15,5 +15,5 @@
   // apps/web 是浏览器代码，需要 DOM lib，由其自身 tsconfig 单独类型检查
   // （见根脚本 web:typecheck）。DOM lib 会把全局 ReadableStream 覆盖为
   // 非 async-iterable，破坏 Node 侧包，故不在此根配置中纳入 apps/web。
-  "exclude": ["apps/web"]
+  "exclude": ["apps/web", "apps/web-next"]
 }

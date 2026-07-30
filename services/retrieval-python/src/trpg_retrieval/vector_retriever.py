@@ -4,7 +4,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .domain import RuleDocument, SearchHit
 from .repository import RuleRepository
-from .vector_index import COLLECTION_NAME
+from .vector_index import LEGACY_COLLECTION_NAME, embed_query, prepare_fastembed_model
 
 
 class ChromaVectorRetriever:
@@ -30,12 +30,18 @@ class ChromaVectorRetriever:
         self.search_k = search_k
         if self.manifest.get("embeddingEngine") != "fastembed":
             raise RuntimeError("Unsupported vector index embedding engine")
+        self.ruleset_id = str(self.manifest.get("rulesetId", "pathfinder-1e"))
+        self.model_name = str(self.manifest["model"])
+        prepare_fastembed_model(TextEmbedding, self.model_name)
         self.model = TextEmbedding(
-            model_name=self.manifest["model"],
+            model_name=self.model_name,
             cache_dir=self.manifest.get("cacheDir"),
         )
         client = chromadb.PersistentClient(path=str(index_dir / "chroma"))
-        self.collection = client.get_collection(COLLECTION_NAME)
+        collection_name = str(
+            self.manifest.get("collectionName", LEGACY_COLLECTION_NAME)
+        )
+        self.collection = client.get_collection(collection_name)
 
     def search(
         self,
@@ -45,7 +51,7 @@ class ChromaVectorRetriever:
         source_ids: Optional[Sequence[str]] = None,
     ) -> List[SearchHit]:
         del documents
-        query_embedding = next(iter(self.model.query_embed(query)))
+        query_embedding = next(iter(embed_query(self.model, self.model_name, query)))
         where = self._where(source_ids)
         result = self.collection.query(
             query_embeddings=[query_embedding.tolist()],
@@ -70,7 +76,7 @@ class ChromaVectorRetriever:
 
         ranked = sorted(best_by_parent.items(), key=lambda item: item[1][0], reverse=True)
         parent_ids = [parent_id for parent_id, _value in ranked[:limit]]
-        parents = self.repository.read("pathfinder-1e", parent_ids)
+        parents = self.repository.read(self.ruleset_id, parent_ids)
         parent_by_id = {document.id: document for document in parents}
         return [
             SearchHit(parent_by_id[parent_id], excerpt, score)
@@ -78,9 +84,8 @@ class ChromaVectorRetriever:
             if parent_id in parent_by_id
         ]
 
-    @staticmethod
-    def _where(source_ids: Optional[Sequence[str]]) -> Dict[str, Any]:
-        filters: List[Dict[str, Any]] = [{"rulesetId": {"$eq": "pathfinder-1e"}}]
+    def _where(self, source_ids: Optional[Sequence[str]]) -> Dict[str, Any]:
+        filters: List[Dict[str, Any]] = [{"rulesetId": {"$eq": self.ruleset_id}}]
         if source_ids:
             filters.append({"sourceId": {"$in": list(source_ids)}})
         return filters[0] if len(filters) == 1 else {"$and": filters}

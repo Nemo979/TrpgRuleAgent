@@ -4,26 +4,33 @@ TrpgRuleAgent 是一个面向跑团规则的可扩展 Agent 平台。第一版�
 
 > 项目不分发 Pathfinder 规则正文。使用者需要自行提供有权使用的 PF1E CHM 文件；源文件、解析结果和向量索引默认只保存在本机。
 
-## 当前里程碑
+## 当前正式链路
 
-第一条可运行纵向链路已经建立，并已接入本地 BGE 向量检索：
+V1 采用单体 Web/Python 架构，面向少量可信用户：
 
 ```text
-CLI -> 自有 Agent Runtime（零第三方运行时依赖）
-    -> ModelProvider（OpenAI-compatible Chat Completions 流式）
-    -> search_rules/read_rules 工具
-    -> Python Retrieval Service -> BGE + Chroma -> PF Rule Pack
+React Web
+  -> 共享密码 + HTTP-only 签名会话
+  -> Python SSE 规则 Agent
+  -> 服务端配置的多个 OpenAI-compatible 模型
+  -> search_rules/read_rules
+  -> BM25 + BGE/Chroma + RRF
+  -> 独立的“游戏系统 + 版本”规则库
 ```
 
-Node 侧 Agent Core、规则 Agent 和 CLI 不依赖任何第三方运行时包，只使用 Node.js 22.19+ 内置的 fetch、AbortSignal 与 Web Streams；TypeScript、Vitest、tsx 仅作为开发依赖。ModelProvider 是可扩展接口，首版支持 OpenAI-compatible Chat Completions 协议（`LLM_PROVIDER=openai-compatible`）。
+模型 ID、Base URL 和 API Key 均由管理员在服务端配置；浏览器不能提交或读取模型密钥。每个对话固定绑定一个规则库，对话内容只保存在当前浏览器。当前已验证 SenseNova、Xiaomi MiMo 和 Agnes 三个模型。
 
 仓库内 Rule Pack 只有明确标注的演示数据，用于验证工程链路，不能作为真实 PF 规则依据。本地可从用户持有的 CHM 导入真实父文档；原始 CHM、解包文件和生成索引均位于 Git 忽略的 `data/` 目录。
+
+旧 Node CLI/BYOK Gateway、无框架 Web 和微信小程序骨架仍暂时保留，待当前链路完成实际试用后一次删除。
 
 ## 目录
 
 项目当前状态、架构边界和后续迭代计划见 [项目现状](docs/project-status.md)。
 
 ```text
+apps/web-next                  当前 React Web 正式入口
+services/app-python            当前 Python 应用服务、规则库管理命令和文件导入器
 apps/cli                       流式命令行入口
 apps/gateway                   BYOK Agent Gateway（HTTP/SSE，模型 Key 由客户端每次请求携带，服务端零持久化）
 apps/web                       基于 Vite 的浏览器调试 UI（零运行时依赖，静态产物；详见 [Web 客户端](docs/web-client.md)）
@@ -38,63 +45,63 @@ services/retrieval-python      Python 检索、索引与评测服务
 rulepacks/pathfinder-1e        PF 规则包定义、演示资料和检索评测集
 ```
 
-## 快速开始
+## 当前 Web 版快速开始
 
 ### 环境要求
 
 - Node.js 22.19+
-- Python 3.9+
+- Python 3.11+
 - PF1E CHM 文件（由使用者自行合法取得）
 - CHM 解包工具：macOS 执行 `brew install chmlib`；Ubuntu 执行 `sudo apt-get install libchm-bin`
 - 一个兼容 OpenAI Chat Completions 协议、并支持工具调用的模型
 
-### 1. 克隆并一键构建规则索引
+### 1. 安装依赖
 
 ```bash
 git clone https://github.com/Nemo979/TrpgRuleAgent.git
 cd TrpgRuleAgent
-npm run setup:pf -- "/absolute/path/to/Pathfinder.chm"
+npm install --ignore-scripts
+python3.12 -m venv .venv312
+.venv312/bin/python -m pip install -e services/retrieval-python -e services/app-python
+.venv312/bin/python -m pip install -r services/retrieval-python/requirements-vector.txt
 ```
 
-这个命令会自动安装 Node.js/Python 依赖、导入 CHM 并建立向量索引。首次下载嵌入模型和构建索引需要一些时间；过程可以断点续建。
+### 2. 配置服务
 
-### 2. 配置模型
-
-安装脚本会创建 `.env`。填写模型端点和密钥：
-
-```dotenv
-LLM_PROVIDER=openai-compatible
-LLM_MODEL=your-model-id
-LLM_BASE_URL=https://your-provider.example/v1
-LLM_API_KEY=your-api-key
-LLM_CONTEXT_WINDOW=128000
-LLM_MAX_TOKENS=8192
-LLM_REASONING=false
-RETRIEVAL_BASE_URL=http://127.0.0.1:8765
-# 云端检索服务可选鉴权令牌，仅由 Gateway 服务端读取
-RETRIEVAL_API_KEY=
-RULESET_ID=pathfinder-1e
-```
-
-`LLM_MODEL`、`LLM_BASE_URL`、`LLM_API_KEY` 为必填项，缺失时 CLI 会给出明确的配置错误。`.env` 已被 Git 忽略。不要把真实密钥填写到 `.env.example` 或提交到版本控制。
-
-### 3. 启动
-
-一个命令同时启动检索服务和交互式 Agent：
+复制配置模板：
 
 ```bash
-npm start
+cp config/app.example.yaml config/app.yaml
+cp .env.example .env
 ```
 
-直接输入问题即可；输入 `/exit` 退出。也可以执行单次问答：
+在 `config/app.yaml` 中配置模型，在 `.env` 中填写共享密码、会话签名密钥和各模型 API Key。两者均被 Git 忽略；不要把真实凭据写入示例文件。
+
+### 3. 准备规则库
+
+管理员通过 `trpg-library extract-chm` 或 `extract-pdf` 提取文本规则，再使用 `build-jsonl` 和 `publish` 分阶段构建、原子发布。完整命令见 [Web/Python 重构目标](docs/refactor-target.md)。
+
+PF1E 规则正文、解析结果和向量索引不会提交到仓库。
+
+### 4. 构建并启动
 
 ```bash
-npm start -- "什么时候会触发借机攻击？"
+npm run next:web:build
+npm run next:server
 ```
 
-如果希望分别观察服务日志，仍可在两个终端分别运行 `npm run retrieval:pf` 和 `npm run cli`。
+默认访问地址为 `http://127.0.0.1:8000/`。服务探针：
 
-### 4.（可选）启动 BYOK Gateway
+```bash
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/ready
+```
+
+## 遗留 CLI/BYOK 链路
+
+以下入口仅为验收后删除旧实现前的兼容保留，不再是正式产品入口。
+
+### 启动 BYOK Gateway
 
 为浏览器前端提供 HTTP/SSE 接口：
 
@@ -104,7 +111,7 @@ npm run gateway
 
 Gateway 采用 BYOK（Bring Your Own Key）模型：用户在创建会话时提交自己的模型连接配置（`provider`/`model`/`baseUrl`/`rulesetId`，经服务端白名单严格校验），每个会话用自己的配置创建 Agent；服务端不读取 `LLM_API_KEY`/`LLM_MODEL`/`LLM_BASE_URL`，模型 Key 由前端页面内存持有并通过每次请求的 `X-Model-Api-Key` 头传入，服务端不落任何持久化。接口协议与安全边界详见 [Gateway API](docs/gateway-api.md)。
 
-### 5.（可选）启动 Web 调试 UI
+### 启动旧 Web 调试 UI
 
 浏览器调试界面基于共享 SDK `@trpg-rule-agent/gateway-client`（零运行时依赖），构建产物为纯静态文件：
 
@@ -151,10 +158,11 @@ npm run eval:retrieval:pf
 ## 开发与验证
 
 ```bash
-npm run check
-npm run test:python
-npm run eval:retrieval:pf:vector
-npm run eval:retrieval:pf
+npm test -- --pool=forks --maxWorkers=1
+npx tsc --noEmit
+npm run next:web:build
+npm run next:test:python
+PYTHONPATH=services/retrieval-python/src python3 -m unittest discover -s services/retrieval-python/tests -v
 ```
 
 ## 安全与许可
@@ -164,18 +172,19 @@ npm run eval:retrieval:pf
 - 使用者负责确认其规则资料、模型服务和生成内容的使用权限。
 - 源代码使用 [MIT License](LICENSE)。规则资料不属于本许可证授权范围。
 
-## 第一版边界
+## 当前第一版边界
 
-- 只支持 `pathfinder-1e` Rule Pack。
-- Agent 每次提问最多搜索 3 次、读取 8 篇规则文档、执行 8 次规则工具。
+- 当前本地只发布了 `pathfinder-1e`，架构支持多个完全不同的游戏系统和版本。
+- Agent 当前每次提问最多搜索 6 次、读取 24 篇规则文档，并受 80,000 字符证据预算约束。
 - 搜索工具只返回摘要；完整父文档必须通过 `read_rules` 按需读取。
 - 每篇已读取文档获得稳定引用编号，例如 `[S1]`。
 - 最终来源列表由程序持有的引用注册表生成，而不是依赖模型编造路径。
+- 文本型 PDF 与 CHM 已支持；扫描件 OCR、图片和复杂图表理解暂不支持。
 
 ## 下一步
 
-1. 为当前 3 道检索漏召回题增加结构化章节切块或重排器实验。
-2. 增加答案级评测，验证事实、引用、工具预算和无依据结论率。
-3. 为导入报告增加重复内容和异常编码审计。
-4. 在 BYOK Gateway 之上增加 React 调试界面和 Agent Trace。
-5. 增加车卡工作流和确定性合法性校验器，再抽取通用 Rule Pack SDK。
+1. 导入并发布第二套真实规则库，验证跨游戏系统隔离。
+2. 增加管理员规则上传与发布页面。
+3. 增加对话摘要、Token 计量和动态检索预算。
+4. 增加答案级评测与剩余检索漏召回优化。
+5. 实际试用验收后一次删除旧 Node/BYOK 和微信小程序实现。

@@ -12,7 +12,15 @@ from .repository import RuleRepository
 
 DEFAULT_MODEL = "BAAI/bge-small-zh-v1.5"
 EMBEDDING_ENGINE = "fastembed"
-COLLECTION_NAME = "pathfinder_1e_child_chunks"
+COLLECTION_NAME = "rule_child_chunks"
+LEGACY_COLLECTION_NAME = "pathfinder_1e_child_chunks"
+CUSTOM_FASTEMBED_MODELS = {
+    "intfloat/multilingual-e5-small": {
+        "dim": 384,
+        "hf": "intfloat/multilingual-e5-small",
+        "model_file": "onnx/model.onnx",
+    },
+}
 
 
 def file_sha256(path: Path) -> str:
@@ -45,6 +53,42 @@ def _matches(value: Dict[str, Any], expected: Dict[str, Any]) -> bool:
     return all(value.get(key) == expected_value for key, expected_value in expected.items())
 
 
+def prepare_fastembed_model(TextEmbedding: Any, model_name: str) -> Dict[str, Any]:
+    supported = {
+        str(item["model"]): item for item in TextEmbedding.list_supported_models()
+    }
+    if model_name not in supported and model_name in CUSTOM_FASTEMBED_MODELS:
+        from fastembed.common.model_description import ModelSource, PoolingType
+
+        value = CUSTOM_FASTEMBED_MODELS[model_name]
+        TextEmbedding.add_custom_model(
+            model=model_name,
+            pooling=PoolingType.MEAN,
+            normalization=True,
+            sources=ModelSource(hf=str(value["hf"])),
+            dim=int(value["dim"]),
+            model_file=str(value["model_file"]),
+        )
+        supported = {
+            str(item["model"]): item for item in TextEmbedding.list_supported_models()
+        }
+    if model_name not in supported:
+        raise ValueError("unsupported FastEmbed model: %s" % model_name)
+    return supported[model_name]
+
+
+def embed_passages(model: Any, model_name: str, texts: List[str], **kwargs: Any) -> Any:
+    if model_name.startswith("intfloat/multilingual-e5-"):
+        return model.embed(["passage: " + text for text in texts], **kwargs)
+    return model.passage_embed(texts, **kwargs)
+
+
+def embed_query(model: Any, model_name: str, query: str) -> Any:
+    if model_name.startswith("intfloat/multilingual-e5-"):
+        return model.embed(["query: " + query])
+    return model.query_embed(query)
+
+
 def build_index(
     documents_path: Path,
     index_dir: Path,
@@ -66,6 +110,14 @@ def build_index(
             "Vector dependencies are missing. Install requirements-vector.txt"
         ) from error
 
+    repository = RuleRepository.from_jsonl(documents_path)
+    rulesets = repository.rulesets()
+    if len(rulesets) != 1:
+        raise ValueError(
+            "a vector index must contain exactly one rule library; found %d" % len(rulesets)
+        )
+    ruleset_id = rulesets[0]
+    collection_name = COLLECTION_NAME
     source_hash = file_sha256(documents_path)
     index_dir.mkdir(parents=True, exist_ok=True)
     resolved_cache_dir = cache_dir or (index_dir / "model-cache")
@@ -76,6 +128,8 @@ def build_index(
         "sourceSha256": source_hash,
         "model": model_name,
         "embeddingEngine": EMBEDDING_ENGINE,
+        "rulesetId": ruleset_id,
+        "collectionName": collection_name,
         "chunkSize": chunk_size,
         "chunkOverlap": chunk_overlap,
     }
@@ -98,12 +152,11 @@ def build_index(
         build_state.update({"status": "building", "indexedChunks": 0})
         _write_json(build_state_path, build_state)
 
-    repository = RuleRepository.from_jsonl(documents_path)
     documents = repository.all()
     client = chromadb.PersistentClient(path=str(index_dir / "chroma"))
     if force:
         try:
-            client.delete_collection(COLLECTION_NAME)
+            client.delete_collection(collection_name)
         except Exception:
             pass
         build_state = dict(expected)
@@ -111,7 +164,7 @@ def build_index(
         _write_json(build_state_path, build_state)
 
     collection = client.get_or_create_collection(
-        COLLECTION_NAME,
+        collection_name,
         metadata={"hnsw:space": "cosine"},
     )
     existing_chunk_count = collection.count()
@@ -119,6 +172,7 @@ def build_index(
         print("Resuming vector index after %d existing chunks" % existing_chunk_count)
 
     print("Loading FastEmbed model: %s" % model_name, flush=True)
+    model_metadata = prepare_fastembed_model(TextEmbedding, model_name)
     model = TextEmbedding(
         model_name=model_name,
         cache_dir=str(resolved_cache_dir),
@@ -127,10 +181,6 @@ def build_index(
     started_at = time.time()
     chunk_count = existing_chunk_count
     indexed_this_run = 0
-    model_metadata = next(
-        item for item in TextEmbedding.list_supported_models()
-        if item["model"] == model_name
-    )
     embedding_dimension = int(model_metadata["dim"])
 
     chunks = itertools.islice(
@@ -140,14 +190,16 @@ def build_index(
     )
     for batch_number, batch in enumerate(batched(chunks, write_batch_size), start=1):
         embedding_started_at = time.time()
-        embeddings = list(model.passage_embed(
+        embeddings = list(embed_passages(
+            model,
+            model_name,
             [chunk.search_text for chunk in batch],
             batch_size=batch_size,
             parallel=parallel,
         ))
         embedding_seconds = time.time() - embedding_started_at
         parent_documents = repository.read(
-            "pathfinder-1e",
+            ruleset_id,
             [chunk.parent_id for chunk in batch],
         )
         parent_by_id = {document.id: document for document in parent_documents}
@@ -197,7 +249,8 @@ def build_index(
             )
 
     manifest = {
-        "rulesetId": "pathfinder-1e",
+        "rulesetId": ruleset_id,
+        "collectionName": collection_name,
         "sourceDocuments": str(documents_path),
         "sourceSha256": source_hash,
         "documentCount": len(documents),

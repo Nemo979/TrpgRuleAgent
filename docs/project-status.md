@@ -1,22 +1,53 @@
 # TrpgRuleAgent 项目现状
 
-更新时间：2026-07-24
+更新时间：2026-07-30
 
 本文档用于记录当前实现状态、架构边界和后续迭代重点。后续开发前应先阅读本文，并同步更新其中的状态。
 
 ## 一句话概览
 
-TrpgRuleAgent 是一个面向 TRPG 规则问答的独立 Agent 项目。它不再依赖 pi-agent，Node.js 运行时只使用内置能力；模型采用 BYOK（用户自行填写模型 Base URL、模型 ID 和 API Key），规则检索支持本地服务或云端 HTTP 服务。
+TrpgRuleAgent 当前是一套面向少量可信用户的 Web 规则问答应用：React Web 是正式入口，Python 服务统一负责共享密码登录、服务端多模型配置、规则检索、证据引用与来源预览。旧 Node/BYOK Gateway 和微信小程序代码仍保留作为遗留实现，待新链路验收后一次删除。
 
 ## 当前发布状态
 
-- 主开发基线：`main`
-- 当前整合分支：`release`
-- `release` 已合并所有已完成阶段，并已推送远程仓库。
+- 主开发基线：`release`
+- 当前 Web/Python 重构分支：`codex/web-python-rebuild`
+- 当前版本已完成 V1 稳定性收口和本地真实模型验收，但重构工作仍未提交、合并回 `release`。
 - 当前版本仍属于第一版工程基线，尚未建立正式语义化版本号和生产发布流水线。
 - `main` 不应直接开发；新阶段应从合适的基线创建 `codex/*` 分支，完成后合并到 `release`。
 
 ## 已完成能力
+
+### 当前正式 Web/Python 链路
+
+- `apps/web-next` 提供 React Web，支持桌面与手机浏览器。
+- `services/app-python` 提供共享密码登录、HTTP-only 签名会话、SSE 聊天、来源读取和静态 Web 托管。
+- 模型由服务端 YAML 配置，API Key 只从环境变量读取；客户端不能提交或查看模型密钥。
+- 已接入 SenseNova `deepseek-v4-flash`、Xiaomi `mimo-v2.5` 和 `agnes-2.5-flash`。
+- 每个模型可独立配置上下文窗口、最大输出、请求超时和最多重试次数。
+- Agnes 使用官方 `chat_template_kwargs.enable_thinking=false` 原生关闭 thinking。
+- 错误响应提供稳定错误码、是否可重试和请求 ID；安全日志不记录问题正文、回答或密钥。
+- `/health` 检查进程存活，`/ready` 检查已发布规则库和模型配置是否可用。
+- 模型必须读取规则证据后才能回答；漏写内联脚注时会补充实际读取的来源标签。
+- 对话仅保存在当前浏览器 `localStorage`，服务端不持久化原始问题和回答。
+
+### 当前规则库
+
+- PF1E 中文规则库已发布 2134 个父文档、29621 个检索子块。
+- 当前发布版本为 `20260729T145539Z`。
+- 85 题混合检索回归为 Hit@5 96.5%、MRR 0.8210。
+- 文本型 PDF 和 CHM 可由管理员命令导入；构建与原子发布分离。
+
+### V1 稳定性验收
+
+- TypeScript/Vitest：26 个测试文件、257 项测试通过。
+- Python 应用服务：23 项测试通过。
+- Python 检索服务：14 项测试通过。
+- 全仓 TypeScript 类型检查和 Web 生产构建通过。
+- 三个真实模型均完成 PF1E 检索、回答、来源和结束事件验收。
+- 390×844 手机视口完成对话切换、模型选择、Markdown、输入区和来源抽屉验收。
+
+以下章节记录的是仍保留在仓库中的旧 Node/BYOK 能力，不再代表当前正式产品入口。
 
 ### Agent Runtime
 
@@ -68,24 +99,24 @@ docs/                    架构、协议、客户端和项目状态文档
 
 ## 当前运行方式
 
-### 本地演示
+### 当前 Web/Python 应用
 
 ```bash
 npm install
-npm run retrieval:dev
-npm run gateway
-npm run web:dev
+npm run next:web:build
+npm run next:server
 ```
 
-Gateway 默认监听 `127.0.0.1:8787`，本地检索服务默认监听 `127.0.0.1:8765`。生产或云端检索部署时，设置 `RETRIEVAL_BASE_URL`；需要鉴权时设置 `RETRIEVAL_API_KEY`。
+应用默认监听 `127.0.0.1:8000`。配置参考 `config/app.example.yaml`，本地密钥只写入被 Git 忽略的 `.env`。
 
 ### 常用验证
 
 ```bash
 npx tsc --noEmit
-npm run web:typecheck
-npm run web:build
-npm run test:python
+npm test -- --pool=forks --maxWorkers=1
+npm run next:web:build
+npm run next:test:python
+PYTHONPATH=services/retrieval-python/src python3 -m unittest discover -s services/retrieval-python/tests -v
 ```
 
 Vitest 在当前环境可能因并发 worker 或测试中的长连接而长时间不退出；定位单个测试文件时可使用：
@@ -104,13 +135,16 @@ npx vitest run <test-file> --pool=forks --maxWorkers=1
 
 ## 尚未完成的重点
 
-1. 检索质量：结构化切块、重排器和漏召回题优化。
-2. 答案级评测：事实、引用、工具预算和无依据结论率。
-3. 规则导入审计：重复内容和异常编码检测。
-4. Web/小程序产品化：登录、会话列表、模型配置管理和正式发布工程。
-5. 生产基础设施：Redis/数据库 SessionStore、多实例共享限流、监控和 tracing。
-6. 领域工作流：车卡、确定性属性计算、合法性校验和通用 Rule Pack SDK。
-7. 云端检索具体实现：目前是协议兼容层，尚未绑定具体云向量数据库厂商。
+1. 提交当前重构并合并回 `release`，完成正式 V1 代码验收。
+2. 导入并发布第二套真实规则库，验证跨游戏系统隔离。
+3. 管理员规则上传与发布页面；目前只有命令行工作流。
+4. 上下文摘要、Token 计量和比简单滑动窗口更完整的上下文管理。
+5. 动态检索预算；当前搜索、读取和证据字符上限仍是固定安全值。
+6. 答案级评测：事实、引用支持度、工具预算和无依据结论率。
+7. 检索质量：结构化切块、重排器和剩余 3 道 Hit@5 漏召回题优化。
+8. PDF/CHM 图片、扫描件 OCR 和复杂表格理解。
+9. 生产基础设施：HTTPS 反代、登录限流、监控、tracing、备份和正式发布流水线。
+10. 验收后一次删除旧 Node Web/Gateway 和微信小程序实现。
 
 ## 后续开发约定
 

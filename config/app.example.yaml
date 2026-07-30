@@ -1,0 +1,38 @@
+shared_password_env: TRPG_SHARED_PASSWORD
+session_secret_env: TRPG_SESSION_SECRET
+library_root: data/libraries
+cookie_secure: true
+session_ttl_seconds: 604800
+max_concurrent_turns: 5
+
+models:
+  - id: deepseek-v4-flash
+    label: DeepSeek V4 Flash（SenseNova）
+    base_url: https://token.sensenova.cn/v1
+    model: deepseek-v4-flash
+    api_key_env: LLM_API_KEY
+    context_window: 128000
+    max_output_tokens: 8192
+    request_timeout_seconds: 120
+    max_retries: 1
+
+  - id: mimo-v2.5
+    label: Xiaomi MiMo V2.5
+    base_url: https://api.xiaomimimo.com/v1
+    model: mimo-v2.5
+    api_key_env: MIMO_API_KEY
+    context_window: 1000000
+    max_output_tokens: 8192
+    request_timeout_seconds: 120
+    max_retries: 1
+
+  - id: agnes-2.5-flash
+    label: Agnes 2.5 Flash
+    base_url: https://apihub.agnes-ai.com/v1
+    model: agnes-2.5-flash
+    api_key_env: AGNES_API_KEY
+    context_window: 524288
+    max_output_tokens: 8192
+    request_timeout_seconds: 180
+    max_retries: 1
+    disable_thinking: true

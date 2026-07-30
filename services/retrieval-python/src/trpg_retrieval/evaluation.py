@@ -43,13 +43,17 @@ def evaluate(
     cases: Sequence[RetrievalCase],
     limit: int,
 ) -> Dict[str, Any]:
+    rulesets = repository.rulesets()
+    if len(rulesets) != 1:
+        raise ValueError("evaluation requires exactly one rule library")
+    ruleset_id = rulesets[0]
     rows: List[Dict[str, Any]] = []
     reciprocal_rank_sum = 0.0
     hits = 0
     for case in cases:
         results = retriever.search(
             case.query,
-            repository.all("pathfinder-1e"),
+            repository.all(ruleset_id),
             limit,
         )
         result_ids = [result.document.id for result in results]

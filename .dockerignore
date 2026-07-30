@@ -1,0 +1,10 @@
+.git
+.env
+config/app.yaml
+.venv*
+node_modules
+**/node_modules
+**/dist
+**/build
+data
+.DS_Store

@@ -133,18 +133,34 @@ describe("rule tools integration", () => {
   });
 
   it("AbortSignal 透传给规则客户端请求", async () => {
-    const fetchMock = vi.fn().mockImplementation(async () =>
-      new Response(JSON.stringify({ data: [] }), { status: 200 }),
+    let requestSignal: AbortSignal | undefined;
+    const fetchMock = vi.fn().mockImplementation(
+      async (_url: string, init: RequestInit) => {
+        requestSignal = init.signal ?? undefined;
+        return await new Promise<Response>((_resolve, reject) => {
+          requestSignal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("aborted", "AbortError")),
+            { once: true },
+          );
+        });
+      },
     );
     vi.stubGlobal("fetch", fetchMock);
     const { search } = createTools();
     const controller = new AbortController();
 
-    await search.execute({ query: "q" }, { toolCallId: "s", signal: controller.signal });
-
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://127.0.0.1:8765/search",
-      expect.objectContaining({ signal: controller.signal }),
+    const pending = search.execute(
+      { query: "q" },
+      { toolCallId: "s", signal: controller.signal },
     );
+    controller.abort();
+
+    await expect(pending).rejects.toMatchObject({
+      message: "检索请求已取消",
+      status: 499,
+    });
+    expect(requestSignal).toBeInstanceOf(AbortSignal);
+    expect(requestSignal?.aborted).toBe(true);
   });
 });
