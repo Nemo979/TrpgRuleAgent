@@ -108,10 +108,13 @@ def main() -> None:
     repository = RuleRepository.from_jsonl(args.documents)
     vector_retriever = ChromaVectorRetriever(repository, args.index_dir)
     if args.backend == "hybrid":
+        from .coordinator import RetrievalCoordinator
         from .hybrid_retriever import HybridRetriever
-        retriever: RuleRetriever = HybridRetriever(
-            vector_retriever,
-            InMemoryRetriever(),
+        retriever: RuleRetriever = RetrievalCoordinator(
+            HybridRetriever(
+                vector_retriever,
+                InMemoryRetriever(),
+            )
         )
     else:
         retriever = vector_retriever

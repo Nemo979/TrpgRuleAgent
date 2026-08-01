@@ -37,10 +37,13 @@ class Library:
         repository = RuleRepository.from_jsonl(manifest.documents)
         retriever = InMemoryRetriever()
         if manifest.index_dir is not None:
+            from trpg_retrieval.coordinator import RetrievalCoordinator
             from trpg_retrieval.hybrid_retriever import HybridRetriever
             from trpg_retrieval.vector_retriever import ChromaVectorRetriever
 
-            retriever = HybridRetriever(ChromaVectorRetriever(repository, manifest.index_dir))
+            retriever = RetrievalCoordinator(
+                HybridRetriever(ChromaVectorRetriever(repository, manifest.index_dir))
+            )
         self.service = RetrievalService(repository, retriever)
 
     def search(self, query: str, limit: int) -> list[dict[str, Any]]:
