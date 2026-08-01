@@ -235,10 +235,13 @@ class EvidenceBudget:
 @dataclass
 class ToolLoopController:
     max_searches_without_read: int = 2
+    max_searches_with_evidence: int = 3
+    max_answer_documents: int = 8
     seen_queries: set[str] = field(default_factory=set)
     seen_result_ids: set[str] = field(default_factory=set)
     searches_without_read: int = 0
     invalid_tool_calls: int = 0
+    latest_result_ids: list[str] = field(default_factory=list)
 
     def before_search(self, query: str) -> str | None:
         normalized = _normalize_query(query)
@@ -254,6 +257,9 @@ class ToolLoopController:
     def after_search(self, hits: list[dict[str, Any]]) -> str | None:
         self.invalid_tool_calls = 0
         self.searches_without_read += 1
+        self.latest_result_ids = [
+            str(hit["id"]) for hit in hits if hit.get("id")
+        ]
         result_ids = {str(hit.get("id", "")) for hit in hits if hit.get("id")}
         if not result_ids:
             return "no_results"
@@ -356,17 +362,17 @@ async def run_rule_turn(
                         citations=citations,
                         library=library,
                         stop_reason="model_stopped_without_evidence",
+                        model=model,
+                        budget=budget,
+                        controller=controller,
+                        request_id=request_id,
+                        decision_index=decision_index,
                     ):
                         yield event
                     return
                 raise RuntimeError("模型未读取规则证据")
-            if decision.content:
-                yield {"type": "text_delta", "delta": decision.content}
-                suffix = _missing_citation_suffix(decision.content, citations.labels())
-                if suffix:
-                    yield {"type": "text_delta", "delta": suffix}
-            yield {"type": "sources", "sources": citations.public()}
-            yield {"type": "done"}
+            async for event in _stream_final_answer(gateway, conversation, citations):
+                yield event
             return
 
         requested_calls = list(decision.tool_calls)
@@ -401,6 +407,11 @@ async def run_rule_turn(
                     citations=citations,
                     library=library,
                     stop_reason="model_finished_without_evidence",
+                    model=model,
+                    budget=budget,
+                    controller=controller,
+                    request_id=request_id,
+                    decision_index=decision_index,
                 ):
                     yield event
                 return
@@ -456,6 +467,11 @@ async def run_rule_turn(
                 citations=citations,
                 library=library,
                 stop_reason=execution.stop_reason,
+                model=model,
+                budget=budget,
+                controller=controller,
+                request_id=request_id,
+                decision_index=decision_index,
             ):
                 yield event
             return
@@ -475,6 +491,11 @@ async def run_rule_turn(
         citations=citations,
         library=library,
         stop_reason="decision_limit",
+        model=model,
+        budget=budget,
+        controller=controller,
+        request_id=request_id,
+        decision_index=10,
     ):
         yield event
 
@@ -484,9 +505,10 @@ async def _stream_final_answer(
     conversation: list[dict[str, Any]],
     citations: CitationRegistry,
 ) -> AsyncIterator[dict[str, Any]]:
+    answer_conversation = _final_answer_conversation(conversation, citations)
     yield {"type": "status", "status": "answering"}
     answer_parts: list[str] = []
-    async for delta in gateway.stream_answer(conversation):
+    async for delta in gateway.stream_answer(answer_conversation):
         answer_parts.append(delta)
         yield {"type": "text_delta", "delta": delta}
     suffix = _missing_citation_suffix("".join(answer_parts), citations.labels())
@@ -503,7 +525,46 @@ async def _finish_after_controller_stop(
     citations: CitationRegistry,
     library: Library,
     stop_reason: str,
+    model: ModelConfig,
+    budget: EvidenceBudget,
+    controller: ToolLoopController,
+    request_id: str | None,
+    decision_index: int,
 ) -> AsyncIterator[dict[str, Any]]:
+    should_read_candidates = controller.latest_result_ids and (
+        (
+            not citations.by_document_id
+            and stop_reason in {"searches_without_read", "repeated_results"}
+        )
+        or stop_reason == "evidence_saturation"
+    )
+    remaining_documents = max(
+        0,
+        controller.max_answer_documents - budget.documents,
+    )
+    if should_read_candidates and remaining_documents:
+        fallback = _execute_tool(
+            name="read_rules",
+            arguments=json.dumps(
+                {"ids": controller.latest_result_ids[: min(4, remaining_documents)]}
+            ),
+            library=library,
+            budget=budget,
+            citations=citations,
+            controller=controller,
+        )
+        yield {"type": "status", "status": fallback.status}
+        _log_tool_step(
+            request_id=request_id,
+            model=model,
+            library=library,
+            decision_index=decision_index,
+            requested_calls=0,
+            executed_tool="read_rules_fallback",
+            budget=budget,
+            stop_reason=fallback.stop_reason,
+            new_documents=fallback.new_documents,
+        )
     if not citations.by_document_id:
         yield {"type": "status", "status": "answering"}
         yield {
@@ -530,6 +591,45 @@ async def _finish_after_controller_stop(
     )
     async for event in _stream_final_answer(gateway, conversation, citations):
         yield event
+
+
+def _final_answer_conversation(
+    conversation: list[dict[str, Any]],
+    citations: CitationRegistry,
+) -> list[dict[str, str]]:
+    if not citations.by_document_id:
+        return conversation
+    question = next(
+        (
+            str(message.get("content", ""))
+            for message in reversed(conversation)
+            if message.get("role") == "user"
+        ),
+        "",
+    )
+    evidence = "\n\n".join(
+        (
+            f"[{label}] {document['title']}\n"
+            f"路径：{document['fullPath']}\n"
+            f"正文：{document['content']}"
+        )
+        for label, document in citations.by_document_id.values()
+    )
+    return [
+        {
+            "role": "system",
+            "content": (
+                "你是最终答案生成器，检索阶段已经结束，工具不可用。"
+                "现在直接回答用户最后的问题，不要描述搜索、读取、工具调用或后续计划，"
+                "也不要说‘让我继续搜索’。只能使用下方证据，规则结论必须标注对应的"
+                "[S1]、[S2] 等脚注；证据没有覆盖的部分明确说证据不足。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"问题：{question}\n\n已读取证据：\n{evidence}",
+        },
+    ]
 
 
 def _system_prompt(library: Library) -> str:
@@ -607,6 +707,12 @@ def _execute_tool(
             )
         hits = library.search(query, limit)
         stop_reason = controller.after_search(hits)
+        if (
+            stop_reason is None
+            and citations.by_document_id
+            and budget.searches >= controller.max_searches_with_evidence
+        ):
+            stop_reason = "evidence_saturation"
         return ToolExecution(
             content=json.dumps(hits, ensure_ascii=False),
             status="searching",
@@ -622,7 +728,17 @@ def _execute_tool(
                 status="thinking",
                 stop_reason=stop_reason,
             )
-        ids = [str(value) for value in raw_ids]
+        remaining_documents = max(
+            0,
+            controller.max_answer_documents - budget.documents,
+        )
+        if not remaining_documents:
+            return ToolExecution(
+                content='{"status":"stopped","reason":"answer_document_limit"}',
+                status="reading",
+                stop_reason="answer_document_limit",
+            )
+        ids = [str(value) for value in raw_ids[:remaining_documents]]
         documents = library.read(list(dict.fromkeys(ids)))
         new_documents = [
             document

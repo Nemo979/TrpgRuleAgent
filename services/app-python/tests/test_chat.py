@@ -204,6 +204,24 @@ class RepeatedSearchGateway:
         yield ""
 
 
+class DifferentSearchSameResultsGateway:
+    def __init__(self, _model):
+        self.step = 0
+
+    async def decide(self, messages, tools):
+        self.step += 1
+        return tool_decision(
+            ToolInvocation(
+                f"search-{self.step}",
+                "search_rules",
+                f'{{"query":"角色创建{self.step}"}}',
+            )
+        )
+
+    async def stream_answer(self, messages):
+        yield "根据候选规则章节，下面说明角色创建步骤。[S1]"
+
+
 class SearchThenStopsGateway:
     def __init__(self, _model):
         self.step = 0
@@ -265,6 +283,8 @@ class ParallelSearchGateway:
 
 
 class RepeatedReadGateway:
+    final_messages: list[dict] = []
+
     def __init__(self, _model):
         self.step = 0
 
@@ -283,6 +303,7 @@ class RepeatedReadGateway:
         )
 
     async def stream_answer(self, messages):
+        type(self).final_messages = list(messages)
         yield "只能确认已经读取的借机攻击规则。"
 
 
@@ -322,8 +343,7 @@ class EndlessDifferentSearchGateway:
         )
 
     async def stream_answer(self, messages):
-        raise AssertionError("no-evidence early stop must not call the model again")
-        yield ""
+        yield "已读取候选章节，现在直接回答用户问题。"
 
 
 class InvalidToolGateway:
@@ -347,6 +367,31 @@ class ProductiveEndlessGateway:
 
     async def decide(self, messages, tools):
         self.step += 1
+        call = (
+            ToolInvocation(
+                "search-1",
+                "search_rules",
+                '{"query":"复杂问题"}',
+            )
+            if self.step == 1
+            else ToolInvocation(
+                f"read-{self.step}",
+                "read_rules",
+                f'{{"ids":["pf1e:证据{self.step}"]}}',
+            )
+        )
+        return tool_decision(call)
+
+    async def stream_answer(self, messages):
+        yield "已达到本轮取证上限，只根据已读取的规则回答。"
+
+
+class EvidenceSaturationGateway:
+    def __init__(self, _model):
+        self.step = 0
+
+    async def decide(self, messages, tools):
+        self.step += 1
         number = (self.step + 1) // 2
         call = (
             ToolInvocation(
@@ -364,7 +409,7 @@ class ProductiveEndlessGateway:
         return tool_decision(call)
 
     async def stream_answer(self, messages):
-        yield "已达到本轮取证上限，只根据已读取的规则回答。"
+        yield "三轮检索后直接根据已读取证据回答。"
 
 
 class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
@@ -480,6 +525,30 @@ class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(events[-1]["type"], "done")
 
+    async def test_repeated_results_are_read_before_final_answer(self) -> None:
+        library = FakeLibrary()
+        events = [
+            event
+            async for event in run_rule_turn(
+                model=self.model(),
+                library=library,
+                messages=[{"role": "user", "content": "我想创建一个角色"}],
+                gateway_factory=DifferentSearchSameResultsGateway,
+            )
+        ]
+
+        self.assertEqual(library.search_queries, ["角色创建1", "角色创建2"])
+        self.assertEqual(library.read_ids, [["pf1e:combat"]])
+        self.assertIn(
+            "下面说明角色创建步骤",
+            "".join(event.get("delta", "") for event in events),
+        )
+        self.assertEqual(
+            len(next(event["sources"] for event in events if event["type"] == "sources")),
+            1,
+        )
+        self.assertEqual(events[-1]["type"], "done")
+
     async def test_model_stopping_after_search_returns_no_evidence_not_error(self) -> None:
         events = [
             event
@@ -560,6 +629,18 @@ class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
             "只能确认已经读取的借机攻击规则。",
             "".join(event.get("delta", "") for event in events),
         )
+        self.assertEqual(
+            [message["role"] for message in RepeatedReadGateway.final_messages],
+            ["system", "user"],
+        )
+        self.assertIn(
+            "不要说‘让我继续搜索’",
+            RepeatedReadGateway.final_messages[0]["content"],
+        )
+        self.assertIn(
+            "[S1] 借机攻击",
+            RepeatedReadGateway.final_messages[1]["content"],
+        )
         sources = next(event["sources"] for event in events if event["type"] == "sources")
         self.assertEqual([source["documentId"] for source in sources], ["pf1e:combat"])
         self.assertEqual(events[-1]["type"], "done")
@@ -578,8 +659,13 @@ class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(library.search_queries, ["查询1", "查询2"])
         self.assertIn(
-            "没有找到足够可靠的可引用依据",
+            "已读取候选章节，现在直接回答用户问题。",
             "".join(event.get("delta", "") for event in events),
+        )
+        self.assertEqual(library.read_ids, [["pf1e:查询2"]])
+        self.assertEqual(
+            len(next(event["sources"] for event in events if event["type"] == "sources")),
+            1,
         )
         self.assertEqual(events[-1]["type"], "done")
 
@@ -612,15 +698,36 @@ class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
             )
         ]
 
-        self.assertEqual(len(library.search_queries), 5)
-        self.assertEqual(len(library.read_ids), 5)
+        self.assertEqual(len(library.search_queries), 1)
+        self.assertEqual(len(library.read_ids), 8)
         self.assertIn(
             "只根据已读取的规则回答",
             "".join(event.get("delta", "") for event in events),
         )
         self.assertEqual(
             len(next(event["sources"] for event in events if event["type"] == "sources")),
-            5,
+            8,
+        )
+        self.assertEqual(events[-1]["type"], "done")
+
+    async def test_third_search_with_evidence_reads_candidates_then_finishes(self) -> None:
+        library = ExpandingLibrary()
+        events = [
+            event
+            async for event in run_rule_turn(
+                model=self.model(),
+                library=library,
+                messages=[{"role": "user", "content": "复杂规则问题"}],
+                gateway_factory=EvidenceSaturationGateway,
+            )
+        ]
+
+        self.assertEqual(library.search_queries, ["查询1", "查询2", "查询3"])
+        self.assertEqual(len(library.read_ids), 3)
+        self.assertEqual(library.read_ids[-1], ["pf1e:查询3"])
+        self.assertIn(
+            "三轮检索后直接根据已读取证据回答",
+            "".join(event.get("delta", "") for event in events),
         )
         self.assertEqual(events[-1]["type"], "done")
 
