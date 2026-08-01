@@ -31,6 +31,18 @@ _RULE_CATEGORIES = (
     "条件",
     "效果",
 )
+_CHARACTER_CREATION_SUBTOPICS = (
+    "属性",
+    "能力值",
+    "技能",
+    "专长",
+    "装备",
+    "法术",
+    "弱点",
+    "特技",
+    "生命值",
+    "购点",
+)
 
 
 class RetrievalCoordinator:
@@ -54,8 +66,9 @@ class RetrievalCoordinator:
         source_ids: Optional[Sequence[str]] = None,
     ) -> List[SearchHit]:
         expanded = expand_query(query)
+        retrieval_query = expanded if _is_character_creation_query(query) else query
         hits = self.base.search(
-            query,
+            retrieval_query,
             documents,
             max(limit, self.candidate_limit),
             source_ids,
@@ -66,7 +79,11 @@ class RetrievalCoordinator:
                 hit.document,
                 hit.excerpt,
                     hit.score
-                    + self.heading_bonus * heading_match_score(expanded, hit.document),
+                    + self.heading_bonus
+                    * (
+                        heading_match_score(expanded, hit.document)
+                        + character_creation_heading_score(query, hit.document)
+                    ),
                 ),
                 heading_match_score(expanded, hit.document),
             )
@@ -111,6 +128,16 @@ def heading_match_score(query: str, document: RuleDocument) -> float:
 
     matches = _matched_heading_units(compact_query, _heading_components(document))
     return min(float(len(matches)), 5.0) if _has_entity_category_pair(matches) else 0.0
+
+
+def character_creation_heading_score(query: str, document: RuleDocument) -> float:
+    if not _is_character_creation_query(query):
+        return 0.0
+    return 2.0 if any(
+        marker in _compact(component)
+        for component in _heading_components(document)
+        for marker in ("创建", "建立")
+    ) else 0.0
 
 
 def _matched_heading_units(compact_query: str, components: list[object]) -> set[str]:
@@ -169,3 +196,11 @@ def _is_direct_lookup(query: str) -> bool:
     if re.search(r"(?:是否|能否|可否|为什么|为何|如何).*(?:与|和|同时|影响)", query):
         return False
     return bool(re.search(r"(?:有哪些|有什么|是什么|列出|多少|效果)", query))
+
+
+def _is_character_creation_query(query: str) -> bool:
+    return bool(
+        re.search(r"(?:创建|建立)", query)
+        and re.search(r"(?:角色|人物)", query)
+        and not any(topic in query for topic in _CHARACTER_CREATION_SUBTOPICS)
+    )

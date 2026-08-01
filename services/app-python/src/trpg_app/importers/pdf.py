@@ -36,6 +36,7 @@ def import_pdf(
             raw_text = page.extract_text(layout=True) or ""
             text = normalize_layout_text(raw_text)
             detected_headings = detect_page_headings(raw_text)
+            local_headings = detect_bulleted_page_headings(raw_text)
             raw_tables = page.extract_tables() or []
             rendered_tables: list[str] = []
             for table_index, table in enumerate(raw_tables, start=1):
@@ -67,7 +68,7 @@ def import_pdf(
                 continue
             content = "\n\n".join(content_parts)
             heading_path, inherited_headings, structural_blocks = (
-                heading_context.partition(content, detected_headings)
+                heading_context.partition(content, detected_headings, local_headings)
             )
             document_id = _page_id(library_id, pdf_path.name, page_number)
             path_parts = [*heading_path, f"第 {page_number} 页"]
@@ -90,6 +91,7 @@ def import_pdf(
                         "structureVersion": 2,
                         "headingPath": heading_path,
                         "detectedHeadings": detected_headings,
+                        "localHeadings": local_headings,
                         "inheritedHeadings": inherited_headings,
                         "structuralBlocks": structural_blocks,
                     },
@@ -124,18 +126,24 @@ class HeadingContext:
         self,
         content: str,
         headings: list[str],
+        local_headings: list[str] | None = None,
     ) -> tuple[list[str], list[str], list[dict[str, Any]]]:
         before = self._values()
         heading_set = set(headings)
+        local_heading_set = set(local_headings or [])
         blocks: list[dict[str, Any]] = []
         lines: list[str] = []
         block_path = [self.source_title, *before]
         for line in content.splitlines():
-            if line in heading_set:
+            heading_label = _heading_label(line)
+            if heading_label in heading_set:
                 self._append_block(blocks, block_path, lines)
                 lines = []
-                self._apply(line)
-                block_path = [self.source_title, *self._values()]
+                if heading_label in local_heading_set:
+                    block_path = [self.source_title, *self._values(), heading_label]
+                else:
+                    self._apply(heading_label)
+                    block_path = [self.source_title, *self._values()]
             lines.append(line)
         self._append_block(blocks, block_path, lines)
         after = self._values()
@@ -187,11 +195,27 @@ def detect_page_headings(value: str) -> list[str]:
             continue
         previous_blank = index == 0 or not normalized[index - 1]
         next_blank = index == len(normalized) - 1 or not normalized[index + 1]
-        if not (previous_blank and next_blank):
+        bulleted = line.startswith(("⚫", "•"))
+        if not previous_blank or (not next_blank and not bulleted):
             continue
         if _looks_like_heading(line):
-            headings.append(line)
+            headings.append(_heading_label(line))
     return list(dict.fromkeys(headings))
+
+
+def detect_bulleted_page_headings(value: str) -> list[str]:
+    return [
+        heading
+        for heading in detect_page_headings(value)
+        if any(
+            (
+                _heading_label(normalized) == heading
+                and _heading_label(normalized) != normalized
+            )
+            for line in value.splitlines()
+            if (normalized := " ".join(line.split()))
+        )
+    ]
 
 
 def is_primary_heading(value: str) -> bool:
@@ -203,8 +227,9 @@ def is_primary_heading(value: str) -> bool:
 
 
 def _looks_like_heading(value: str) -> bool:
-    if value.startswith(("⚫", "•", "-", "|", "※")):
+    if value.startswith(("-", "|", "※")):
         return False
+    value = _heading_label(value)
     if value.endswith(("。", "！", "？", ".", "!", "?", "；", ";")):
         return False
     if re.fullmatch(r"[\d\s/＋+－—-]+", value):
@@ -216,6 +241,10 @@ def _looks_like_heading(value: str) -> bool:
         or re.match(r"^(?:第.+[章节篇部]|\d+(?:\.\d+)*[、.]?)", value)
         or re.search(r"[《》【】]", value)
     )
+
+
+def _heading_label(value: str) -> str:
+    return re.sub(r"^[⚫•]\s*", "", value).strip()
 
 
 def table_to_markdown(table: Sequence[Sequence[Any]]) -> tuple[str, bool]:

@@ -2,6 +2,7 @@ import unittest
 
 from trpg_retrieval.coordinator import (
     RetrievalCoordinator,
+    character_creation_heading_score,
     expand_query,
     heading_match_score,
 )
@@ -40,6 +41,32 @@ class StubRetriever:
 
 
 class RetrievalCoordinatorTest(unittest.TestCase):
+    def test_uses_expanded_query_only_for_character_creation_intent(self) -> None:
+        creation = document("creation", ["规则", "建立角色"])
+        base = StubRetriever([SearchHit(creation, "creation", 0.04)])
+        coordinator = RetrievalCoordinator(base, candidate_limit=1)
+
+        coordinator.search("我想创建一个扮演的角色", [creation], 1)
+
+        self.assertEqual(base.query, "我想创建一个扮演的角色 建立")
+        self.assertGreater(
+            character_creation_heading_score("我想创建一个角色", creation),
+            0,
+        )
+
+    def test_does_not_broaden_specific_character_creation_subtopic(self) -> None:
+        ability = document("ability", ["规则", "属性购点"])
+        base = StubRetriever([SearchHit(ability, "ability", 0.04)])
+        coordinator = RetrievalCoordinator(base, candidate_limit=1)
+
+        coordinator.search("创建角色时属性购点怎么分配", [ability], 1)
+
+        self.assertEqual(base.query, "创建角色时属性购点怎么分配")
+        self.assertEqual(
+            character_creation_heading_score("创建角色时属性购点怎么分配", ability),
+            0,
+        )
+
     def test_expands_common_rule_query_synonyms_deterministically(self) -> None:
         self.assertEqual(expand_query("怎么创建角色"), "怎么创建角色 建立")
         self.assertEqual(

@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from trpg_app.importers.pdf import (
+    detect_bulleted_page_headings,
     detect_page_headings,
     import_pdf,
     table_to_markdown,
@@ -30,6 +31,20 @@ class PdfTableTest(unittest.TestCase):
         self.assertEqual(detect_page_headings("\n20円\n"), [])
         self.assertEqual(detect_page_headings("\n5.最后要做的事\n"), ["5.最后要做的事"])
 
+    def test_accepts_short_bulleted_section_but_not_rule_description(self) -> None:
+        self.assertEqual(
+            detect_page_headings("\n⚫ 吓一跳\n紧接着的规则正文。"),
+            ["吓一跳"],
+        )
+        self.assertEqual(
+            detect_bulleted_page_headings("   ⚫   吓一跳\n紧接着的规则正文。"),
+            ["吓一跳"],
+        )
+        self.assertEqual(
+            detect_page_headings("\n⚫ 一团毛球（4）：通过嬉戏让别人敞开心扉。\n"),
+            [],
+        )
+
     def test_converts_regular_table_to_markdown(self) -> None:
         markdown, reliable = table_to_markdown(
             [["等级", "加值"], ["1", "+1"], ["2", "+2"]]
@@ -44,6 +59,45 @@ class PdfTableTest(unittest.TestCase):
 
 
 class PdfImportWorkflowTest(unittest.TestCase):
+    def test_bulleted_heading_is_local_and_does_not_leak_to_next_page(self) -> None:
+        pages = [
+            fake_page(text="\n其他\n\n⚫ 吓一跳\n紧接着的规则正文。", tables=[]),
+            fake_page(text="下一页延续其他章节。", tables=[]),
+        ]
+        opened_pdf = MagicMock()
+        opened_pdf.__enter__.return_value.pages = pages
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "rules.pdf"
+            source.write_bytes(b"pdf")
+            output = root / "built"
+            with patch(
+                "trpg_app.importers.pdf.pdfplumber.open",
+                return_value=opened_pdf,
+            ):
+                import_pdf(
+                    pdf_path=source,
+                    output_dir=output,
+                    library_id="gss",
+                    source_title="夕妖晚谣",
+                    edition="1.2",
+                )
+            documents = [
+                json.loads(line)
+                for line in (output / "documents.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            self.assertEqual(documents[0]["metadata"]["localHeadings"], ["吓一跳"])
+            self.assertEqual(
+                documents[0]["metadata"]["structuralBlocks"][-1]["headingPath"],
+                ["夕妖晚谣", "其他", "吓一跳"],
+            )
+            self.assertEqual(
+                documents[1]["metadata"]["headingPath"],
+                ["夕妖晚谣", "其他"],
+            )
+
     def test_imports_text_tables_and_warnings_without_a_real_pdf(self) -> None:
         pages = [
             fake_page(
@@ -132,6 +186,7 @@ class PdfImportWorkflowTest(unittest.TestCase):
                         "structureVersion": 2,
                         "headingPath": ["夕妖晚谣"],
                         "detectedHeadings": [],
+                        "localHeadings": [],
                         "inheritedHeadings": [],
                         "structuralBlocks": [
                             {
