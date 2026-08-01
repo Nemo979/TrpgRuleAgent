@@ -3,6 +3,7 @@ import unittest
 from trpg_retrieval.coordinator import (
     RetrievalCoordinator,
     character_creation_heading_score,
+    content_match_score,
     expand_query,
     heading_match_score,
 )
@@ -129,6 +130,26 @@ class RetrievalCoordinatorTest(unittest.TestCase):
         )
 
         self.assertEqual([hit.document.id for hit in hits], ["cat"])
+
+    def test_direct_lookup_keeps_a_strong_exact_evidence_leader(self) -> None:
+        exact = document("exact", ["核心规则", "特殊攻击"])
+        structural = document("structural", ["其他规则", "武器", "减值"])
+        base = StubRetriever([
+            SearchHit(
+                exact,
+                "拥有双武器格斗专长且副手为轻型武器时，主手和副手各承受-2减值。",
+                0.04,
+            ),
+            SearchHit(structural, "无关规则", 0.035),
+        ])
+        query = "有双武器格斗专长且副手是轻型武器时，主手和副手各受多少减值？"
+
+        hits = RetrievalCoordinator(base, candidate_limit=2).search(
+            query, [exact, structural], 10
+        )
+
+        self.assertIn("exact", [hit.document.id for hit in hits])
+        self.assertGreater(content_match_score(query, base.hits[0].excerpt), 0.3)
 
     def test_interaction_question_keeps_unboosted_candidates(self) -> None:
         cat = document("cat", ["夕妖晚谣", "猫", "基本特技"])

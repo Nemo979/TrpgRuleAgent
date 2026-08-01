@@ -99,7 +99,16 @@ class RetrievalCoordinator:
         ]
         scored.sort(key=lambda item: item[0].score, reverse=True)
         if _is_direct_lookup(query) and any(structure > 0 for _hit, structure in scored):
-            reranked = [hit for hit, structure in scored if structure > 0]
+            evidence_leaders = {
+                hit.document.id
+                for hit in hits[:3]
+                if content_match_score(query, hit.excerpt) >= 0.3
+            }
+            reranked = [
+                hit
+                for hit, structure in scored
+                if structure > 0 or hit.document.id in evidence_leaders
+            ]
         else:
             reranked = [hit for hit, _structure in scored]
         return reranked[:limit]
@@ -146,6 +155,22 @@ def character_creation_heading_score(query: str, document: RuleDocument) -> floa
         for component in _heading_components(document)
         for marker in ("创建", "建立")
     ) else 0.0
+
+
+def content_match_score(query: str, content: str) -> float:
+    query_value = _compact(query)
+    content_value = _compact(content)
+    if not query_value or not content_value:
+        return 0.0
+    size = 2 if len(query_value) >= 4 else 1
+    query_units = {
+        query_value[index:index + size]
+        for index in range(len(query_value) - size + 1)
+    }
+    if not query_units:
+        return 0.0
+    matched = sum(unit in content_value for unit in query_units)
+    return matched / len(query_units)
 
 
 def _matched_heading_units(compact_query: str, components: list[object]) -> set[str]:

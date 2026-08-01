@@ -1,0 +1,4 @@
+{"id":"two-weapon-follow-up","turns":[{"query":"有双武器格斗专长且副手是轻型武器时，主手和副手各受多少减值？","relevantIds":["pf1e-8f7e32b30bc6"],"requiredAny":[["主手"],["副手"],["-2","减2"]]},{"query":"如果没有这个专长，但副手仍然是轻型武器呢？","relevantIds":["pf1e-8f7e32b30bc6"],"requiredAny":[["主手"],["副手"],["-4","减4"],["-8","减8"]]}]}
+{"id":"crossblooded-follow-up","turns":[{"query":"混血术士选择两种血统后，在可知法术和意志豁免上有什么缺陷？","relevantIds":["pf1e-829c51d0600d"],"requiredAny":[["可知法术"],["少1","减少1"],["意志"],["-2","减2"]]},{"query":"那它可以同时获得两个血统奥秘吗？","relevantIds":["pf1e-829c51d0600d"],"requiredAny":[["两个","两种"],["血统奥秘"]]}]}
+{"id":"scrollmaster-blade","turns":[{"query":"操纸师把卷轴作为卷轴刃时，硬度和生命值如何计算？","relevantIds":["pf1e-29a08a12d7e8"],"requiredAny":[["硬度"],["0"],["生命值"],["最高","最高级"],["法术等级","法术环级"]]}]}
+{"id":"iron-door-table","turns":[{"query":"两寸厚铁门的硬度、生命值和破坏DC分别是多少？","relevantIds":["pf1e-0c92050d8f82"],"requiredAny":[["硬度"],["10"],["生命值"],["60"],["28"]]}]}
