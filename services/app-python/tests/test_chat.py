@@ -671,7 +671,10 @@ class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
             )
         ]
 
-        self.assertEqual(library.search_queries, ["有哪几种真身？"])
+        self.assertEqual(
+            library.search_queries,
+            ["有哪几种真身？"],
+        )
         self.assertEqual(library.read_ids, [["pf1e:combat"]])
         self.assertIn(
             "补充读取规则证据后回答",
@@ -845,7 +848,10 @@ class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
             )
         ]
 
-        self.assertEqual(library.search_queries, ["有哪几种真身？"])
+        self.assertEqual(
+            library.search_queries,
+            ["有哪几种真身？ 创建角色"],
+        )
         self.assertEqual(
             library.read_ids,
             [["previous-turn:S1"], ["pf1e:combat"]],

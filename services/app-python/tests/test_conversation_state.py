@@ -41,6 +41,22 @@ class ConversationStateTest(unittest.TestCase):
         self.assertIn("猫", query)
         self.assertIn("基本特技", query)
 
+    def test_entity_lookup_keeps_the_active_task_scope(self) -> None:
+        state = ConversationState(task="创建角色")
+
+        self.assertEqual(
+            state.enrich_search_query("真身种类", "有哪几种真身？"),
+            "有哪几种真身？ 真身种类 创建角色",
+        )
+
+    def test_unscoped_entity_lookup_does_not_invent_a_task(self) -> None:
+        state = ConversationState()
+
+        self.assertEqual(
+            state.enrich_search_query("真身种类", "有哪几种真身？"),
+            "真身种类",
+        )
+
     def test_extracts_multiple_assignments_from_one_statement(self) -> None:
         state = ConversationState.from_messages(
             [

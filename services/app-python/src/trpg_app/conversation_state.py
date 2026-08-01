@@ -85,6 +85,8 @@ class ConversationState:
             additions.append(entity)
         elif self.task and re.search(r"(?:下一步|接下来)", combined):
             additions.append(self.task)
+        if self.task and _is_task_scoped_entity_lookup(combined):
+            additions.append(self.task)
         base = (
             latest_user_message.strip()
             if (self.task or self.facts) and latest_user_message.strip()
@@ -101,3 +103,10 @@ def _clean_value(value: str) -> str:
     cleaned = re.sub(r"^(?:了|一个|一种)", "", value.strip())
     cleaned = re.sub(r"(?:作为)?$", "", cleaned).strip()
     return cleaned[:40]
+
+
+def _is_task_scoped_entity_lookup(value: str) -> bool:
+    return bool(
+        any(field in value for field in _ENTITY_FIELDS)
+        and re.search(r"(?:哪|什么|可选|选择|列出|种类)", value)
+    )
