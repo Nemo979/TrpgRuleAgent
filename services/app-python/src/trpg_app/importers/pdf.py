@@ -209,6 +209,8 @@ def _looks_like_heading(value: str) -> bool:
         return False
     if re.fullmatch(r"[\d\s/＋+－—-]+", value):
         return False
+    if value[0].isdigit() and not re.match(r"^\d+[.、]", value):
+        return False
     return bool(
         len(value) <= 12
         or re.match(r"^(?:第.+[章节篇部]|\d+(?:\.\d+)*[、.]?)", value)

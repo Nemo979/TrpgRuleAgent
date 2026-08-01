@@ -4,7 +4,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from trpg_app.importers.pdf import import_pdf, table_to_markdown
+from trpg_app.importers.pdf import (
+    detect_page_headings,
+    import_pdf,
+    table_to_markdown,
+)
 
 
 def fake_page(
@@ -21,6 +25,11 @@ def fake_page(
 
 
 class PdfTableTest(unittest.TestCase):
+    def test_does_not_treat_numeric_table_rows_as_headings(self) -> None:
+        self.assertEqual(detect_page_headings("\n5以上 失去意识晕倒在地\n"), [])
+        self.assertEqual(detect_page_headings("\n20円\n"), [])
+        self.assertEqual(detect_page_headings("\n5.最后要做的事\n"), ["5.最后要做的事"])
+
     def test_converts_regular_table_to_markdown(self) -> None:
         markdown, reliable = table_to_markdown(
             [["等级", "加值"], ["1", "+1"], ["2", "+2"]]
