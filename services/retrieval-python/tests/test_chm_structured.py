@@ -92,6 +92,32 @@ class ChmStructuredTest(unittest.TestCase):
         self.assertTrue(any("光源 | 范围\n火把 | 20尺" in block["content"] for block in blocks))
         self.assertEqual(report["tableEnhancedParents"], 1)
 
+    def test_drops_tiny_navigation_label_repeated_as_loose_text(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "classes.html").write_text(
+                "<h2>职业变体</h2><p>职业变体</p>"
+                "<h3>混血术士</h3><p>这是有实质内容的职业变体规则。</p>"
+                "<h3>探求者</h3><p>这是另一个有实质内容的职业变体规则。</p>",
+                encoding="utf-8",
+            )
+            document = self.document(
+                "classes.html",
+                "职业变体\n混血术士\n这是有实质内容的职业变体规则。\n"
+                "探求者\n这是另一个有实质内容的职业变体规则。",
+            )
+            audit = {
+                "documents": [
+                    {"id": document.id, "strategy": "split_headings"}
+                ]
+            }
+
+            values, report = transform_documents([document], root, audit)
+
+        self.assertEqual([value.title for value in values], ["混血术士", "探求者"])
+        self.assertEqual(report["splitParents"], 1)
+        self.assertEqual(report["fallbackParents"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

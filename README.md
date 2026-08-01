@@ -158,7 +158,7 @@ npm run eval:retrieval:gss
 `data/pathfinder-1e/generated/retrieval-eval.json`，《夕妖晚谣》明细写入
 `data/imports/golden-sky-stories-zh-1-2/retrieval-eval.json`。
 
-PF1E 的 85 题评测中，BM25 + 向量混合召回为 Hit@5 96.5% / MRR 0.821。《夕妖晚谣》1.2 的 14 题验收集中，混合召回为 Hit@5 100% / MRR 0.9107，纯向量为 Hit@5 92.9% / MRR 0.7405。检索评测不等同于最终答案准确率。
+PF1E 的 85 题长期评测中，结构化 BM25 + 向量混合召回为 Hit@5 100% / MRR 0.8676；30 题表格、子章节和职业变体专项集为 Hit@5 100% / MRR 0.9361。《夕妖晚谣》1.2 的 22 题验收集中，混合召回为 Hit@5 100% / MRR 0.9773。检索评测不等同于最终答案准确率。
 
 ## 开发与验证
 

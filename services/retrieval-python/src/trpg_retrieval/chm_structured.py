@@ -249,7 +249,12 @@ def _section_documents(document: RuleDocument, sections: Sequence[Section]) -> l
     values: list[RuleDocument] = []
     for index, section in enumerate(sections):
         content = section.content()
-        if not content:
+        known_headings = [
+            document.title,
+            *document.full_path.split(" > "),
+            *section.heading_path,
+        ]
+        if not content or _is_heading_shell(content, known_headings):
             continue
         suffix_path = _deduplicated_suffix(document, section.heading_path)
         full_path = " > ".join([document.full_path, *suffix_path])
@@ -364,6 +369,17 @@ def _deduplicated_suffix(document: RuleDocument, path: Sequence[str]) -> list[st
         if not result or _compact(result[-1]) != _compact(value):
             result.append(value)
     return result
+
+
+def _is_heading_shell(content: str, heading_path: Sequence[str]) -> bool:
+    """Reject tiny navigation labels repeated as both a heading and loose text."""
+    if len(content.strip()) > 80:
+        return False
+    content_lines = {
+        _compact(line) for line in content.splitlines() if _compact(line)
+    }
+    headings = {_compact(value) for value in heading_path if _compact(value)}
+    return bool(content_lines and content_lines <= headings)
 
 
 def _render_table(rows: Sequence[Sequence[str]]) -> str:
