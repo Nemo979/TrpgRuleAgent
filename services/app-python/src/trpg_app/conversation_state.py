@@ -65,6 +65,33 @@ class ConversationState:
             sort_keys=True,
         )
 
+    def answer_guidance(self, question: str) -> str:
+        mentioned = [
+            (question.rfind(field), _FIELD_ALIASES.get(field, field))
+            for field in _FIELDS
+            if field in question
+        ]
+        if not mentioned:
+            return ""
+        target = max(mentioned)[1]
+        entity_constraints = {
+            field: self.facts[field]
+            for field in _ENTITY_FIELDS
+            if self.facts.get(field)
+        }
+        parallel_state = {
+            field: value
+            for field, value in self.facts.items()
+            if field != target and field not in entity_constraints
+        }
+        return (
+            f"本题目标字段：{target}。"
+            f"已知实体约束：{json.dumps(entity_constraints, ensure_ascii=False)}。"
+            f"其他并列状态：{json.dumps(parallel_state, ensure_ascii=False)}。"
+            "应依据实体约束回答目标字段；除非规则原文明示，其他并列状态不缩小"
+            "目标字段范围，也不与目标字段建立对应关系。"
+        )
+
     def enrich_search_query(self, query: str, latest_user_message: str) -> str:
         additions: list[str] = []
         entity = next(

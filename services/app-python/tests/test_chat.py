@@ -576,6 +576,7 @@ class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"task": "创建角色"', final_prompt)
         self.assertIn('"真身": "猫"', final_prompt)
         self.assertIn("状态字段之间互不构成约束", final_prompt)
+        self.assertIn("本题目标字段：弱点", final_prompt)
         self.assertIn(
             "不得根据表格位置",
             StateAwareGateway.final_messages[0]["content"],

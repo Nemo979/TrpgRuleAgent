@@ -57,6 +57,21 @@ class ConversationStateTest(unittest.TestCase):
             "真身种类",
         )
 
+    def test_answer_guidance_separates_target_from_parallel_state(self) -> None:
+        state = ConversationState(
+            task="创建角色",
+            facts={"真身": "猫", "基本特技": "一团毛球"},
+        )
+
+        guidance = state.answer_guidance(
+            "我选择基本特性为一团毛球，我现在可以选择什么弱点？"
+        )
+
+        self.assertIn("本题目标字段：弱点", guidance)
+        self.assertIn('"真身": "猫"', guidance)
+        self.assertIn('"基本特技": "一团毛球"', guidance)
+        self.assertIn("其他并列状态不缩小目标字段范围", guidance)
+
     def test_extracts_multiple_assignments_from_one_statement(self) -> None:
         state = ConversationState.from_messages(
             [

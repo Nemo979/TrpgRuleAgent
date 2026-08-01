@@ -780,7 +780,8 @@ def _final_answer_conversation(
                 f"问题：{question}\n\n"
                 f"用户已明确声明的会话状态：{state.prompt_context() or '无'}\n"
                 "该状态需要用规则证据验证，不能覆盖规则原文；状态字段之间互不构成"
-                "约束，除非证据明确说明。\n\n"
+                "约束，除非证据明确说明。\n"
+                f"本题字段解释：{state.answer_guidance(question) or '无'}\n\n"
                 f"已读取证据：\n{evidence}"
             ),
         },
