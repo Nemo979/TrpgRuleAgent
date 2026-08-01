@@ -1,0 +1,23 @@
+id: golden-sky-stories-zh-1-2
+name: 夕妖晚谣 1.2 中文规则库
+aliases:
+  - GSS
+  - Golden Sky Stories
+category: ttrpg
+language: zh-CN
+version: "中文合订翻译版 1.2"
+capabilities:
+  - rule_qa
+retrieval:
+  child_chunk_size: 500
+  child_chunk_overlap: 50
+sources:
+  - id: source-f9fedfd298fc
+    name: 夕妖晚谣 1.2 中文规则书
+    priority: 0
+local_import:
+  format: pdf
+  redistributable: false
+  # PDF 页文档 ID 包含文件名；导入前使用此名称可保持重复导入的 ID 稳定。
+  normalized_filename: 夕妖晚谣-1.2.pdf
+  sha256: fceb27ce9ffdb111cfa44922de6066a95b36bdea29d06ec28feef9e75b04083e

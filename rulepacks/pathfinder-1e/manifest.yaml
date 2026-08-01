@@ -1,5 +1,8 @@
 id: pathfinder-1e
 name: Pathfinder First Edition
+aliases:
+  - PF1E
+  - Pathfinder 1E
 category: ttrpg
 language: zh-CN
 version: "1e-v2.24-sc"

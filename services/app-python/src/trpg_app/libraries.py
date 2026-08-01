@@ -19,6 +19,7 @@ class LibraryManifest:
     revision: str
     documents: Path
     index_dir: Path | None
+    aliases: tuple[str, ...] = ()
 
     def public(self) -> dict[str, str]:
         return {
@@ -71,6 +72,15 @@ class LibraryCatalog:
     def list(self) -> list[dict[str, str]]:
         return [item.manifest.public() for item in self._libraries.values()]
 
+    def descriptors(self) -> list[dict[str, object]]:
+        return [
+            {
+                **item.manifest.public(),
+                "aliases": list(item.manifest.aliases),
+            }
+            for item in self._libraries.values()
+        ]
+
     def get(self, library_id: str) -> Library:
         library = self._libraries.get(library_id)
         if library is None:
@@ -92,6 +102,12 @@ class LibraryCatalog:
 def _read_manifest(path: Path) -> LibraryManifest:
     with path.open("r", encoding="utf-8") as handle:
         value = json.load(handle)
+    aliases_value = value.get("aliases", [])
+    if not isinstance(aliases_value, list) or any(
+        not isinstance(alias, str) or not alias.strip()
+        for alias in aliases_value
+    ):
+        raise ValueError("manifest aliases must be a list of non-empty strings")
     base = path.parent
     documents = (base / str(value["documents"])).resolve()
     index_value = value.get("indexDir")
@@ -103,4 +119,5 @@ def _read_manifest(path: Path) -> LibraryManifest:
         revision=str(value["revision"]),
         documents=documents,
         index_dir=(base / str(index_value)).resolve() if index_value else None,
+        aliases=tuple(alias.strip() for alias in aliases_value),
     )

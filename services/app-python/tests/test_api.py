@@ -13,12 +13,24 @@ from trpg_app.config import AppConfig, ModelConfig
 class ApiFakeGateway:
     def __init__(self, _model):
         self.step = 0
+        self.document_id = "pf1e:combat"
 
     async def decide(self, messages, tools):
         self.step += 1
+        user_message = next(
+            message["content"]
+            for message in reversed(messages)
+            if message["role"] == "user"
+        )
+        if "golden-sky-stories-zh-1-2" in messages[0]["content"]:
+            self.document_id = "golden-sky-stories-zh-1-2:basic"
         calls = {
-            1: ToolInvocation("search", "search_rules", '{"query":"借机攻击"}'),
-            2: ToolInvocation("read", "read_rules", '{"ids":["pf1e:combat"]}'),
+            1: ToolInvocation("search", "search_rules", json.dumps({"query": user_message})),
+            2: ToolInvocation(
+                "read",
+                "read_rules",
+                json.dumps({"ids": [self.document_id]}),
+            ),
             3: ToolInvocation("finish", "finish_answer", "{}"),
         }
         call = calls[self.step]
@@ -38,7 +50,10 @@ class ApiFakeGateway:
         )
 
     async def stream_answer(self, messages):
-        yield "离开威胁方格可能触发借机攻击。[S1]"
+        if self.document_id == "pf1e:combat":
+            yield "离开威胁方格可能触发借机攻击。[S1]"
+        else:
+            yield "化形在幕间恢复梦的力量。[S1]"
 
 
 class TimeoutGateway:
@@ -53,15 +68,29 @@ class TimeoutGateway:
             yield ""
 
 
+class CountingGateway:
+    created = 0
+
+    def __init__(self, _model):
+        type(self).created += 1
+
+    async def decide(self, messages, tools):
+        raise AssertionError("library boundary must not call the model gateway")
+
+    async def stream_answer(self, messages):
+        raise AssertionError("library boundary must not call the model gateway")
+        yield ""
+
+
 class AppApiTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         root = Path(self.temporary.name)
-        current = root / "pf1e" / "current"
+        current = root / "pathfinder-1e" / "current"
         current.mkdir(parents=True)
         document = {
             "id": "pf1e:combat",
-            "rulesetId": "pf1e",
+            "rulesetId": "pathfinder-1e",
             "sourceId": "core",
             "sourceTitle": "核心规则",
             "title": "借机攻击",
@@ -78,25 +107,29 @@ class AppApiTest(unittest.TestCase):
         (current / "manifest.json").write_text(
             json.dumps(
                 {
-                    "id": "pf1e",
-                    "name": "Pathfinder 1E",
+                    "id": "pathfinder-1e",
+                    "name": "Pathfinder 1E 中文规则库",
                     "system": "Pathfinder",
                     "edition": "1E",
                     "revision": "test-revision",
                     "documents": "documents.jsonl",
+                    "aliases": ["PF1E", "Pathfinder 1E"],
                 }
             ),
             encoding="utf-8",
         )
-        other_current = root / "coc7" / "current"
+        other_current = root / "golden-sky-stories-zh-1-2" / "current"
         other_current.mkdir(parents=True)
         other_document = {
             **document,
-            "id": "coc7:combat",
-            "rulesetId": "coc7",
-            "title": "战斗轮",
-            "fullPath": "守秘人规则 > 战斗轮",
-            "content": "战斗轮按敏捷顺序行动。",
+            "id": "golden-sky-stories-zh-1-2:basic",
+            "rulesetId": "golden-sky-stories-zh-1-2",
+            "sourceId": "rulebook",
+            "sourceTitle": "夕妖晚谣 1.2",
+            "title": "幕间",
+            "fullPath": "夕妖晚谣 1.2 > 游戏流程 > 幕间",
+            "content": "化形在幕间恢复梦的力量。",
+            "version": "1.2",
             "metadata": {"page": 99},
         }
         (other_current / "documents.jsonl").write_text(
@@ -106,11 +139,11 @@ class AppApiTest(unittest.TestCase):
         (other_current / "manifest.json").write_text(
             json.dumps(
                 {
-                    "id": "coc7",
-                    "name": "Call of Cthulhu 7E",
-                    "system": "Call of Cthulhu",
-                    "edition": "7E",
-                    "revision": "test-revision",
+                    "id": "golden-sky-stories-zh-1-2",
+                    "name": "夕妖晚谣 1.2",
+                    "system": "夕妖晚谣（Golden Sky Stories）",
+                    "edition": "中文 1.2",
+                    "revision": "test-revision-gss",
                     "documents": "documents.jsonl",
                 }
             ),
@@ -154,39 +187,212 @@ class AppApiTest(unittest.TestCase):
         body = bootstrap.json()
         self.assertEqual(body["models"][0]["id"], "test")
         self.assertNotIn("apiKey", body["models"][0])
-        self.assertEqual({item["id"] for item in body["libraries"]}, {"pf1e", "coc7"})
+        libraries = {item["id"]: item for item in body["libraries"]}
+        self.assertEqual(
+            libraries,
+            {
+                "pathfinder-1e": {
+                    "id": "pathfinder-1e",
+                    "name": "Pathfinder 1E 中文规则库",
+                    "system": "Pathfinder",
+                    "edition": "1E",
+                    "revision": "test-revision",
+                },
+                "golden-sky-stories-zh-1-2": {
+                    "id": "golden-sky-stories-zh-1-2",
+                    "name": "夕妖晚谣 1.2",
+                    "system": "夕妖晚谣（Golden Sky Stories）",
+                    "edition": "中文 1.2",
+                    "revision": "test-revision-gss",
+                },
+            },
+        )
 
     def test_source_is_scoped_to_selected_library(self) -> None:
         self.client.post("/api/auth/login", json={"password": "shared"})
-        source = self.client.get("/api/libraries/pf1e/documents/pf1e%3Acombat")
-        self.assertEqual(source.status_code, 200)
-        self.assertEqual(source.json()["metadata"]["page"], 42)
-        self.assertEqual(
-            self.client.get("/api/libraries/other/documents/pf1e%3Acombat").status_code,
-            404,
+        pf_source = self.client.get(
+            "/api/libraries/pathfinder-1e/documents/pf1e%3Acombat"
         )
-        self.assertEqual(
-            self.client.get("/api/libraries/coc7/documents/pf1e%3Acombat").status_code,
-            404,
+        gss_source = self.client.get(
+            "/api/libraries/golden-sky-stories-zh-1-2/documents/"
+            "golden-sky-stories-zh-1-2%3Abasic"
+        )
+        self.assertEqual(pf_source.status_code, 200)
+        self.assertEqual(pf_source.json()["metadata"]["page"], 42)
+        self.assertEqual(gss_source.status_code, 200)
+        self.assertEqual(gss_source.json()["metadata"]["page"], 99)
+
+        cross_library_paths = (
+            "/api/libraries/golden-sky-stories-zh-1-2/documents/pf1e%3Acombat",
+            "/api/libraries/pathfinder-1e/documents/"
+            "golden-sky-stories-zh-1-2%3Abasic",
+            "/api/libraries/missing/documents/pf1e%3Acombat",
+        )
+        for path in cross_library_paths:
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                self.assertEqual(response.status_code, 404)
+                self.assertEqual(response.json(), {"detail": "source not found"})
+
+    def test_chat_stream_is_grounded_in_each_bound_library(self) -> None:
+        self.client.post("/api/auth/login", json={"password": "shared"})
+        pf_response = self.client.post(
+            "/api/chat",
+            json={
+                "model_id": "test",
+                "library_id": "pathfinder-1e",
+                "messages": [{"role": "user", "content": "何时触发借机攻击？"}],
+            },
+        )
+        gss_response = self.client.post(
+            "/api/chat",
+            json={
+                "model_id": "test",
+                "library_id": "golden-sky-stories-zh-1-2",
+                "messages": [{"role": "user", "content": "化形何时恢复梦？"}],
+            },
         )
 
-    def test_chat_stream_is_grounded_in_bound_library(self) -> None:
+        self.assertEqual(pf_response.status_code, 200)
+        self.assertEqual(len(pf_response.headers["x-request-id"]), 32)
+        self.assertIn('"type": "text_delta"', pf_response.text)
+        self.assertIn("pf1e:combat", pf_response.text)
+        self.assertNotIn("golden-sky-stories-zh-1-2:basic", pf_response.text)
+        self.assertIn('"type": "done"', pf_response.text)
+
+        self.assertEqual(gss_response.status_code, 200)
+        self.assertEqual(len(gss_response.headers["x-request-id"]), 32)
+        self.assertIn('"type": "text_delta"', gss_response.text)
+        self.assertIn("golden-sky-stories-zh-1-2:basic", gss_response.text)
+        self.assertNotIn("pf1e:combat", gss_response.text)
+        self.assertIn('"type": "done"', gss_response.text)
+
+    def test_chat_redirects_explicit_other_library_without_calling_model(self) -> None:
+        CountingGateway.created = 0
+        with TestClient(
+            create_app(self.config, gateway_factory=CountingGateway)
+        ) as client:
+            client.post("/api/auth/login", json={"password": "shared"})
+            cases = (
+                (
+                    "pathfinder-1e",
+                    "夕妖晚谣的化形在幕间做什么？",
+                    "Pathfinder 1E 中文规则库",
+                    "夕妖晚谣 1.2",
+                ),
+                (
+                    "pathfinder-1e",
+                    "How does a scene work in Golden Sky Stories?",
+                    "Pathfinder 1E 中文规则库",
+                    "夕妖晚谣 1.2",
+                ),
+                (
+                    "golden-sky-stories-zh-1-2",
+                    "PF1E 的借机攻击如何判定？",
+                    "夕妖晚谣 1.2",
+                    "Pathfinder 1E 中文规则库",
+                ),
+            )
+
+            for library_id, message, current_name, other_name in cases:
+                with self.subTest(message=message):
+                    response = client.post(
+                        "/api/chat",
+                        json={
+                            "model_id": "test",
+                            "library_id": library_id,
+                            "messages": [{"role": "user", "content": message}],
+                        },
+                    )
+                    events = [
+                        json.loads(line.removeprefix("data: "))
+                        for line in response.text.splitlines()
+                        if line.startswith("data: ")
+                    ]
+
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(
+                        [event["type"] for event in events],
+                        ["text_delta", "sources", "done"],
+                    )
+                    self.assertIn(current_name, events[0]["delta"])
+                    self.assertIn(other_name, events[0]["delta"])
+                    self.assertIn("新建对话", events[0]["delta"])
+                    self.assertEqual(events[1]["sources"], [])
+
+        self.assertEqual(CountingGateway.created, 0)
+
+    def test_chat_boundary_checks_only_latest_user_message_without_false_match(
+        self,
+    ) -> None:
         self.client.post("/api/auth/login", json={"password": "shared"})
+        cases = (
+            (
+                "pathfinder-1e",
+                [
+                    {"role": "user", "content": "夕妖晚谣怎么玩？"},
+                    {"role": "assistant", "content": "请继续。"},
+                    {"role": "user", "content": "借机攻击何时触发？"},
+                ],
+                "pf1e:combat",
+            ),
+            (
+                "pathfinder-1e",
+                [{"role": "user", "content": "Pathfinder 的借机攻击何时触发？"}],
+                "pf1e:combat",
+            ),
+            (
+                "pathfinder-1e",
+                [
+                    {
+                        "role": "user",
+                        "content": "PF1E 里有没有类似夕妖晚谣化形的能力？",
+                    }
+                ],
+                "pf1e:combat",
+            ),
+            (
+                "golden-sky-stories-zh-1-2",
+                [
+                    {
+                        "role": "user",
+                        "content": "mypf1ehelper 只是名称，化形何时恢复梦？",
+                    }
+                ],
+                "golden-sky-stories-zh-1-2:basic",
+            ),
+        )
+
+        for library_id, messages, expected_document_id in cases:
+            with self.subTest(library_id=library_id, messages=messages):
+                response = self.client.post(
+                    "/api/chat",
+                    json={
+                        "model_id": "test",
+                        "library_id": library_id,
+                        "messages": messages,
+                    },
+                )
+
+                self.assertEqual(response.status_code, 200)
+                self.assertIn(expected_document_id, response.text)
+                self.assertIn('"type": "status"', response.text)
+
+    def test_chat_rejects_unknown_library_before_streaming(self) -> None:
+        self.client.post("/api/auth/login", json={"password": "shared"})
+
         response = self.client.post(
             "/api/chat",
             json={
                 "model_id": "test",
-                "library_id": "pf1e",
-                "messages": [{"role": "user", "content": "何时触发借机攻击？"}],
+                "library_id": "missing",
+                "messages": [{"role": "user", "content": "这个库不存在"}],
             },
         )
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(len(response.headers["x-request-id"]), 32)
-        self.assertIn('"type": "text_delta"', response.text)
-        self.assertIn("pf1e:combat", response.text)
-        self.assertNotIn("coc7:combat", response.text)
-        self.assertIn('"type": "done"', response.text)
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json(), {"detail": "library not found"})
+        self.assertNotIn("x-request-id", response.headers)
 
     def test_chat_error_is_classified_and_correlated_without_details(self) -> None:
         with TestClient(create_app(self.config, gateway_factory=TimeoutGateway)) as client:
@@ -195,7 +401,7 @@ class AppApiTest(unittest.TestCase):
                 "/api/chat",
                 json={
                     "model_id": "test",
-                    "library_id": "pf1e",
+                    "library_id": "pathfinder-1e",
                     "messages": [{"role": "user", "content": "问题正文不应进入日志"}],
                 },
             )

@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 
 from trpg_app.chat import (
     EvidenceBudget,
@@ -59,6 +60,14 @@ class EvidenceBudgetTest(unittest.TestCase):
 
 
 class FakeLibrary:
+    manifest = SimpleNamespace(
+        id="pf1e",
+        name="Pathfinder 1E",
+        system="Pathfinder",
+        edition="1E",
+        revision="test-revision",
+    )
+
     def search(self, query: str, limit: int):
         return [{"id": "pf1e:combat", "title": "借机攻击", "excerpt": "离开威胁方格"}]
 
@@ -75,11 +84,15 @@ class FakeLibrary:
 
 
 class FakeGateway:
+    first_system_prompt = ""
+
     def __init__(self, _model):
         self.step = 0
 
     async def decide(self, messages, tools):
         self.step += 1
+        if self.step == 1:
+            type(self).first_system_prompt = messages[0]["content"]
         if self.step == 1:
             call = ToolInvocation("search-1", "search_rules", '{"query":"借机攻击"}')
         elif self.step == 2:
@@ -122,6 +135,32 @@ class NoEvidenceGateway:
             yield ""
 
 
+class OtherSystemGateway:
+    def __init__(self, _model):
+        self.decisions = 0
+
+    async def decide(self, messages, tools):
+        self.decisions += 1
+        call = ToolInvocation("finish-1", "finish_answer", "{}")
+        return ModelDecision(
+            content="",
+            tool_calls=(call,),
+            assistant_message={
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": call.id,
+                        "type": "function",
+                        "function": {"name": call.name, "arguments": call.arguments},
+                    }
+                ],
+            },
+        )
+
+    async def stream_answer(self, messages):
+        yield "当前绑定的 Pathfinder 1E 规则库不覆盖《夕妖晚谣》，请切换规则库。"
+
+
 class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
     async def test_searches_reads_then_streams_grounded_answer(self) -> None:
         model = ModelConfig(
@@ -148,6 +187,13 @@ class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
         sources = next(event["sources"] for event in events if event["type"] == "sources")
         self.assertEqual(sources[0]["documentId"], "pf1e:combat")
         self.assertEqual(events[-1]["type"], "done")
+        prompt = FakeGateway.first_system_prompt
+        self.assertIn('"id": "pf1e"', prompt)
+        self.assertIn('"name": "Pathfinder 1E"', prompt)
+        self.assertIn('"system": "Pathfinder"', prompt)
+        self.assertIn('"edition": "1E"', prompt)
+        self.assertIn('"revision": "test-revision"', prompt)
+        self.assertIn("search_rules → read_rules → finish_answer", prompt)
 
     async def test_rejects_answer_that_never_reads_rule_evidence(self) -> None:
         model = ModelConfig(
@@ -168,6 +214,42 @@ class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
                     gateway_factory=NoEvidenceGateway,
                 )
             ]
+
+    async def test_allows_other_system_to_finish_without_rule_evidence(self) -> None:
+        model = ModelConfig(
+            id="fake",
+            label="Fake",
+            base_url="https://example.invalid/v1",
+            model="fake",
+            api_key="secret",
+        )
+
+        events = [
+            event
+            async for event in run_rule_turn(
+                model=model,
+                library=FakeLibrary(),
+                messages=[{"role": "user", "content": "夕妖晚谣的化形如何恢复梦？"}],
+                gateway_factory=OtherSystemGateway,
+            )
+        ]
+
+        self.assertEqual(
+            [event["delta"] for event in events if event["type"] == "text_delta"],
+            ["当前绑定的 Pathfinder 1E 规则库不覆盖《夕妖晚谣》，请切换规则库。"],
+        )
+        self.assertFalse(
+            any(
+                event.get("status") in {"searching", "reading"}
+                for event in events
+                if event["type"] == "status"
+            )
+        )
+        self.assertEqual(
+            next(event["sources"] for event in events if event["type"] == "sources"),
+            [],
+        )
+        self.assertEqual(events[-1]["type"], "done")
 
 
 if __name__ == "__main__":

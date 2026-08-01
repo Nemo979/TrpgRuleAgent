@@ -1,8 +1,8 @@
 # TrpgRuleAgent
 
-TrpgRuleAgent 是一个面向跑团规则的可扩展 Agent 平台。第一版聚焦 Pathfinder 1E，目标是提供基于证据的规则问答、结构化引用和可追踪的多轮工具调用。
+TrpgRuleAgent 是一个面向跑团规则的可扩展 Agent 平台。当前版本支持彼此隔离的多游戏系统规则库，目标是提供基于证据的规则问答、结构化引用和可追踪的多轮工具调用。
 
-> 项目不分发 Pathfinder 规则正文。使用者需要自行提供有权使用的 PF1E CHM 文件；源文件、解析结果和向量索引默认只保存在本机。
+> 项目不分发商业规则正文。使用者需要自行提供有权使用的 PDF 或 CHM；源文件、解析结果和向量索引默认只保存在本机。
 
 ## 当前正式链路
 
@@ -20,7 +20,7 @@ React Web
 
 模型 ID、Base URL 和 API Key 均由管理员在服务端配置；浏览器不能提交或读取模型密钥。每个对话固定绑定一个规则库，对话内容只保存在当前浏览器。当前已验证 SenseNova、Xiaomi MiMo 和 Agnes 三个模型。
 
-仓库内 Rule Pack 只有明确标注的演示数据，用于验证工程链路，不能作为真实 PF 规则依据。本地可从用户持有的 CHM 导入真实父文档；原始 CHM、解包文件和生成索引均位于 Git 忽略的 `data/` 目录。
+仓库内 Rule Pack 只保存规则库元数据、合成演示数据和不含规则正文的评测题。本地可从用户持有的 PDF 或 CHM 导入真实父文档；原文件、解析结果和生成索引均位于 Git 忽略的 `data/` 目录。
 
 旧 Node CLI/BYOK Gateway、无框架 Web 和微信小程序骨架仍暂时保留，待当前链路完成实际试用后一次删除。
 
@@ -43,6 +43,8 @@ packages/rules-client          检索服务客户端
 packages/rules-types           跨语言接口对应的 TypeScript 类型
 services/retrieval-python      Python 检索、索引与评测服务
 rulepacks/pathfinder-1e        PF 规则包定义、演示资料和检索评测集
+rulepacks/golden-sky-stories-zh-1-2
+                              《夕妖晚谣》规则包元数据和检索评测集
 ```
 
 ## 当前 Web 版快速开始
@@ -51,8 +53,8 @@ rulepacks/pathfinder-1e        PF 规则包定义、演示资料和检索评测�
 
 - Node.js 22.19+
 - Python 3.11+
-- PF1E CHM 文件（由使用者自行合法取得）
-- CHM 解包工具：macOS 执行 `brew install chmlib`；Ubuntu 执行 `sudo apt-get install libchm-bin`
+- 文本型 PDF 或 CHM 文件（由使用者自行合法取得）
+- 导入 CHM 时需要解包工具：macOS 执行 `brew install chmlib`；Ubuntu 执行 `sudo apt-get install libchm-bin`
 - 一个兼容 OpenAI Chat Completions 协议、并支持工具调用的模型
 
 ### 1. 安装依赖
@@ -81,7 +83,7 @@ cp .env.example .env
 
 管理员通过 `trpg-library extract-chm` 或 `extract-pdf` 提取文本规则，再使用 `build-jsonl` 和 `publish` 分阶段构建、原子发布。完整命令见 [Web/Python 重构目标](docs/refactor-target.md)。
 
-PF1E 规则正文、解析结果和向量索引不会提交到仓库。
+规则正文、解析结果和向量索引不会提交到仓库。
 
 ### 4. 构建并启动
 
@@ -143,17 +145,20 @@ npm run cli
 
 ## 数据规模与评测
 
-当前验证过的本地数据规模为 2,140 篇父文档、29,629 个向量子块。BGE 模型为 512 维，本地 Chroma 索引约 380MB。所有生成数据位于 Git 忽略的 `data/` 目录，详见 [数据边界](docs/data-policy.md)。
+当前已验证两个完全不同的游戏系统，共 2,288 篇父文档、30,892 个向量子块。所有生成数据位于 Git 忽略的 `data/` 目录，详见 [数据边界](docs/data-policy.md)。
 
 验证真实规则检索质量：
 
 ```bash
 npm run eval:retrieval:pf
+npm run eval:retrieval:gss
 ```
 
-评测会报告 Hit@5、MRR 和每道题的首条规则路径，并将明细写入本地 `data/pathfinder-1e/generated/retrieval-eval.json`。
+评测会报告 Hit@5、MRR 和每道题的首条规则路径。PF1E 明细写入
+`data/pathfinder-1e/generated/retrieval-eval.json`，《夕妖晚谣》明细写入
+`data/imports/golden-sky-stories-zh-1-2/retrieval-eval.json`。
 
-当前 85 题人工标注评测中，纯向量为 Hit@5 78.8% / MRR 0.638，BM25 + 向量混合召回为 Hit@5 96.5% / MRR 0.821。评测包含 77 道核心规则题和 8 道明确询问可选资料的题目；它用于检索回归，不等同于最终答案准确率。详见 [检索评测](docs/retrieval-evaluation.md)。
+PF1E 的 85 题评测中，BM25 + 向量混合召回为 Hit@5 96.5% / MRR 0.821。《夕妖晚谣》1.2 的 14 题验收集中，混合召回为 Hit@5 100% / MRR 0.9107，纯向量为 Hit@5 92.9% / MRR 0.7405。检索评测不等同于最终答案准确率。
 
 ## 开发与验证
 
@@ -168,23 +173,22 @@ PYTHONPATH=services/retrieval-python/src python3 -m unittest discover -s service
 ## 安全与许可
 
 - `.env`、`data/`、`.venv/`、模型缓存和向量索引均不会提交。
-- GitHub 仓库只包含合成演示文本，不包含 PF1E 规则正文。
+- GitHub 仓库不包含 PF1E、《夕妖晚谣》或其他商业规则正文。
 - 使用者负责确认其规则资料、模型服务和生成内容的使用权限。
 - 源代码使用 [MIT License](LICENSE)。规则资料不属于本许可证授权范围。
 
 ## 当前第一版边界
 
-- 当前本地只发布了 `pathfinder-1e`，架构支持多个完全不同的游戏系统和版本。
+- 当前本地已发布 `pathfinder-1e` 与 `golden-sky-stories-zh-1-2`，新对话必须明确选择规则库，创建后固定绑定系统与版本，并记录创建时的规则库修订；规则库更新时界面会提示旧回答的来源可能失效。
 - Agent 当前每次提问最多搜索 6 次、读取 24 篇规则文档，并受 80,000 字符证据预算约束。
 - 搜索工具只返回摘要；完整父文档必须通过 `read_rules` 按需读取。
 - 每篇已读取文档获得稳定引用编号，例如 `[S1]`。
 - 最终来源列表由程序持有的引用注册表生成，而不是依赖模型编造路径。
-- 文本型 PDF 与 CHM 已支持；扫描件 OCR、图片和复杂图表理解暂不支持。
+- 文本型 PDF 与 CHM 已支持；表格和图片相关警告仅是启发式提示，扫描件 OCR、图片和复杂图表理解暂不支持。
 
 ## 下一步
 
-1. 导入并发布第二套真实规则库，验证跨游戏系统隔离。
-2. 增加管理员规则上传与发布页面。
-3. 增加对话摘要、Token 计量和动态检索预算。
-4. 增加答案级评测与剩余检索漏召回优化。
-5. 实际试用验收后一次删除旧 Node/BYOK 和微信小程序实现。
+1. 增加管理员规则上传与发布页面。
+2. 增加对话摘要、Token 计量和动态检索预算。
+3. 增加答案级评测与剩余检索漏召回优化。
+4. 实际试用验收后一次删除旧 Node/BYOK 和微信小程序实现。

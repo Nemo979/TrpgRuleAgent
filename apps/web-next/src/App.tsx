@@ -3,6 +3,12 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { loadBootstrap, loadSource, login, streamChat } from "./api";
 import {
+  createConversationForLibrary,
+  createSourceSelection,
+  isSameSourceRequest,
+} from "./conversation";
+import type { SourceSelection } from "./conversation";
+import {
   exportConversation,
   loadConversations,
   reconcileConversationModels,
@@ -21,11 +27,8 @@ export function App() {
   const [input, setInput] = useState("");
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
-  const [selectedSource, setSelectedSource] = useState<{
-    source: Source;
-    content?: string;
-    error?: string;
-  } | null>(null);
+  const [libraryPickerOpen, setLibraryPickerOpen] = useState(false);
+  const [selectedSource, setSelectedSource] = useState<SourceSelection | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   const active = conversations.find((item) => item.id === activeId) ?? null;
@@ -51,22 +54,23 @@ export function App() {
     }
   }
 
-  function createConversation(libraryId?: string) {
-    const library = libraries.find((item) => item.id === libraryId) ?? libraries[0];
-    const model = models[0];
-    if (!library || !model) return;
-    const now = new Date().toISOString();
-    const value: Conversation = {
+  function createConversation(libraryId: string) {
+    if (busy) return;
+    const value = createConversationForLibrary(libraries, models, libraryId, {
       id: id(),
-      title: "新对话",
-      libraryId: library.id,
-      libraryRevision: library.revision,
-      modelId: model.id,
-      messages: [],
-      updatedAt: now,
-    };
+      now: new Date().toISOString(),
+    });
+    if (!value) return;
     setConversations((items) => [value, ...items]);
     setActiveId(value.id);
+    setSelectedSource(null);
+    setLibraryPickerOpen(false);
+  }
+
+  function activateConversation(conversationId: string) {
+    if (busy || conversationId === activeId) return;
+    setSelectedSource(null);
+    setActiveId(conversationId);
   }
 
   function updateActive(transform: (value: Conversation) => Conversation) {
@@ -80,6 +84,7 @@ export function App() {
     if (!active || !window.confirm(`删除“${active.title}”？此操作只影响当前浏览器。`)) return;
     const remaining = conversations.filter((item) => item.id !== active.id);
     setConversations(remaining);
+    setSelectedSource(null);
     setActiveId(remaining[0]?.id ?? null);
   }
 
@@ -198,15 +203,24 @@ export function App() {
 
   async function showSource(source: Source) {
     if (!active) return;
-    setSelectedSource({ source });
+    const request = createSourceSelection(active, source, id());
+    setSelectedSource(request);
     try {
-      const document = await loadSource(active.libraryId, source.documentId);
-      setSelectedSource({ source, content: document.content });
+      const document = await loadSource(request.libraryId, source.documentId);
+      setSelectedSource((current) =>
+        isSameSourceRequest(current, request)
+          ? { ...request, content: document.content }
+          : current,
+      );
     } catch (error) {
-      setSelectedSource({
-        source,
-        error: error instanceof Error ? error.message : "无法读取来源",
-      });
+      setSelectedSource((current) =>
+        isSameSourceRequest(current, request)
+          ? {
+              ...request,
+              error: error instanceof Error ? error.message : "无法读取来源",
+            }
+          : current,
+      );
     }
   }
 
@@ -227,15 +241,20 @@ export function App() {
             <small>Evidence-first rules</small>
           </div>
         </div>
-        <button className="primary" onClick={() => createConversation()}>
+        <button
+          className="primary"
+          disabled={busy}
+          onClick={() => setLibraryPickerOpen(true)}
+        >
           ＋ 新对话
         </button>
         <nav className="conversation-list">
           {conversations.map((conversation) => (
             <button
               className={conversation.id === activeId ? "conversation active" : "conversation"}
+              disabled={busy}
               key={conversation.id}
-              onClick={() => setActiveId(conversation.id)}
+              onClick={() => activateConversation(conversation.id)}
             >
               <span>{conversation.title}</span>
               <small>
@@ -258,14 +277,19 @@ export function App() {
                 <span>{activeLibrary?.name}</span>
               </div>
               <div className="toolbar-actions">
-                <button className="ghost mobile-only" onClick={() => createConversation()}>
+                <button
+                  className="ghost mobile-only"
+                  disabled={busy}
+                  onClick={() => setLibraryPickerOpen(true)}
+                >
                   新建
                 </button>
                 <select
                   className="mobile-only"
                   aria-label="切换对话"
                   value={active.id}
-                  onChange={(event) => setActiveId(event.target.value)}
+                  disabled={busy}
+                  onChange={(event) => activateConversation(event.target.value)}
                 >
                   {conversations.map((conversation) => (
                     <option key={conversation.id} value={conversation.id}>
@@ -297,7 +321,11 @@ export function App() {
                 >
                   重新生成
                 </button>
-                <button className="ghost desktop-only" onClick={deleteActive}>
+                <button
+                  className="ghost desktop-only"
+                  disabled={busy}
+                  onClick={deleteActive}
+                >
                   删除
                 </button>
                 <details className="mobile-actions mobile-only">
@@ -313,7 +341,7 @@ export function App() {
                     >
                       重新生成
                     </button>
-                    <button type="button" onClick={deleteActive}>
+                    <button type="button" disabled={busy} onClick={deleteActive}>
                       删除
                     </button>
                   </div>
@@ -364,6 +392,13 @@ export function App() {
       </main>
       {selectedSource && (
         <SourceDrawer value={selectedSource} onClose={() => setSelectedSource(null)} />
+      )}
+      {libraryPickerOpen && (
+        <LibraryPicker
+          libraries={libraries}
+          onClose={() => setLibraryPickerOpen(false)}
+          onSelect={createConversation}
+        />
       )}
     </div>
   );
@@ -417,16 +452,85 @@ function Welcome({
       <p className="eyebrow">SELECT A RULE LIBRARY</p>
       <h1>从哪套规则开始？</h1>
       <p>每个对话只绑定一个游戏系统与版本，避免不同规则互相污染。</p>
-      <div className="library-grid">
-        {libraries.map((library) => (
-          <button key={library.id} onClick={() => onCreate(library.id)}>
-            <span>{library.system}</span>
-            <strong>{library.name}</strong>
-            <small>{library.edition}</small>
-          </button>
-        ))}
-      </div>
+      <LibraryGrid libraries={libraries} onSelect={onCreate} />
     </section>
+  );
+}
+
+function LibraryPicker({
+  libraries,
+  onClose,
+  onSelect,
+}: {
+  libraries: LibraryOption[];
+  onClose: () => void;
+  onSelect: (id: string) => void;
+}) {
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  return (
+    <div
+      className="library-picker-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <section
+        className="library-picker"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="library-picker-title"
+      >
+        <header>
+          <div>
+            <p className="eyebrow">SELECT A RULE LIBRARY</p>
+            <h2 id="library-picker-title">选择新对话的规则库</h2>
+            <p>创建后将固定绑定所选游戏系统与版本。</p>
+          </div>
+          <button type="button" aria-label="关闭规则库选择" onClick={onClose}>
+            ×
+          </button>
+        </header>
+        <LibraryGrid libraries={libraries} onSelect={onSelect} autoFocus />
+      </section>
+    </div>
+  );
+}
+
+function LibraryGrid({
+  libraries,
+  onSelect,
+  autoFocus = false,
+}: {
+  libraries: LibraryOption[];
+  onSelect: (id: string) => void;
+  autoFocus?: boolean;
+}) {
+  if (libraries.length === 0) {
+    return <p className="library-empty">暂无可用规则库。</p>;
+  }
+
+  return (
+    <div className="library-grid">
+      {libraries.map((library, index) => (
+        <button
+          type="button"
+          key={library.id}
+          autoFocus={autoFocus && index === 0}
+          onClick={() => onSelect(library.id)}
+        >
+          <span>{library.system}</span>
+          <strong>{library.name}</strong>
+          <small>{library.edition}</small>
+        </button>
+      ))}
+    </div>
   );
 }
 

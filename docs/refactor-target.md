@@ -61,7 +61,10 @@ trpg-library extract-chm \
   --output /tmp/pf1e-import
 ```
 
-导入器会保留原文件，并生成 `documents.jsonl` 与 `import-report.json`。PDF 报告包含表格数量、不规则表格、空白页和图片主导页面。扫描 PDF 与图示理解不在当前范围内。
+导入器会保留原文件，并生成 `documents.jsonl` 与 `import-report.json`。PDF 报告包含
+表格数量、空白页和启发式警告：`image_dominant_page` 仅表示页面含图片对象且提取文本
+少于 80 个字符，`unreliable_table` 仅表示表格为单列或各行列数不一致。这些警告不判断
+图片面积、表格语义或抽取内容是否正确；扫描 PDF、图片、图示和复杂表格理解不在当前范围内。
 
 构建与发布分离：
 
@@ -70,15 +73,21 @@ trpg-library --root data/libraries build-jsonl \
   --id coc7 \
   --name "Call of Cthulhu 7E" \
   --system "Call of Cthulhu" \
+  --alias CoC7 \
+  --alias 克苏鲁7版 \
   --edition 7E \
-  --documents /tmp/coc7-import/documents.jsonl
+  --documents /tmp/coc7-import/documents.jsonl \
+  --import-report /tmp/coc7-import/import-report.json
 
 trpg-library --root data/libraries publish \
   --id coc7 \
   --revision 20260729T120000Z
 ```
 
-`build-jsonl` 会拒绝空库、规则库 ID 不一致和完全重复章节。只有显式执行 `publish` 才会原子替换 `current`。
+`build-jsonl` 可重复使用 `--alias` 写入常用简称；会拒绝空库、规则库 ID
+不一致和完全重复章节。传入提取阶段生成的
+`--import-report` 后，构建报告会保留源文件、页数、表格数量和警告等提取信息。
+只有显式执行 `publish` 才会原子替换 `current`。
 
 ## PF1E 迁移验收
 
@@ -88,11 +97,35 @@ trpg-library --root data/libraries publish \
 - 发布文档 2134 条，SHA-256 为
   `b631bb5995645d6ae6a8c55e547f25de9eec5e4372e0e2e81ca7c6c62ff17b49`。
 - 从旧索引的 29629 个子块中移除重复父文档对应的 8 个子块，发布 29621 个子块。
-- 发布版本为 `20260729T145539Z`，规则库名称为“Pathfinder 1E 中文规则库”。
+- 当前发布版本为 `20260801T074810Z`，规则库名称为“Pathfinder 1E 中文规则库”，
+  并包含 `PF1E` 与 `Pathfinder 1E` 显式别名。
 - 85 题混合检索回归结果为 Hit@5 96.5%、MRR 0.8210，达到迁移前基线。
 - 新服务验证了共享密码鉴权、规则库发现、真实规则检索、引用原文读取和 Web 静态入口。
 
 完整规则数据位于被 Git 忽略的 `data/libraries/pathfinder-1e`，不会进入源码提交或远程仓库。
+
+## 第二套规则库与跨系统隔离验收
+
+2026-07-30 导入并发布《夕妖晚谣》1.2 中文合订翻译版：
+
+- 原始 PDF 159 页，带可用文本层；发布 154 个父文档、1271 个向量子块。
+- 规范化源文件名为 `夕妖晚谣-1.2.pdf`，SHA-256 为
+  `fceb27ce9ffdb111cfa44922de6066a95b36bdea29d06ec28feef9e75b04083e`。
+- 规则库 ID 为 `golden-sky-stories-zh-1-2`，当前发布修订为 `20260801T074827Z`，
+  并包含 `GSS` 与 `Golden Sky Stories` 显式别名。
+- 导入报告记录 59 个表格和 18 条启发式警告；5 个无可用文本或表格内容的页面没有进入文本库，
+  第 125–127 页的 3 个单列表格因形状检查而标记为不可靠。
+- 14 题混合检索为 Hit@5 100%、MRR 0.9107；纯向量为
+  Hit@5 92.9%、MRR 0.7405。
+- SenseNova、MiMo、Agnes 均完成真实规则检索、回答、脚注与来源验收。
+- 新建对话必须明确选择规则库；对话固定绑定系统与版本并记录创建时修订，规则库发布更新后界面会警告旧回答的来源可能失效。
+- Bootstrap、聊天工具和来源接口均完成 PF1E 与《夕妖晚谣》的双向隔离测试。
+- 390×844 手机视口验证规则库选择底部面板无横向溢出。
+- 当前全量回归为 TypeScript/Vitest 27 个测试文件、261 项测试，
+  Python 应用 35 项测试、Python 检索 14 项测试，类型检查和 Web 生产构建全部通过。
+
+PDF、抽取正文、向量索引和报告均位于被 Git 忽略的 `data/`，不会进入源码提交。
+图片、扫描页和复杂图表理解仍不在当前文本型 V1 范围内。
 
 ## V1 稳定性收口验收
 

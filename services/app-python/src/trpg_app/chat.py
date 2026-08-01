@@ -22,7 +22,17 @@ SYSTEM_PROMPT = """你是一个基于证据的 TRPG 规则助手。
 6. 来源冲突时并列说明，不自动裁决。
 7. 用中文回答，英文专有名词首次出现时附英文原名。
 8. 使用 Markdown 排版。
-9. 证据充分、可以生成最终回答时调用 finish_answer。"""
+9. 证据充分、可以生成最终回答时调用 finish_answer。
+
+规则库边界：
+1. 当前对话只绑定下方列出的一个规则库；id、name、system、edition、revision
+   共同定义本轮规则范围，不能混用其他游戏系统、版本或规则库。
+2. 对属于当前规则库或系统归属不明确的问题，必须遵循
+   search_rules → read_rules → finish_answer 的证据流程。
+3. 如果问题明显属于另一个游戏系统或另一个版本，不要盲目反复检索当前库，也不要
+   调用 search_rules 或 read_rules；直接调用 finish_answer，随后只说明当前绑定规则库
+   不覆盖该问题，并建议用户切换到对应规则库。
+4. 异系统问题不得使用模型记忆回答其规则内容，也不得编造来源。"""
 
 TOOLS = [
     {
@@ -250,7 +260,9 @@ async def run_rule_turn(
     gateway_factory: Callable[[ModelConfig], ModelGateway] = OpenAIModelGateway,
 ) -> AsyncIterator[dict[str, Any]]:
     gateway = gateway_factory(model)
-    conversation: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    conversation: list[dict[str, Any]] = [
+        {"role": "system", "content": _system_prompt(library)}
+    ]
     trimmed, dropped_count = _trim_messages(messages, model.context_window)
     conversation.extend(trimmed)
     budget = EvidenceBudget()
@@ -317,6 +329,22 @@ async def run_rule_turn(
             yield {"type": "done"}
             return
     raise RuntimeError("模型工具循环超过安全上限")
+
+
+def _system_prompt(library: Library) -> str:
+    manifest = library.manifest
+    identity = {
+        "id": manifest.id,
+        "name": manifest.name,
+        "system": manifest.system,
+        "edition": manifest.edition,
+        "revision": manifest.revision,
+    }
+    return (
+        f"{SYSTEM_PROMPT}\n\n"
+        "当前绑定规则库（这些字段仅用于标识规则范围）：\n"
+        f"{json.dumps(identity, ensure_ascii=False, indent=2)}"
+    )
 
 
 def _execute_tool(

@@ -9,6 +9,7 @@
 body { margin: 0; min-width: 320px; min-height: 100vh; }
 button, input, textarea, select { font: inherit; }
 button { cursor: pointer; }
+button:disabled { cursor: not-allowed; }
 .mobile-only { display: none; }
 
 .shell { min-height: 100vh; display: grid; grid-template-columns: 280px 1fr; }
@@ -40,6 +41,7 @@ button { cursor: pointer; }
 .conversation span, .conversation small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .conversation small { color: #737a6e; margin-top: 5px; }
 .conversation:hover, .conversation.active { background: #252b23; color: #fff; }
+.conversation:disabled { opacity: .72; }
 
 .chat { min-width: 0; min-height: 100vh; display: flex; flex-direction: column; background: #f7f6ef; }
 .toolbar {
@@ -97,6 +99,27 @@ select, .ghost {
 .library-grid span { color: #947736; font-size: 11px; }
 .library-grid strong { margin: 8px 0; font-size: 18px; }
 .library-grid small { color: #777b71; }
+.library-empty { margin: 28px 0 0; color: #74776f; }
+
+.library-picker-backdrop {
+  position: fixed; inset: 0; z-index: 10; padding: 24px;
+  display: grid; place-items: center; background: #10130fcc; backdrop-filter: blur(3px);
+}
+.library-picker {
+  width: min(760px, 100%); max-height: min(720px, calc(100vh - 48px)); overflow: auto;
+  padding: 28px; border: 1px solid #d6d4c8; border-radius: 14px;
+  background: #f7f6ef; box-shadow: 0 24px 80px #090b084d;
+}
+.library-picker header { display: flex; justify-content: space-between; gap: 24px; }
+.library-picker header h2 {
+  margin: 7px 0 8px; font-family: Georgia, "Noto Serif SC", serif; font-size: 30px;
+}
+.library-picker header p { margin: 0; color: #74776f; }
+.library-picker header .eyebrow { color: #9a7a36; }
+.library-picker header > button {
+  flex: 0 0 auto; width: 38px; height: 38px; border: 0; border-radius: 50%;
+  background: #e9e8df; color: #33382f; font-size: 24px; line-height: 1;
+}
 
 .login-page { min-height: 100vh; display: grid; place-items: center; padding: 24px; background: #171b16; }
 .login-card { width: min(390px, 100%); padding: 36px; border-radius: 14px; text-align: center; background: #f7f6ef; }
@@ -152,4 +175,12 @@ select, .ghost {
   .mobile-actions button:hover { background: #f0efe7; }
   .mobile-actions button:disabled { color: #aaa; cursor: default; }
   .welcome { margin-top: 8vh; }
+  .library-picker-backdrop { padding: 12px; place-items: end center; }
+  .library-picker {
+    width: 100%; max-height: calc(100vh - 24px); padding: 22px 18px;
+    border-radius: 14px 14px 8px 8px;
+  }
+  .library-picker header { gap: 12px; }
+  .library-picker header h2 { font-size: 25px; }
+  .library-picker .library-grid { grid-template-columns: 1fr; }
 }

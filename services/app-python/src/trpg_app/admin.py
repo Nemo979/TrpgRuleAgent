@@ -21,8 +21,10 @@ def main() -> None:
     build.add_argument("--id", required=True)
     build.add_argument("--name", required=True)
     build.add_argument("--system", required=True)
+    build.add_argument("--alias", action="append", default=[])
     build.add_argument("--edition", required=True)
     build.add_argument("--documents", type=Path, required=True)
+    build.add_argument("--import-report", type=Path)
     build.add_argument("--index-dir", type=Path)
 
     pdf = subparsers.add_parser("extract-pdf", help="extract a text PDF into normalized JSONL")
@@ -49,8 +51,10 @@ def main() -> None:
             library_id=args.id,
             name=args.name,
             system=args.system,
+            aliases=args.alias,
             edition=args.edition,
             documents=args.documents,
+            import_report=args.import_report,
             index_dir=args.index_dir,
         )
         print(revision)
@@ -98,7 +102,10 @@ def build_jsonl(
     edition: str,
     documents: Path,
     index_dir: Path | None,
+    aliases: list[str] | tuple[str, ...] = (),
+    import_report: Path | None = None,
 ) -> str:
+    normalized_aliases = _normalize_aliases(aliases)
     repository = RuleRepository.from_jsonl(documents)
     values = repository.all()
     if not values:
@@ -112,6 +119,11 @@ def build_jsonl(
         first = duplicates[0]
         raise ValueError(f"exact duplicate content: {first[0]} and {first[1]}")
 
+    extraction_report = (
+        _load_import_report(import_report, library_id)
+        if import_report is not None
+        else {}
+    )
     revision = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     stage = root / library_id / "builds" / revision
     if stage.exists():
@@ -122,12 +134,13 @@ def build_jsonl(
         shutil.copytree(index_dir, stage / "vector-index")
 
     report = {
+        **extraction_report,
         "libraryId": library_id,
         "revision": revision,
         "documentCount": len(values),
         "exactDuplicates": [],
-        "warnings": [],
     }
+    report.setdefault("warnings", [])
     (stage / "import-report.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
@@ -140,6 +153,8 @@ def build_jsonl(
         "revision": revision,
         "documents": "documents.jsonl",
     }
+    if normalized_aliases:
+        manifest["aliases"] = normalized_aliases
     if index_dir is not None:
         manifest["indexDir"] = "vector-index"
     (stage / "manifest.json").write_text(
@@ -172,6 +187,28 @@ def _exact_content_duplicates(documents: list[Any]) -> list[tuple[str, str]]:
         else:
             seen[digest] = document.id
     return duplicates
+
+
+def _normalize_aliases(aliases: list[str] | tuple[str, ...]) -> list[str]:
+    if any(not isinstance(alias, str) or not alias.strip() for alias in aliases):
+        raise ValueError("aliases must be non-empty strings")
+    return list(dict.fromkeys(alias.strip() for alias in aliases))
+
+
+def _load_import_report(path: Path, library_id: str) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise ValueError(f"invalid import report JSON: {path}") from error
+    if not isinstance(value, dict):
+        raise ValueError("import report must be a JSON object")
+    report_library_id = value.get("libraryId")
+    if report_library_id != library_id:
+        raise ValueError(
+            "import report uses a different library id: "
+            f"{report_library_id!r} (expected {library_id!r})"
+        )
+    return value
 
 
 if __name__ == "__main__":

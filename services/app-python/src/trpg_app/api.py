@@ -17,6 +17,7 @@ from .auth import COOKIE_NAME, SessionSigner, password_matches
 from .chat import ModelGateway, OpenAIModelGateway, run_rule_turn
 from .config import AppConfig, ModelConfig
 from .errors import classify_chat_error, safe_status
+from .library_boundary import find_explicit_other_library
 from .libraries import LibraryCatalog
 
 
@@ -117,8 +118,37 @@ def create_app(
             library = catalog.get(payload.library_id)
         except KeyError:
             raise HTTPException(status_code=404, detail="library not found") from None
+        latest_user_message = next(
+            (
+                message.content
+                for message in reversed(payload.messages)
+                if message.role == "user"
+            ),
+            "",
+        )
+        other_library = find_explicit_other_library(
+            latest_user_message,
+            current_library_id=library.manifest.id,
+            libraries=catalog.descriptors(),
+        )
 
         async def events() -> AsyncIterator[str]:
+            if other_library is not None:
+                current_name = library.manifest.name
+                other_name = other_library["name"]
+                yield _sse(
+                    {
+                        "type": "text_delta",
+                        "delta": (
+                            f"当前对话绑定「{current_name}」，不覆盖"
+                            f"「{other_name}」规则。请新建对话并选择"
+                            f"「{other_name}」规则库。"
+                        ),
+                    }
+                )
+                yield _sse({"type": "sources", "sources": []})
+                yield _sse({"type": "done"})
+                return
             async with turn_slots:
                 try:
                     async for event in run_rule_turn(
