@@ -577,6 +577,11 @@ class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
         final_prompt = StateAwareGateway.final_messages[1]["content"]
         self.assertIn('"task": "创建角色"', final_prompt)
         self.assertIn('"真身": "猫"', final_prompt)
+        self.assertIn("状态字段之间互不构成约束", final_prompt)
+        self.assertIn(
+            "不得根据表格位置",
+            StateAwareGateway.final_messages[0]["content"],
+        )
         self.assertEqual(events[-1]["type"], "done")
 
     async def test_retries_provider_refusal_before_exposing_answer(self) -> None:
