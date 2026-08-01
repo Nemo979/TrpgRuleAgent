@@ -68,10 +68,16 @@ class FakeLibrary:
         revision="test-revision",
     )
 
+    def __init__(self):
+        self.search_queries: list[str] = []
+        self.read_ids: list[list[str]] = []
+
     def search(self, query: str, limit: int):
+        self.search_queries.append(query)
         return [{"id": "pf1e:combat", "title": "借机攻击", "excerpt": "离开威胁方格"}]
 
     def read(self, ids):
+        self.read_ids.append(list(ids))
         return [
             {
                 "id": "pf1e:combat",
@@ -159,6 +165,165 @@ class OtherSystemGateway:
 
     async def stream_answer(self, messages):
         yield "当前绑定的 Pathfinder 1E 规则库不覆盖《夕妖晚谣》，请切换规则库。"
+
+
+def tool_decision(*calls: ToolInvocation) -> ModelDecision:
+    return ModelDecision(
+        content="",
+        tool_calls=tuple(calls),
+        assistant_message={
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": call.id,
+                    "type": "function",
+                    "function": {"name": call.name, "arguments": call.arguments},
+                }
+                for call in calls
+            ],
+        },
+    )
+
+
+class RepeatedSearchGateway:
+    def __init__(self, _model):
+        self.step = 0
+
+    async def decide(self, messages, tools):
+        self.step += 1
+        return tool_decision(
+            ToolInvocation(
+                f"search-{self.step}",
+                "search_rules",
+                '{"query":"魔战士"}',
+            )
+        )
+
+    async def stream_answer(self, messages):
+        raise AssertionError("no-evidence early stop must not call the model again")
+        yield ""
+
+
+class SearchThenStopsGateway:
+    def __init__(self, _model):
+        self.step = 0
+
+    async def decide(self, messages, tools):
+        self.step += 1
+        if self.step == 1:
+            return tool_decision(
+                ToolInvocation("search-1", "search_rules", '{"query":"魔战士"}')
+            )
+        return ModelDecision(
+            content="我不知道",
+            tool_calls=(),
+            assistant_message={"role": "assistant", "content": "我不知道"},
+        )
+
+    async def stream_answer(self, messages):
+        raise AssertionError("no-evidence early stop must not call the model again")
+        yield ""
+
+
+class SearchThenFinishesGateway:
+    def __init__(self, _model):
+        self.step = 0
+
+    async def decide(self, messages, tools):
+        self.step += 1
+        call = (
+            ToolInvocation("search-1", "search_rules", '{"query":"魔战士"}')
+            if self.step == 1
+            else ToolInvocation("finish-1", "finish_answer", "{}")
+        )
+        return tool_decision(call)
+
+    async def stream_answer(self, messages):
+        raise AssertionError("finish without evidence must not generate a model answer")
+        yield ""
+
+
+class ParallelSearchGateway:
+    second_decision_messages: list[dict] = []
+
+    def __init__(self, _model):
+        self.step = 0
+
+    async def decide(self, messages, tools):
+        self.step += 1
+        if self.step == 1:
+            return tool_decision(
+                ToolInvocation("search-1", "search_rules", '{"query":"魔战士"}'),
+                ToolInvocation("search-2", "search_rules", '{"query":"战斗职业"}'),
+                ToolInvocation("search-3", "search_rules", '{"query":"魔法战士"}'),
+            )
+        type(self).second_decision_messages = list(messages)
+        return tool_decision(ToolInvocation("finish-1", "finish_answer", "{}"))
+
+    async def stream_answer(self, messages):
+        yield "当前证据不足。"
+
+
+class RepeatedReadGateway:
+    def __init__(self, _model):
+        self.step = 0
+
+    async def decide(self, messages, tools):
+        self.step += 1
+        if self.step == 1:
+            return tool_decision(
+                ToolInvocation("search-1", "search_rules", '{"query":"借机攻击"}')
+            )
+        return tool_decision(
+            ToolInvocation(
+                f"read-{self.step}",
+                "read_rules",
+                '{"ids":["pf1e:combat"]}',
+            )
+        )
+
+    async def stream_answer(self, messages):
+        yield "只能确认已经读取的借机攻击规则。"
+
+
+class ChangingSearchLibrary(FakeLibrary):
+    def search(self, query: str, limit: int):
+        self.search_queries.append(query)
+        return [{"id": f"pf1e:{query}", "title": query, "excerpt": query}]
+
+
+class EndlessDifferentSearchGateway:
+    def __init__(self, _model):
+        self.step = 0
+
+    async def decide(self, messages, tools):
+        self.step += 1
+        return tool_decision(
+            ToolInvocation(
+                f"search-{self.step}",
+                "search_rules",
+                f'{{"query":"查询{self.step}"}}',
+            )
+        )
+
+    async def stream_answer(self, messages):
+        raise AssertionError("no-evidence early stop must not call the model again")
+        yield ""
+
+
+class InvalidToolGateway:
+    def __init__(self, _model):
+        self.step = 0
+
+    async def decide(self, messages, tools):
+        self.step += 1
+        return tool_decision(
+            ToolInvocation(f"invalid-{self.step}", "", "not-json")
+        )
+
+    async def stream_answer(self, messages):
+        raise AssertionError("invalid-tool early stop must not call the model again")
+        yield ""
 
 
 class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
@@ -250,6 +415,159 @@ class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
             [],
         )
         self.assertEqual(events[-1]["type"], "done")
+
+    async def test_stops_repeated_search_without_returning_budget_error(self) -> None:
+        library = FakeLibrary()
+        events = [
+            event
+            async for event in run_rule_turn(
+                model=self.model(),
+                library=library,
+                messages=[{"role": "user", "content": "你知道魔战士吗"}],
+                gateway_factory=RepeatedSearchGateway,
+            )
+        ]
+
+        self.assertEqual(library.search_queries, ["魔战士"])
+        self.assertIn(
+            "没有找到足够可靠的可引用依据",
+            "".join(event.get("delta", "") for event in events),
+        )
+        self.assertEqual(
+            next(event["sources"] for event in events if event["type"] == "sources"),
+            [],
+        )
+        self.assertEqual(events[-1]["type"], "done")
+
+    async def test_model_stopping_after_search_returns_no_evidence_not_error(self) -> None:
+        events = [
+            event
+            async for event in run_rule_turn(
+                model=self.model(),
+                library=FakeLibrary(),
+                messages=[{"role": "user", "content": "你知道魔战士吗"}],
+                gateway_factory=SearchThenStopsGateway,
+            )
+        ]
+
+        self.assertIn(
+            "没有找到足够可靠的可引用依据",
+            "".join(event.get("delta", "") for event in events),
+        )
+        self.assertEqual(events[-1]["type"], "done")
+
+    async def test_model_finishing_after_search_cannot_answer_without_evidence(self) -> None:
+        events = [
+            event
+            async for event in run_rule_turn(
+                model=self.model(),
+                library=FakeLibrary(),
+                messages=[{"role": "user", "content": "你知道魔战士吗"}],
+                gateway_factory=SearchThenFinishesGateway,
+            )
+        ]
+
+        self.assertIn(
+            "没有找到足够可靠的可引用依据",
+            "".join(event.get("delta", "") for event in events),
+        )
+        self.assertEqual(
+            next(event["sources"] for event in events if event["type"] == "sources"),
+            [],
+        )
+        self.assertEqual(events[-1]["type"], "done")
+
+    async def test_executes_only_one_tool_from_parallel_model_calls(self) -> None:
+        library = FakeLibrary()
+        events = [
+            event
+            async for event in run_rule_turn(
+                model=self.model(),
+                library=library,
+                messages=[{"role": "user", "content": "你知道魔战士吗"}],
+                gateway_factory=ParallelSearchGateway,
+            )
+        ]
+
+        self.assertEqual(library.search_queries, ["魔战士"])
+        tool_messages = [
+            message
+            for message in ParallelSearchGateway.second_decision_messages
+            if message["role"] == "tool"
+        ]
+        self.assertEqual(len(tool_messages), 3)
+        self.assertEqual(
+            sum("本调用已跳过" in message["content"] for message in tool_messages),
+            2,
+        )
+        self.assertEqual(events[-1]["type"], "done")
+
+    async def test_repeated_read_forces_limited_answer_from_existing_evidence(self) -> None:
+        library = FakeLibrary()
+        events = [
+            event
+            async for event in run_rule_turn(
+                model=self.model(),
+                library=library,
+                messages=[{"role": "user", "content": "借机攻击是什么"}],
+                gateway_factory=RepeatedReadGateway,
+            )
+        ]
+
+        self.assertEqual(library.read_ids, [["pf1e:combat"], ["pf1e:combat"]])
+        self.assertIn(
+            "只能确认已经读取的借机攻击规则。",
+            "".join(event.get("delta", "") for event in events),
+        )
+        sources = next(event["sources"] for event in events if event["type"] == "sources")
+        self.assertEqual([source["documentId"] for source in sources], ["pf1e:combat"])
+        self.assertEqual(events[-1]["type"], "done")
+
+    async def test_stops_after_two_searches_without_a_read(self) -> None:
+        library = ChangingSearchLibrary()
+        events = [
+            event
+            async for event in run_rule_turn(
+                model=self.model(),
+                library=library,
+                messages=[{"role": "user", "content": "宽泛问题"}],
+                gateway_factory=EndlessDifferentSearchGateway,
+            )
+        ]
+
+        self.assertEqual(library.search_queries, ["查询1", "查询2"])
+        self.assertIn(
+            "没有找到足够可靠的可引用依据",
+            "".join(event.get("delta", "") for event in events),
+        )
+        self.assertEqual(events[-1]["type"], "done")
+
+    async def test_stops_after_two_invalid_tool_calls(self) -> None:
+        events = [
+            event
+            async for event in run_rule_turn(
+                model=self.model(),
+                library=FakeLibrary(),
+                messages=[{"role": "user", "content": "你知道魔战士吗"}],
+                gateway_factory=InvalidToolGateway,
+            )
+        ]
+
+        self.assertIn(
+            "没有找到足够可靠的可引用依据",
+            "".join(event.get("delta", "") for event in events),
+        )
+        self.assertEqual(events[-1]["type"], "done")
+
+    @staticmethod
+    def model() -> ModelConfig:
+        return ModelConfig(
+            id="fake",
+            label="Fake",
+            base_url="https://example.invalid/v1",
+            model="fake",
+            api_key="secret",
+        )
 
 
 if __name__ == "__main__":

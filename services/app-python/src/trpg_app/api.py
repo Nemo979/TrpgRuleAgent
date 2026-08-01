@@ -21,7 +21,7 @@ from .library_boundary import find_explicit_other_library
 from .libraries import LibraryCatalog
 
 
-logger = logging.getLogger("trpg_app.chat")
+logger = logging.getLogger("uvicorn.error")
 
 
 class LoginRequest(BaseModel):
@@ -156,6 +156,7 @@ def create_app(
                         library=library,
                         messages=[item.model_dump() for item in payload.messages],
                         gateway_factory=gateway_factory,
+                        request_id=request_id,
                     ):
                         yield _sse(event)
                 except Exception as error:

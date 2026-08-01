@@ -1,3 +1,4 @@
+import logging
 import os
 from pathlib import Path
 
@@ -8,6 +9,7 @@ from .config import load_config
 
 
 def run() -> None:
+    logging.getLogger().setLevel(logging.INFO)
     config = load_config()
     static_dir = Path("apps/web-next/dist")
     host = os.environ.get("TRPG_HOST", "127.0.0.1")

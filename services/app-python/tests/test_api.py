@@ -82,6 +82,37 @@ class CountingGateway:
         yield ""
 
 
+class EmptySearchGateway:
+    def __init__(self, _model):
+        self.step = 0
+
+    async def decide(self, messages, tools):
+        self.step += 1
+        call = ToolInvocation(
+            f"search-{self.step}",
+            "search_rules",
+            '{"query":"魔战士"}',
+        )
+        return ModelDecision(
+            content="",
+            tool_calls=(call,),
+            assistant_message={
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": call.id,
+                        "type": "function",
+                        "function": {"name": call.name, "arguments": call.arguments},
+                    }
+                ],
+            },
+        )
+
+    async def stream_answer(self, messages):
+        raise AssertionError("empty search should end without another model request")
+        yield ""
+
+
 class AppApiTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -321,6 +352,34 @@ class AppApiTest(unittest.TestCase):
                     self.assertEqual(events[1]["sources"], [])
 
         self.assertEqual(CountingGateway.created, 0)
+
+    def test_empty_search_returns_no_evidence_instead_of_budget_error(self) -> None:
+        with TestClient(
+            create_app(self.config, gateway_factory=EmptySearchGateway)
+        ) as client:
+            client.post("/api/auth/login", json={"password": "shared"})
+            response = client.post(
+                "/api/chat",
+                json={
+                    "model_id": "test",
+                    "library_id": "golden-sky-stories-zh-1-2",
+                    "messages": [{"role": "user", "content": "你知道魔战士吗"}],
+                },
+            )
+
+        events = [
+            json.loads(line.removeprefix("data: "))
+            for line in response.text.splitlines()
+            if line.startswith("data: ")
+        ]
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [event["type"] for event in events],
+            ["status", "status", "status", "text_delta", "sources", "done"],
+        )
+        self.assertIn("没有找到足够可靠的可引用依据", events[3]["delta"])
+        self.assertEqual(events[4]["sources"], [])
+        self.assertFalse(any(event["type"] == "error" for event in events))
 
     def test_chat_boundary_checks_only_latest_user_message_without_false_match(
         self,
