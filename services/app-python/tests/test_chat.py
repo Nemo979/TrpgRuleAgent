@@ -292,6 +292,21 @@ class ChangingSearchLibrary(FakeLibrary):
         return [{"id": f"pf1e:{query}", "title": query, "excerpt": query}]
 
 
+class ExpandingLibrary(ChangingSearchLibrary):
+    def read(self, ids):
+        self.read_ids.append(list(ids))
+        return [
+            {
+                "id": document_id,
+                "title": document_id,
+                "fullPath": f"测试 > {document_id}",
+                "content": f"{document_id} 的规则证据。",
+                "metadata": {},
+            }
+            for document_id in ids
+        ]
+
+
 class EndlessDifferentSearchGateway:
     def __init__(self, _model):
         self.step = 0
@@ -324,6 +339,32 @@ class InvalidToolGateway:
     async def stream_answer(self, messages):
         raise AssertionError("invalid-tool early stop must not call the model again")
         yield ""
+
+
+class ProductiveEndlessGateway:
+    def __init__(self, _model):
+        self.step = 0
+
+    async def decide(self, messages, tools):
+        self.step += 1
+        number = (self.step + 1) // 2
+        call = (
+            ToolInvocation(
+                f"search-{number}",
+                "search_rules",
+                f'{{"query":"查询{number}"}}',
+            )
+            if self.step % 2
+            else ToolInvocation(
+                f"read-{number}",
+                "read_rules",
+                f'{{"ids":["pf1e:查询{number}"]}}',
+            )
+        )
+        return tool_decision(call)
+
+    async def stream_answer(self, messages):
+        yield "已达到本轮取证上限，只根据已读取的规则回答。"
 
 
 class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
@@ -556,6 +597,30 @@ class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(
             "没有找到足够可靠的可引用依据",
             "".join(event.get("delta", "") for event in events),
+        )
+        self.assertEqual(events[-1]["type"], "done")
+
+    async def test_decision_limit_finishes_from_collected_evidence(self) -> None:
+        library = ExpandingLibrary()
+        events = [
+            event
+            async for event in run_rule_turn(
+                model=self.model(),
+                library=library,
+                messages=[{"role": "user", "content": "复杂规则问题"}],
+                gateway_factory=ProductiveEndlessGateway,
+            )
+        ]
+
+        self.assertEqual(len(library.search_queries), 5)
+        self.assertEqual(len(library.read_ids), 5)
+        self.assertIn(
+            "只根据已读取的规则回答",
+            "".join(event.get("delta", "") for event in events),
+        )
+        self.assertEqual(
+            len(next(event["sources"] for event in events if event["type"] == "sources")),
+            5,
         )
         self.assertEqual(events[-1]["type"], "done")
 

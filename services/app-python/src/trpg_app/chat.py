@@ -459,7 +459,24 @@ async def run_rule_turn(
             ):
                 yield event
             return
-    raise RuntimeError("模型工具循环超过安全上限")
+    _log_tool_step(
+        request_id=request_id,
+        model=model,
+        library=library,
+        decision_index=10,
+        requested_calls=0,
+        executed_tool="none",
+        budget=budget,
+        stop_reason="decision_limit",
+    )
+    async for event in _finish_after_controller_stop(
+        gateway=gateway,
+        conversation=conversation,
+        citations=citations,
+        library=library,
+        stop_reason="decision_limit",
+    ):
+        yield event
 
 
 async def _stream_final_answer(
