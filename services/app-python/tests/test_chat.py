@@ -512,6 +512,29 @@ class EvidenceSaturationGateway:
         yield "三轮检索后直接根据已读取证据回答。"
 
 
+class StateAwareGateway:
+    final_messages: list[dict] = []
+
+    def __init__(self, _model):
+        self.step = 0
+
+    async def decide(self, messages, tools):
+        self.step += 1
+        if self.step == 1:
+            return tool_decision(
+                ToolInvocation("search-1", "search_rules", '{"query":"弱点"}')
+            )
+        if self.step == 2:
+            return tool_decision(
+                ToolInvocation("read-1", "read_rules", '{"ids":["pf1e:combat"]}')
+            )
+        return tool_decision(ToolInvocation("finish-1", "finish_answer", "{}"))
+
+    async def stream_answer(self, messages):
+        type(self).final_messages = list(messages)
+        yield "根据当前猫角色状态回答弱点问题。[S1]"
+
+
 class RefusalThenValidGateway(FakeGateway):
     answer_attempt = 0
 
@@ -529,6 +552,33 @@ class AlwaysRefusesGateway(FakeGateway):
 
 
 class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
+    async def test_state_enriches_follow_up_search_and_final_prompt(self) -> None:
+        library = FakeLibrary()
+        events = [
+            event
+            async for event in run_rule_turn(
+                model=self.model(),
+                library=library,
+                messages=[
+                    {"role": "user", "content": "我想创建一个角色"},
+                    {"role": "assistant", "content": "请选择真身"},
+                    {"role": "user", "content": "我选择猫作为真身"},
+                    {"role": "assistant", "content": "已选择猫"},
+                    {"role": "user", "content": "我现在可以选择什么弱点"},
+                ],
+                gateway_factory=StateAwareGateway,
+            )
+        ]
+
+        self.assertEqual(
+            library.search_queries,
+            ["我现在可以选择什么弱点 猫"],
+        )
+        final_prompt = StateAwareGateway.final_messages[1]["content"]
+        self.assertIn('"task": "创建角色"', final_prompt)
+        self.assertIn('"真身": "猫"', final_prompt)
+        self.assertEqual(events[-1]["type"], "done")
+
     async def test_retries_provider_refusal_before_exposing_answer(self) -> None:
         RefusalThenValidGateway.answer_attempt = 0
         events = [
@@ -702,7 +752,11 @@ class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             library.search_queries,
-            ["角色创建1", "角色创建2", "我想创建一个角色"],
+            [
+                "我想创建一个角色 角色创建1",
+                "我想创建一个角色 角色创建2",
+                "我想创建一个角色",
+            ],
         )
         self.assertEqual(library.read_ids, [["pf1e:combat"]])
         self.assertIn(

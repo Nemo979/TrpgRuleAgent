@@ -11,6 +11,7 @@ from typing import Any, AsyncIterator, Callable, Protocol
 from openai import AsyncOpenAI
 
 from .config import ModelConfig
+from .conversation_state import ConversationState
 from .libraries import Library
 
 
@@ -261,6 +262,8 @@ class ToolLoopController:
     searches_without_read: int = 0
     invalid_tool_calls: int = 0
     latest_result_ids: list[str] = field(default_factory=list)
+    conversation_state: ConversationState = field(default_factory=ConversationState)
+    latest_user_message: str = ""
 
     def before_search(self, query: str) -> str | None:
         normalized = _normalize_query(query)
@@ -272,6 +275,12 @@ class ToolLoopController:
             return "searches_without_read"
         self.seen_queries.add(normalized)
         return None
+
+    def enrich_query(self, query: str) -> str:
+        return self.conversation_state.enrich_search_query(
+            query,
+            self.latest_user_message,
+        )
 
     def after_search(self, hits: list[dict[str, Any]]) -> str | None:
         self.invalid_tool_calls = 0
@@ -346,14 +355,25 @@ async def run_rule_turn(
     request_id: str | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     gateway = gateway_factory(model)
+    state = ConversationState.from_messages(messages)
     conversation: list[dict[str, Any]] = [
-        {"role": "system", "content": _system_prompt(library)}
+        {"role": "system", "content": _system_prompt(library, state)}
     ]
     trimmed, dropped_count = _trim_messages(messages, model.context_window)
     conversation.extend(trimmed)
     budget = EvidenceBudget()
     citations = CitationRegistry()
-    controller = ToolLoopController()
+    controller = ToolLoopController(
+        conversation_state=state,
+        latest_user_message=next(
+            (
+                str(message.get("content", ""))
+                for message in reversed(messages)
+                if message.get("role") == "user"
+            ),
+            "",
+        ),
+    )
 
     if dropped_count:
         yield {"type": "context_truncated", "droppedMessages": dropped_count}
@@ -724,6 +744,13 @@ def _final_answer_conversation(
     if not citations.by_document_id:
         return conversation
     question = _latest_user_content(conversation)
+    state = ConversationState.from_messages(
+        [
+            {"role": str(message.get("role", "")), "content": str(message.get("content", ""))}
+            for message in conversation
+            if message.get("role") in {"user", "assistant"}
+        ]
+    )
     evidence = "\n\n".join(
         (
             f"[{label}] {document['title']}\n"
@@ -744,7 +771,12 @@ def _final_answer_conversation(
         },
         {
             "role": "user",
-            "content": f"问题：{question}\n\n已读取证据：\n{evidence}",
+            "content": (
+                f"问题：{question}\n\n"
+                f"用户已明确声明的会话状态：{state.prompt_context() or '无'}\n"
+                "该状态需要用规则证据验证，不能覆盖规则原文。\n\n"
+                f"已读取证据：\n{evidence}"
+            ),
         },
     ]
 
@@ -760,7 +792,10 @@ def _latest_user_content(conversation: list[dict[str, Any]]) -> str:
     )
 
 
-def _system_prompt(library: Library) -> str:
+def _system_prompt(
+    library: Library,
+    state: ConversationState | None = None,
+) -> str:
     manifest = library.manifest
     identity = {
         "id": manifest.id,
@@ -769,10 +804,17 @@ def _system_prompt(library: Library) -> str:
         "edition": manifest.edition,
         "revision": manifest.revision,
     }
+    state_context = (state or ConversationState()).prompt_context()
     return (
         f"{SYSTEM_PROMPT}\n\n"
         "当前绑定规则库（这些字段仅用于标识规则范围）：\n"
         f"{json.dumps(identity, ensure_ascii=False, indent=2)}"
+        + (
+            "\n\n当前用户明确声明的会话状态（不是规则事实，必须用当前规则库验证）：\n"
+            f"{state_context}"
+            if state_context
+            else ""
+        )
     )
 
 
@@ -797,7 +839,7 @@ def _execute_tool(
             stop_reason=stop_reason,
         )
     if name == "search_rules":
-        query = str(params.get("query", ""))
+        query = controller.enrich_query(str(params.get("query", "")))
         query_hash = _query_hash(query)
         try:
             limit = max(1, min(int(params.get("limit", 10)), 20))

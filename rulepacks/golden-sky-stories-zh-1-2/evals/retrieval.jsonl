@@ -18,3 +18,5 @@
 {"id":"cat-furball","query":"猫的一团毛球有什么效果？","relevantIds":["golden-sky-stories-zh-1-2:pdf:d1265fa18c3e447f"]}
 {"id":"cat-weaknesses","query":"猫有哪些弱点？","relevantIds":["golden-sky-stories-zh-1-2:pdf:027863a4c1d03c9e"]}
 {"id":"after-choosing-true-form","query":"选择猫作为真身后，创建角色的下一步是什么？","relevantIds":["golden-sky-stories-zh-1-2:pdf:9cdbb820e7b98e58"]}
+{"id":"cat-weakness-state-query","query":"我现在可以选择什么弱点 猫","relevantIds":["golden-sky-stories-zh-1-2:pdf:027863a4c1d03c9e"]}
+{"id":"furball-selection-state-query","query":"我选择基本特性为一团毛球 猫 基本特技 真身","relevantIds":["golden-sky-stories-zh-1-2:pdf:d1265fa18c3e447f"]}
