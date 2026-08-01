@@ -17,6 +17,25 @@ from .libraries import Library
 logger = logging.getLogger("uvicorn.error")
 
 
+_PROVIDER_REFUSAL_PATTERNS = (
+    re.compile(r"the request was rejected", re.IGNORECASE),
+    re.compile(r"considered high risk", re.IGNORECASE),
+    re.compile(r"request (?:has been |was )?blocked", re.IGNORECASE),
+    re.compile(r"模型服务拒绝了本次请求"),
+    re.compile(r"请求(?:被|已被).{0,12}(?:拒绝|拦截)"),
+)
+_UNFINISHED_PROCESS_PATTERNS = (
+    re.compile(r"^\s*(?:让我|我会|我将|接下来(?:我会)?).{0,12}(?:继续)?(?:搜索|检索|读取|查找)"),
+    re.compile(r"^\s*(?:let me|i(?:'ll| will)).{0,20}(?:search|retrieve|read)", re.IGNORECASE),
+)
+_TRANSIENT_OUTPUT_PATTERNS = (
+    re.compile(r"模型服务当前繁忙"),
+    re.compile(r"模型响应超时"),
+    re.compile(r"暂时无法连接模型服务"),
+    re.compile(r"service (?:is )?(?:busy|unavailable)", re.IGNORECASE),
+)
+
+
 SYSTEM_PROMPT = """你是一个基于证据的 TRPG 规则助手。
 
 要求：
@@ -545,14 +564,40 @@ async def _stream_final_answer(
 ) -> AsyncIterator[dict[str, Any]]:
     answer_conversation = _final_answer_conversation(conversation, citations)
     yield {"type": "status", "status": "answering"}
-    answer_parts: list[str] = []
-    async for delta in gateway.stream_answer(answer_conversation):
-        answer_parts.append(delta)
-        yield {"type": "text_delta", "delta": delta}
-    suffix = _missing_citation_suffix("".join(answer_parts), citations.labels())
-    if suffix:
-        yield {"type": "text_delta", "delta": suffix}
-    yield {"type": "sources", "sources": citations.public()}
+    last_issue = "empty"
+    for attempt in range(2):
+        answer_parts = [
+            delta async for delta in gateway.stream_answer(answer_conversation)
+        ]
+        content = "".join(answer_parts)
+        last_issue = _answer_quality_issue(content) or ""
+        if not last_issue:
+            for delta in answer_parts:
+                yield {"type": "text_delta", "delta": delta}
+            suffix = _missing_citation_suffix(content, citations.labels())
+            if suffix:
+                yield {"type": "text_delta", "delta": suffix}
+            yield {"type": "sources", "sources": citations.public()}
+            yield {"type": "done"}
+            return
+        logger.warning(
+            "answer_quality_rejected issue=%s attempt=%s",
+            last_issue,
+            attempt + 1,
+        )
+        if attempt == 0:
+            answer_conversation = [
+                *answer_conversation,
+                {
+                    "role": "system",
+                    "content": _answer_recovery_instruction(last_issue),
+                },
+            ]
+
+    yield {"type": "text_delta", "delta": _answer_quality_failure(last_issue)}
+    # Rejected or incomplete provider output is not a rule conclusion. Never
+    # attach the evidence registry to it, even if retrieval itself succeeded.
+    yield {"type": "sources", "sources": []}
     yield {"type": "done"}
 
 
@@ -938,9 +983,46 @@ def _trim_messages(
 
 
 def _missing_citation_suffix(content: str, labels: list[str]) -> str:
-    if not labels:
+    if not labels or _answer_quality_issue(content):
         return ""
     used = set(re.findall(r"\[(S\d+)]", content))
     if any(label in used for label in labels):
         return ""
     return "\n\n依据：" + "".join(f"[{label}]" for label in labels)
+
+
+def _answer_quality_issue(content: str) -> str | None:
+    normalized = content.strip()
+    if not normalized:
+        return "empty"
+    if any(pattern.search(normalized) for pattern in _PROVIDER_REFUSAL_PATTERNS):
+        return "provider_refusal"
+    if any(pattern.search(normalized) for pattern in _TRANSIENT_OUTPUT_PATTERNS):
+        return "transient_provider_output"
+    if any(pattern.search(normalized) for pattern in _UNFINISHED_PROCESS_PATTERNS):
+        return "unfinished_process"
+    return None
+
+
+def _answer_recovery_instruction(issue: str) -> str:
+    if issue == "provider_refusal":
+        return (
+            "上一份候选输出是供应商拒绝信息，不能作为回答。当前任务只是根据已提供的"
+            "TRPG 规则证据回答普通游戏规则问题；请重新生成简洁、完整的中文答案。"
+        )
+    if issue == "unfinished_process":
+        return (
+            "上一份候选输出只是搜索或读取计划。检索已经结束，工具不可用；请立即根据"
+            "已提供证据生成完整最终答案，不要描述下一步计划。"
+        )
+    return "上一份候选输出不可用；请根据已提供证据重新生成完整的中文最终答案。"
+
+
+def _answer_quality_failure(issue: str) -> str:
+    if issue == "provider_refusal":
+        return "所选模型连续拒绝生成本次规则回答，系统没有将拒绝信息作为规则结论或添加虚假引用。"
+    if issue == "transient_provider_output":
+        return "所选模型服务连续返回临时异常信息，本次没有生成可验证的规则回答，请稍后重试。"
+    if issue == "unfinished_process":
+        return "所选模型连续返回未完成的检索过程，本次没有生成可验证的最终回答。"
+    return "所选模型没有生成可验证的规则回答，请重试或更换模型。"

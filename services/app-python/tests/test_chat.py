@@ -6,6 +6,7 @@ from trpg_app.chat import (
     ModelDecision,
     OpenAIModelGateway,
     ToolInvocation,
+    _answer_quality_issue,
     _missing_citation_suffix,
     _visible_content,
     run_rule_turn,
@@ -56,6 +57,17 @@ class EvidenceBudgetTest(unittest.TestCase):
         self.assertEqual(
             _missing_citation_suffix("规则回答。[S2]", ["S1", "S2"]),
             "",
+        )
+
+    def test_never_appends_citations_to_provider_refusal(self) -> None:
+        refusal = "The request was rejected because it was considered high risk"
+        self.assertEqual(_answer_quality_issue(refusal), "provider_refusal")
+        self.assertEqual(_missing_citation_suffix(refusal, ["S1", "S2"]), "")
+
+    def test_recognizes_unfinished_search_plan(self) -> None:
+        self.assertEqual(
+            _answer_quality_issue("让我继续搜索后续的创建步骤内容。"),
+            "unfinished_process",
         )
 
 
@@ -500,7 +512,62 @@ class EvidenceSaturationGateway:
         yield "三轮检索后直接根据已读取证据回答。"
 
 
+class RefusalThenValidGateway(FakeGateway):
+    answer_attempt = 0
+
+    async def stream_answer(self, messages):
+        type(self).answer_attempt += 1
+        if type(self).answer_attempt == 1:
+            yield "The request was rejected because it was considered high risk"
+            return
+        yield "这是重新生成的规则回答。[S1]"
+
+
+class AlwaysRefusesGateway(FakeGateway):
+    async def stream_answer(self, messages):
+        yield "The request was rejected because it was considered high risk"
+
+
 class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
+    async def test_retries_provider_refusal_before_exposing_answer(self) -> None:
+        RefusalThenValidGateway.answer_attempt = 0
+        events = [
+            event
+            async for event in run_rule_turn(
+                model=self.model(),
+                library=FakeLibrary(),
+                messages=[{"role": "user", "content": "创建一个扮演的角色"}],
+                gateway_factory=RefusalThenValidGateway,
+            )
+        ]
+
+        text = "".join(event.get("delta", "") for event in events)
+        self.assertNotIn("high risk", text)
+        self.assertEqual(text, "这是重新生成的规则回答。[S1]")
+        self.assertEqual(
+            len(next(event["sources"] for event in events if event["type"] == "sources")),
+            1,
+        )
+
+    async def test_repeated_provider_refusal_has_no_sources(self) -> None:
+        events = [
+            event
+            async for event in run_rule_turn(
+                model=self.model(),
+                library=FakeLibrary(),
+                messages=[{"role": "user", "content": "创建一个扮演的角色"}],
+                gateway_factory=AlwaysRefusesGateway,
+            )
+        ]
+
+        text = "".join(event.get("delta", "") for event in events)
+        self.assertIn("没有将拒绝信息作为规则结论", text)
+        self.assertNotIn("依据：", text)
+        self.assertEqual(
+            next(event["sources"] for event in events if event["type"] == "sources"),
+            [],
+        )
+
     async def test_searches_reads_then_streams_grounded_answer(self) -> None:
         model = ModelConfig(
             id="fake",
