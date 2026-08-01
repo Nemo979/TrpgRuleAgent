@@ -89,6 +89,22 @@ class FakeLibrary:
         ]
 
 
+class StrictFakeLibrary(FakeLibrary):
+    def read(self, ids):
+        self.read_ids.append(list(ids))
+        if "pf1e:combat" not in ids:
+            return []
+        return [
+            {
+                "id": "pf1e:combat",
+                "title": "借机攻击",
+                "fullPath": "核心规则 > 战斗 > 借机攻击",
+                "content": "离开受威胁方格可能引发借机攻击。",
+                "metadata": {"page": 42},
+            }
+        ]
+
+
 class FakeGateway:
     first_system_prompt = ""
 
@@ -137,8 +153,7 @@ class NoEvidenceGateway:
         )
 
     async def stream_answer(self, messages):
-        if False:
-            yield ""
+        yield "服务端已补充读取规则证据后回答。[S1]"
 
 
 class OtherSystemGateway:
@@ -261,6 +276,44 @@ class SearchThenFinishesGateway:
         yield ""
 
 
+class MissingDocumentReadGateway:
+    def __init__(self, _model):
+        self.step = 0
+
+    async def decide(self, messages, tools):
+        self.step += 1
+        call = (
+            ToolInvocation("search-1", "search_rules", '{"query":"角色创建"}')
+            if self.step == 1
+            else ToolInvocation(
+                "read-1",
+                "read_rules",
+                '{"ids":["model:invented-document-id"]}',
+            )
+        )
+        return tool_decision(call)
+
+    async def stream_answer(self, messages):
+        yield "服务端改读真实搜索候选后回答。[S1]"
+
+
+class DirectMissingDocumentReadGateway:
+    def __init__(self, _model):
+        pass
+
+    async def decide(self, messages, tools):
+        return tool_decision(
+            ToolInvocation(
+                "read-previous-source",
+                "read_rules",
+                '{"ids":["previous-turn:S1"]}',
+            )
+        )
+
+    async def stream_answer(self, messages):
+        yield "追问已重新搜索并读取本轮证据。[S1]"
+
+
 class ParallelSearchGateway:
     second_decision_messages: list[dict] = []
 
@@ -307,6 +360,28 @@ class RepeatedReadGateway:
         yield "只能确认已经读取的借机攻击规则。"
 
 
+class PartialRepeatedReadGateway:
+    def __init__(self, _model):
+        self.step = 0
+
+    async def decide(self, messages, tools):
+        self.step += 1
+        if self.step == 1:
+            return tool_decision(
+                ToolInvocation("search-1", "search_rules", '{"query":"真身种类"}')
+            )
+        return tool_decision(
+            ToolInvocation(
+                f"read-{self.step}",
+                "read_rules",
+                '{"ids":["pf1e:evidence-1"]}',
+            )
+        )
+
+    async def stream_answer(self, messages):
+        yield "已补读尚未读取的候选章节。[S1][S2][S3]"
+
+
 class ChangingSearchLibrary(FakeLibrary):
     def search(self, query: str, limit: int):
         self.search_queries.append(query)
@@ -325,6 +400,19 @@ class ExpandingLibrary(ChangingSearchLibrary):
                 "metadata": {},
             }
             for document_id in ids
+        ]
+
+
+class MultiCandidateLibrary(ExpandingLibrary):
+    def search(self, query: str, limit: int):
+        self.search_queries.append(query)
+        return [
+            {
+                "id": f"pf1e:evidence-{number}",
+                "title": f"证据 {number}",
+                "excerpt": query,
+            }
+            for number in range(1, 4)
         ]
 
 
@@ -446,7 +534,7 @@ class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"revision": "test-revision"', prompt)
         self.assertIn("search_rules → read_rules → finish_answer", prompt)
 
-    async def test_rejects_answer_that_never_reads_rule_evidence(self) -> None:
+    async def test_recovers_when_model_skips_tools_on_first_decision(self) -> None:
         model = ModelConfig(
             id="fake",
             label="Fake",
@@ -455,16 +543,24 @@ class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
             api_key="secret",
         )
 
-        with self.assertRaisesRegex(RuntimeError, "未读取规则证据"):
-            _ = [
-                event
-                async for event in run_rule_turn(
-                    model=model,
-                    library=FakeLibrary(),
-                    messages=[{"role": "user", "content": "直接回答"}],
-                    gateway_factory=NoEvidenceGateway,
-                )
-            ]
+        library = FakeLibrary()
+        events = [
+            event
+            async for event in run_rule_turn(
+                model=model,
+                library=library,
+                messages=[{"role": "user", "content": "有哪几种真身？"}],
+                gateway_factory=NoEvidenceGateway,
+            )
+        ]
+
+        self.assertEqual(library.search_queries, ["有哪几种真身？"])
+        self.assertEqual(library.read_ids, [["pf1e:combat"]])
+        self.assertIn(
+            "补充读取规则证据后回答",
+            "".join(event.get("delta", "") for event in events),
+        )
+        self.assertEqual(events[-1]["type"], "done")
 
     async def test_allows_other_system_to_finish_without_rule_evidence(self) -> None:
         model = ModelConfig(
@@ -537,7 +633,10 @@ class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
             )
         ]
 
-        self.assertEqual(library.search_queries, ["角色创建1", "角色创建2"])
+        self.assertEqual(
+            library.search_queries,
+            ["角色创建1", "角色创建2", "我想创建一个角色"],
+        )
         self.assertEqual(library.read_ids, [["pf1e:combat"]])
         self.assertIn(
             "下面说明角色创建步骤",
@@ -584,6 +683,55 @@ class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             next(event["sources"] for event in events if event["type"] == "sources"),
             [],
+        )
+        self.assertEqual(events[-1]["type"], "done")
+
+    async def test_missing_model_document_ids_fall_back_to_search_results(self) -> None:
+        library = StrictFakeLibrary()
+        events = [
+            event
+            async for event in run_rule_turn(
+                model=self.model(),
+                library=library,
+                messages=[{"role": "user", "content": "我想创建一个角色"}],
+                gateway_factory=MissingDocumentReadGateway,
+            )
+        ]
+
+        self.assertEqual(
+            library.read_ids,
+            [["model:invented-document-id"], ["pf1e:combat"]],
+        )
+        self.assertIn(
+            "改读真实搜索候选后回答",
+            "".join(event.get("delta", "") for event in events),
+        )
+        self.assertEqual(events[-1]["type"], "done")
+
+    async def test_follow_up_reading_old_source_ids_researches_latest_question(self) -> None:
+        library = StrictFakeLibrary()
+        events = [
+            event
+            async for event in run_rule_turn(
+                model=self.model(),
+                library=library,
+                messages=[
+                    {"role": "user", "content": "我想创建一个角色"},
+                    {"role": "assistant", "content": "可以选择真身。[S1]"},
+                    {"role": "user", "content": "有哪几种真身？"},
+                ],
+                gateway_factory=DirectMissingDocumentReadGateway,
+            )
+        ]
+
+        self.assertEqual(library.search_queries, ["有哪几种真身？"])
+        self.assertEqual(
+            library.read_ids,
+            [["previous-turn:S1"], ["pf1e:combat"]],
+        )
+        self.assertIn(
+            "追问已重新搜索并读取本轮证据",
+            "".join(event.get("delta", "") for event in events),
         )
         self.assertEqual(events[-1]["type"], "done")
 
@@ -645,6 +793,34 @@ class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([source["documentId"] for source in sources], ["pf1e:combat"])
         self.assertEqual(events[-1]["type"], "done")
 
+    async def test_repeated_read_adds_unread_search_candidates_before_answer(self) -> None:
+        library = MultiCandidateLibrary()
+        events = [
+            event
+            async for event in run_rule_turn(
+                model=self.model(),
+                library=library,
+                messages=[{"role": "user", "content": "有哪几种真身？"}],
+                gateway_factory=PartialRepeatedReadGateway,
+            )
+        ]
+
+        self.assertEqual(
+            library.read_ids,
+            [
+                ["pf1e:evidence-1"],
+                ["pf1e:evidence-1"],
+                ["pf1e:evidence-2", "pf1e:evidence-3"],
+            ],
+        )
+        sources = next(event["sources"] for event in events if event["type"] == "sources")
+        self.assertEqual(len(sources), 3)
+        self.assertIn(
+            "已补读尚未读取的候选章节",
+            "".join(event.get("delta", "") for event in events),
+        )
+        self.assertEqual(events[-1]["type"], "done")
+
     async def test_stops_after_two_searches_without_a_read(self) -> None:
         library = ChangingSearchLibrary()
         events = [
@@ -657,12 +833,12 @@ class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
             )
         ]
 
-        self.assertEqual(library.search_queries, ["查询1", "查询2"])
+        self.assertEqual(library.search_queries, ["查询1", "查询2", "宽泛问题"])
         self.assertIn(
             "已读取候选章节，现在直接回答用户问题。",
             "".join(event.get("delta", "") for event in events),
         )
-        self.assertEqual(library.read_ids, [["pf1e:查询2"]])
+        self.assertEqual(library.read_ids, [["pf1e:宽泛问题"]])
         self.assertEqual(
             len(next(event["sources"] for event in events if event["type"] == "sources")),
             1,

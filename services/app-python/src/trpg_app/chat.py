@@ -345,6 +345,44 @@ async def run_rule_turn(
         if not decision.tool_calls:
             # Compatibility fallback for models that do not follow finish_answer.
             if not citations.by_document_id:
+                if not budget.searches:
+                    fallback_search = _execute_tool(
+                        name="search_rules",
+                        arguments=json.dumps(
+                            {"query": _latest_user_content(conversation), "limit": 10},
+                            ensure_ascii=False,
+                        ),
+                        library=library,
+                        budget=budget,
+                        citations=citations,
+                        controller=controller,
+                    )
+                    yield {"type": "status", "status": fallback_search.status}
+                    _log_tool_step(
+                        request_id=request_id,
+                        model=model,
+                        library=library,
+                        decision_index=decision_index,
+                        requested_calls=0,
+                        executed_tool="search_rules_fallback",
+                        budget=budget,
+                        stop_reason=fallback_search.stop_reason,
+                        query_hash=fallback_search.query_hash,
+                    )
+                    async for event in _finish_after_controller_stop(
+                        gateway=gateway,
+                        conversation=conversation,
+                        citations=citations,
+                        library=library,
+                        stop_reason="model_skipped_tools",
+                        model=model,
+                        budget=budget,
+                        controller=controller,
+                        request_id=request_id,
+                        decision_index=decision_index,
+                    ):
+                        yield event
+                    return
                 if budget.searches:
                     _log_tool_step(
                         request_id=request_id,
@@ -531,12 +569,53 @@ async def _finish_after_controller_stop(
     request_id: str | None,
     decision_index: int,
 ) -> AsyncIterator[dict[str, Any]]:
-    should_read_candidates = controller.latest_result_ids and (
+    if (
+        not citations.by_document_id
+        and stop_reason
+        in {"repeated_documents", "searches_without_read", "repeated_results"}
+    ):
+        # This is a server-controlled recovery query, so it is allowed after the
+        # model's two-search-without-read ceiling.
+        controller.searches_without_read = 0
+        fallback_search = _execute_tool(
+            name="search_rules",
+            arguments=json.dumps(
+                {"query": _latest_user_content(conversation), "limit": 10},
+                ensure_ascii=False,
+            ),
+            library=library,
+            budget=budget,
+            citations=citations,
+            controller=controller,
+        )
+        yield {"type": "status", "status": fallback_search.status}
+        _log_tool_step(
+            request_id=request_id,
+            model=model,
+            library=library,
+            decision_index=decision_index,
+            requested_calls=0,
+            executed_tool="search_rules_fallback",
+            budget=budget,
+            stop_reason=fallback_search.stop_reason,
+            query_hash=fallback_search.query_hash,
+        )
+    unread_candidate_ids = [
+        document_id
+        for document_id in controller.latest_result_ids
+        if document_id not in citations.by_document_id
+    ]
+    should_read_candidates = unread_candidate_ids and (
         (
             not citations.by_document_id
-            and stop_reason in {"searches_without_read", "repeated_results"}
+            and stop_reason
+            in {
+                "searches_without_read",
+                "repeated_results",
+                "model_skipped_tools",
+            }
         )
-        or stop_reason == "evidence_saturation"
+        or stop_reason in {"evidence_saturation", "repeated_documents"}
     )
     remaining_documents = max(
         0,
@@ -546,7 +625,7 @@ async def _finish_after_controller_stop(
         fallback = _execute_tool(
             name="read_rules",
             arguments=json.dumps(
-                {"ids": controller.latest_result_ids[: min(4, remaining_documents)]}
+                {"ids": unread_candidate_ids[: min(4, remaining_documents)]}
             ),
             library=library,
             budget=budget,
@@ -599,14 +678,7 @@ def _final_answer_conversation(
 ) -> list[dict[str, str]]:
     if not citations.by_document_id:
         return conversation
-    question = next(
-        (
-            str(message.get("content", ""))
-            for message in reversed(conversation)
-            if message.get("role") == "user"
-        ),
-        "",
-    )
+    question = _latest_user_content(conversation)
     evidence = "\n\n".join(
         (
             f"[{label}] {document['title']}\n"
@@ -630,6 +702,17 @@ def _final_answer_conversation(
             "content": f"问题：{question}\n\n已读取证据：\n{evidence}",
         },
     ]
+
+
+def _latest_user_content(conversation: list[dict[str, Any]]) -> str:
+    return next(
+        (
+            str(message.get("content", ""))
+            for message in reversed(conversation)
+            if message.get("role") == "user"
+        ),
+        "",
+    )
 
 
 def _system_prompt(library: Library) -> str:
