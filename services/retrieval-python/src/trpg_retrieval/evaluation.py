@@ -58,8 +58,11 @@ def evaluate(
         )
         result_ids = [result.document.id for result in results]
         rank = next(
-            (index + 1 for index, item in enumerate(result_ids)
-             if item in case.relevant_ids),
+            (
+                index + 1
+                for index, result in enumerate(results)
+                if _is_relevant(result.document, case.relevant_ids)
+            ),
             None,
         )
         if rank is not None:
@@ -90,6 +93,13 @@ def evaluate(
         flush=True,
     )
     return report
+
+
+def _is_relevant(document: Any, relevant_ids: Sequence[str]) -> bool:
+    return bool(
+        document.id in relevant_ids
+        or str(document.metadata.get("legacyParentId", "")) in relevant_ids
+    )
 
 
 def parse_args() -> argparse.Namespace:

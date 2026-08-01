@@ -44,7 +44,7 @@
 {"id":"two-weapon-penalty","query":"主副手双持攻击分别承受多少减值，轻武器有什么影响？","relevantIds":["pf1e-8f7e32b30bc6"]}
 {"id":"delay-initiative","query":"延迟行动后先攻位置会怎样改变？","relevantIds":["pf1e-d8e9c3c6a9ee"]}
 {"id":"ready-disrupt-spell","query":"怎样准备动作攻击施法者并打断他的法术？","relevantIds":["pf1e-d8e9c3c6a9ee"]}
-{"id":"ready-against-charge","query":"准备武器迎击冲锋时可以造成几倍伤害？","relevantIds":["pf1e-d8e9c3c6a9ee","pf1e-969f9de12654"]}
+{"id":"ready-against-charge","query":"准备武器迎击冲锋时可以造成几倍伤害？","relevantIds":["pf1e-d8e9c3c6a9ee","pf1e-969f9de12654","pf1e-8f7e32b30bc6"]}
 {"id":"carrying-capacity","query":"角色的轻载、中载和重载范围如何根据力量确定？","relevantIds":["pf1e-70df015ffe04"]}
 {"id":"load-penalties","query":"中载和重载会怎样限制最大敏捷加值、检定和奔跑？","relevantIds":["pf1e-70df015ffe04"]}
 {"id":"forced-march","query":"每天行走超过8小时进行强行军要做什么检定？","relevantIds":["pf1e-70df015ffe04"]}

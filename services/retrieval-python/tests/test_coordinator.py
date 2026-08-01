@@ -73,6 +73,23 @@ class RetrievalCoordinatorTest(unittest.TestCase):
             expand_query("猫有什么基本特性"),
             "猫有什么基本特性 基本特技",
         )
+        self.assertEqual(
+            expand_query("火把能照亮多大范围，可以燃烧多久？"),
+            "火把能照亮多大范围,可以燃烧多久? 照明半径 持续时间",
+        )
+
+    def test_uses_safe_rule_term_expansions_for_retrieval(self) -> None:
+        light = document("light", ["核心规则", "视力和光源"])
+        base = StubRetriever([SearchHit(light, "light", 0.04)])
+
+        RetrievalCoordinator(base, candidate_limit=1).search(
+            "火把能照亮多大范围，可以燃烧多久？", [light], 1
+        )
+
+        self.assertEqual(
+            base.query,
+            "火把能照亮多大范围,可以燃烧多久? 照明半径 持续时间",
+        )
 
     def test_entity_and_subsection_path_outrank_generic_weakness_page(self) -> None:
         generic = document("generic", ["夕妖晚谣", "其他", "弱点"])

@@ -12,7 +12,10 @@ _QUERY_ALIASES = {
     "基本特性": ("基本特技",),
     "基本特技": ("基本特性",),
     "人物": ("角色",),
+    "照亮": ("照明半径",),
+    "燃烧多久": ("持续时间",),
 }
+_SAFE_RETRIEVAL_EXPANSIONS = ("照亮", "燃烧多久")
 _RULE_CATEGORIES = (
     "弱点",
     "特技",
@@ -66,7 +69,12 @@ class RetrievalCoordinator:
         source_ids: Optional[Sequence[str]] = None,
     ) -> List[SearchHit]:
         expanded = expand_query(query)
-        retrieval_query = expanded if _is_character_creation_query(query) else query
+        retrieval_query = (
+            expanded
+            if _is_character_creation_query(query)
+            or any(marker in query for marker in _SAFE_RETRIEVAL_EXPANSIONS)
+            else query
+        )
         hits = self.base.search(
             retrieval_query,
             documents,

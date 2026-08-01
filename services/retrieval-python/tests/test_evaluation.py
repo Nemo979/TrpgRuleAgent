@@ -74,6 +74,30 @@ class EvaluationTest(unittest.TestCase):
         self.assertEqual(report["hitRate"], 1.0)
         self.assertEqual(retriever.seen_rulesets, [{"coc7"}])
 
+    def test_structured_child_matches_legacy_parent_relevance(self) -> None:
+        document = RuleDocument(
+            id="pf1e:combat:total-defense",
+            ruleset_id="pathfinder-1e",
+            source_id="crb",
+            source_title="CRB",
+            title="全防御",
+            full_path="CRB > 战斗 > 全防御",
+            content="全防御提供闪避加值。",
+            version="1e",
+            priority=100,
+            metadata={"legacyParentId": "pf1e:combat"},
+        )
+        retriever = RecordingRetriever(SearchHit(document, document.content, 1.0))
+
+        report = evaluate(
+            RuleRepository([document]),
+            retriever,
+            [RetrievalCase("total-defense", "全防御加值", ["pf1e:combat"])],
+            5,
+        )
+
+        self.assertEqual(report["hitRate"], 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

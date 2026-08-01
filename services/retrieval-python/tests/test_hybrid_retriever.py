@@ -46,6 +46,23 @@ class HybridRetrieverTest(unittest.TestCase):
         self.assertEqual([hit.document.id for hit in hits], ["second", "first"])
         self.assertEqual(hits[0].excerpt, "vector-second")
 
+    def test_default_fusion_preserves_a_top_lexical_only_candidate(self) -> None:
+        lexical_only = document("lexical-only")
+        shared = [document("shared-%d" % index) for index in range(5)]
+        vector = StubRetriever([
+            SearchHit(item, "vector", 1.0) for item in shared
+        ])
+        lexical = StubRetriever([
+            SearchHit(lexical_only, "exact lexical evidence", 10.0),
+            *[SearchHit(item, "lexical", 1.0) for item in shared],
+        ])
+
+        hits = HybridRetriever(vector, lexical, candidate_limit=6).search(
+            "query", [lexical_only, *shared], 5
+        )
+
+        self.assertIn("lexical-only", [hit.document.id for hit in hits])
+
     def test_fuses_vector_and_lexical_rankings_with_explicit_equal_weights(self) -> None:
         first = document("first")
         second = document("second")

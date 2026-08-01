@@ -52,6 +52,18 @@ class HybridRetriever:
         hits_by_id: Dict[str, SearchHit] = {}
         self._add_ranking(vector_hits, self.vector_weight, scores, hits_by_id)
         self._add_ranking(lexical_hits, self.lexical_weight, scores, hits_by_id)
+        self._preserve_unilateral_leader(
+            vector_hits,
+            lexical_hits,
+            self.lexical_weight,
+            scores,
+        )
+        self._preserve_unilateral_leader(
+            lexical_hits,
+            vector_hits,
+            self.vector_weight,
+            scores,
+        )
 
         for document_id, hit in hits_by_id.items():
             scores[document_id] += (
@@ -81,3 +93,18 @@ class HybridRetriever:
                 weight / (self.rrf_k + rank)
             )
             hits_by_id.setdefault(document_id, hit)
+
+    def _preserve_unilateral_leader(
+        self,
+        primary_hits: Sequence[SearchHit],
+        other_hits: Sequence[SearchHit],
+        missing_channel_weight: float,
+        scores: Dict[str, float],
+    ) -> None:
+        """Prevent either engine's top result from vanishing for lack of consensus."""
+        if not primary_hits:
+            return
+        leader_id = primary_hits[0].document.id
+        if any(hit.document.id == leader_id for hit in other_hits):
+            return
+        scores[leader_id] += missing_channel_weight / (self.rrf_k + 1)
