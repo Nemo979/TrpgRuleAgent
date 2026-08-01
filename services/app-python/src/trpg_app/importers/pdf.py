@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 from pathlib import Path
 from typing import Any, Sequence
@@ -29,9 +30,12 @@ def import_pdf(
     documents: list[RuleDocument] = []
     warnings: list[dict[str, Any]] = []
     table_count = 0
+    heading_context = HeadingContext(source_title)
     with pdfplumber.open(pdf_path) as pdf:
         for page_number, page in enumerate(pdf.pages, start=1):
-            text = (page.extract_text(layout=True) or "").strip()
+            raw_text = page.extract_text(layout=True) or ""
+            text = normalize_layout_text(raw_text)
+            detected_headings = detect_page_headings(raw_text)
             raw_tables = page.extract_tables() or []
             rendered_tables: list[str] = []
             for table_index, table in enumerate(raw_tables, start=1):
@@ -62,7 +66,11 @@ def import_pdf(
                 warnings.append({"type": "empty_page", "page": page_number})
                 continue
             content = "\n\n".join(content_parts)
+            heading_path, inherited_headings, structural_blocks = (
+                heading_context.partition(content, detected_headings)
+            )
             document_id = _page_id(library_id, pdf_path.name, page_number)
+            path_parts = [*heading_path, f"第 {page_number} 页"]
             documents.append(
                 RuleDocument(
                     id=document_id,
@@ -70,7 +78,7 @@ def import_pdf(
                     source_id=_source_id(source_title),
                     source_title=source_title,
                     title=f"{source_title} · 第 {page_number} 页",
-                    full_path=f"{source_title} > 第 {page_number} 页",
+                    full_path=" > ".join(path_parts),
                     content=content,
                     version=edition,
                     priority=0,
@@ -79,6 +87,11 @@ def import_pdf(
                         "sourceFile": pdf_path.name,
                         "page": page_number,
                         "tableCount": len(rendered_tables),
+                        "structureVersion": 2,
+                        "headingPath": heading_path,
+                        "detectedHeadings": detected_headings,
+                        "inheritedHeadings": inherited_headings,
+                        "structuralBlocks": structural_blocks,
                     },
                 )
             )
@@ -97,6 +110,110 @@ def import_pdf(
         encoding="utf-8",
     )
     return report
+
+
+class HeadingContext:
+    """Conservative cross-page heading context for layout-extracted PDFs."""
+
+    def __init__(self, source_title: str) -> None:
+        self.source_title = source_title
+        self.primary: str | None = None
+        self.subsection: str | None = None
+
+    def partition(
+        self,
+        content: str,
+        headings: list[str],
+    ) -> tuple[list[str], list[str], list[dict[str, Any]]]:
+        before = self._values()
+        heading_set = set(headings)
+        blocks: list[dict[str, Any]] = []
+        lines: list[str] = []
+        block_path = [self.source_title, *before]
+        for line in content.splitlines():
+            if line in heading_set:
+                self._append_block(blocks, block_path, lines)
+                lines = []
+                self._apply(line)
+                block_path = [self.source_title, *self._values()]
+            lines.append(line)
+        self._append_block(blocks, block_path, lines)
+        after = self._values()
+        inherited = [value for value in before if value in after and value not in headings]
+        return [self.source_title, *after], inherited, blocks
+
+    def _apply(self, heading: str) -> None:
+        if is_primary_heading(heading):
+            self.primary = heading
+            self.subsection = None
+        else:
+            self.subsection = heading
+
+    @staticmethod
+    def _append_block(
+        blocks: list[dict[str, Any]],
+        heading_path: list[str],
+        lines: list[str],
+    ) -> None:
+        content = "\n".join(lines).strip()
+        if content:
+            blocks.append({"headingPath": heading_path, "content": content})
+
+    def _values(self) -> list[str]:
+        return [value for value in (self.primary, self.subsection) if value]
+
+
+def normalize_layout_text(value: str) -> str:
+    lines: list[str] = []
+    blank = False
+    for raw_line in value.splitlines():
+        line = " ".join(raw_line.split())
+        if not line:
+            blank = bool(lines)
+            continue
+        if blank and lines and lines[-1] != "":
+            lines.append("")
+        lines.append(line)
+        blank = False
+    return "\n".join(lines).strip()
+
+
+def detect_page_headings(value: str) -> list[str]:
+    raw_lines = value.splitlines()
+    normalized = [" ".join(line.split()) for line in raw_lines]
+    headings: list[str] = []
+    for index, line in enumerate(normalized):
+        if not line or len(line) > 32:
+            continue
+        previous_blank = index == 0 or not normalized[index - 1]
+        next_blank = index == len(normalized) - 1 or not normalized[index + 1]
+        if not (previous_blank and next_blank):
+            continue
+        if _looks_like_heading(line):
+            headings.append(line)
+    return list(dict.fromkeys(headings))
+
+
+def is_primary_heading(value: str) -> bool:
+    return (
+        len(value) <= 8
+        and not re.search(r"[《》【】（）()：:]", value)
+        and not re.search(r"弱点|特技|技能|能力|表格|步骤|说明", value)
+    )
+
+
+def _looks_like_heading(value: str) -> bool:
+    if value.startswith(("⚫", "•", "-", "|", "※")):
+        return False
+    if value.endswith(("。", "！", "？", ".", "!", "?", "；", ";")):
+        return False
+    if re.fullmatch(r"[\d\s/＋+－—-]+", value):
+        return False
+    return bool(
+        len(value) <= 12
+        or re.match(r"^(?:第.+[章节篇部]|\d+(?:\.\d+)*[、.]?)", value)
+        or re.search(r"[《》【】]", value)
+    )
 
 
 def table_to_markdown(table: Sequence[Sequence[Any]]) -> tuple[str, bool]:

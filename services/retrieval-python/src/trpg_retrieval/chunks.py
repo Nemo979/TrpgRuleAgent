@@ -21,21 +21,39 @@ def iter_document_chunks(
     if chunk_size <= chunk_overlap:
         raise ValueError("chunk_size must be larger than chunk_overlap")
 
-    step = chunk_size - chunk_overlap
-    prefix = "%s\n%s\n" % (document.title, document.full_path)
-    for index, start in enumerate(range(0, max(len(document.content), 1), step)):
-        content = document.content[start:start + chunk_size]
-        if not content:
-            break
-        yield RuleChunk(
-            id="%s:%05d" % (document.id, index),
-            parent_id=document.id,
-            content=content,
-            search_text=prefix + content,
-            index=index,
+    blocks = document.metadata.get("structuralBlocks")
+    if not isinstance(blocks, list) or not blocks:
+        blocks = [{"content": document.content, "headingPath": []}]
+
+    index = 0
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        block_content = str(block.get("content", "")).strip()
+        if not block_content:
+            continue
+        heading_path = block.get("headingPath")
+        path = (
+            " > ".join(str(value) for value in heading_path if value)
+            if isinstance(heading_path, list)
+            else document.full_path
         )
-        if start + chunk_size >= len(document.content):
-            break
+        prefix = "%s\n%s\n" % (document.title, path or document.full_path)
+        step = chunk_size - chunk_overlap
+        for start in range(0, max(len(block_content), 1), step):
+            content = block_content[start:start + chunk_size]
+            if not content:
+                break
+            yield RuleChunk(
+                id="%s:%05d" % (document.id, index),
+                parent_id=document.id,
+                content=content,
+                search_text=prefix + content,
+                index=index,
+            )
+            index += 1
+            if start + chunk_size >= len(block_content):
+                break
 
 
 def iter_chunks(

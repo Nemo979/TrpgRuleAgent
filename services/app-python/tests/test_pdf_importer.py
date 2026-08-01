@@ -120,6 +120,24 @@ class PdfImportWorkflowTest(unittest.TestCase):
                         "sourceFile": "夕妖晚谣1.2(1).pdf",
                         "page": 1,
                         "tableCount": 1,
+                        "structureVersion": 2,
+                        "headingPath": ["夕妖晚谣"],
+                        "detectedHeadings": [],
+                        "inheritedHeadings": [],
+                        "structuralBlocks": [
+                            {
+                                "headingPath": ["夕妖晚谣"],
+                                "content": (
+                                    "当角色进行检定时，掷出六面骰并加上对应能力值。"
+                                    "若最终结果达到或超过难度，则本次行动成功。"
+                                    "\n\n### 表格 1\n\n"
+                                    "| 难度 | 说明 |\n"
+                                    "| --- | --- |\n"
+                                    "| 4 | 普通 |\n"
+                                    "| 6 | 困难 |"
+                                ),
+                            }
+                        ],
                     },
                 },
             )
@@ -160,6 +178,58 @@ class PdfImportWorkflowTest(unittest.TestCase):
                     (output / "import-report.json").read_text(encoding="utf-8")
                 ),
                 expected_report,
+            )
+
+    def test_carries_section_heading_to_continuation_page(self) -> None:
+        pages = [
+            fake_page(
+                text="\n猫\n\n猫的基本特技。\n\n弱点和追加【特技】\n",
+                tables=[],
+            ),
+            fake_page(
+                text="好动天性\n猫看到移动的小东西时会追上去。",
+                tables=[],
+            ),
+            fake_page(text="\n狗\n\n狗的基本特技。", tables=[]),
+        ]
+        opened_pdf = MagicMock()
+        opened_pdf.__enter__.return_value.pages = pages
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "rules.pdf"
+            source.write_bytes(b"pdf")
+            output = root / "built"
+            with patch(
+                "trpg_app.importers.pdf.pdfplumber.open",
+                return_value=opened_pdf,
+            ):
+                import_pdf(
+                    pdf_path=source,
+                    output_dir=output,
+                    library_id="gss",
+                    source_title="夕妖晚谣",
+                    edition="1.2",
+                )
+
+            documents = [
+                json.loads(line)
+                for line in (output / "documents.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            self.assertEqual(
+                documents[1]["metadata"]["headingPath"],
+                ["夕妖晚谣", "猫", "弱点和追加【特技】"],
+            )
+            self.assertEqual(
+                documents[1]["metadata"]["inheritedHeadings"],
+                ["猫", "弱点和追加【特技】"],
+            )
+            self.assertIn("夕妖晚谣 > 猫 > 弱点和追加【特技】", documents[1]["fullPath"])
+            self.assertEqual(
+                documents[2]["metadata"]["headingPath"],
+                ["夕妖晚谣", "狗"],
             )
 
 
