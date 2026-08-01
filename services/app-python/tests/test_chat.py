@@ -266,8 +266,7 @@ class SearchThenStopsGateway:
         )
 
     async def stream_answer(self, messages):
-        raise AssertionError("no-evidence early stop must not call the model again")
-        yield ""
+        yield "服务端读取搜索候选后回答。[S1]"
 
 
 class SearchThenFinishesGateway:
@@ -284,8 +283,7 @@ class SearchThenFinishesGateway:
         return tool_decision(call)
 
     async def stream_answer(self, messages):
-        raise AssertionError("finish without evidence must not generate a model answer")
-        yield ""
+        yield "服务端读取搜索候选后回答。[S1]"
 
 
 class MissingDocumentReadGateway:
@@ -777,42 +775,46 @@ class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(events[-1]["type"], "done")
 
-    async def test_model_stopping_after_search_returns_no_evidence_not_error(self) -> None:
+    async def test_model_stopping_after_search_reads_candidates(self) -> None:
+        library = FakeLibrary()
         events = [
             event
             async for event in run_rule_turn(
                 model=self.model(),
-                library=FakeLibrary(),
+                library=library,
                 messages=[{"role": "user", "content": "你知道魔战士吗"}],
                 gateway_factory=SearchThenStopsGateway,
             )
         ]
 
-        self.assertIn(
-            "没有找到足够可靠的可引用依据",
-            "".join(event.get("delta", "") for event in events),
-        )
+        self.assertEqual(library.read_ids, [["pf1e:combat"]])
+        self.assertIn("读取搜索候选后回答", "".join(
+            event.get("delta", "") for event in events
+        ))
+        self.assertEqual(len(next(
+            event["sources"] for event in events if event["type"] == "sources"
+        )), 1)
         self.assertEqual(events[-1]["type"], "done")
 
-    async def test_model_finishing_after_search_cannot_answer_without_evidence(self) -> None:
+    async def test_model_finishing_after_search_reads_candidates(self) -> None:
+        library = FakeLibrary()
         events = [
             event
             async for event in run_rule_turn(
                 model=self.model(),
-                library=FakeLibrary(),
+                library=library,
                 messages=[{"role": "user", "content": "你知道魔战士吗"}],
                 gateway_factory=SearchThenFinishesGateway,
             )
         ]
 
-        self.assertIn(
-            "没有找到足够可靠的可引用依据",
-            "".join(event.get("delta", "") for event in events),
-        )
-        self.assertEqual(
-            next(event["sources"] for event in events if event["type"] == "sources"),
-            [],
-        )
+        self.assertEqual(library.read_ids, [["pf1e:combat"]])
+        self.assertIn("读取搜索候选后回答", "".join(
+            event.get("delta", "") for event in events
+        ))
+        self.assertEqual(len(next(
+            event["sources"] for event in events if event["type"] == "sources"
+        )), 1)
         self.assertEqual(events[-1]["type"], "done")
 
     async def test_missing_model_document_ids_fall_back_to_search_results(self) -> None:

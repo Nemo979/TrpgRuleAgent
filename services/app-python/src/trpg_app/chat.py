@@ -678,6 +678,8 @@ async def _finish_after_controller_stop(
                 "searches_without_read",
                 "repeated_results",
                 "model_skipped_tools",
+                "model_finished_without_evidence",
+                "model_stopped_without_evidence",
             }
         )
         or stop_reason in {"evidence_saturation", "repeated_documents"}
