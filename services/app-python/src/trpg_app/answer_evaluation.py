@@ -115,23 +115,32 @@ async def evaluate_model(
             error: dict[str, Any] | None = None
             statuses: list[str] = []
             try:
-                async for event in run_rule_turn(
-                    model=model,
-                    library=library,
-                    messages=messages,
-                    request_id=f"eval-{model.id}-{case.id}-{turn_index}",
-                ):
-                    event_type = event.get("type")
-                    if event_type == "text_delta":
-                        answer_parts.append(str(event.get("delta", "")))
-                    elif event_type == "sources":
-                        value = event.get("sources", [])
-                        if isinstance(value, list):
-                            sources = value
-                    elif event_type == "status":
-                        statuses.append(str(event.get("status", "")))
-                    elif event_type == "error":
-                        error = dict(event)
+                async with asyncio.timeout(model.request_timeout_seconds):
+                    async for event in run_rule_turn(
+                        model=model,
+                        library=library,
+                        messages=messages,
+                        request_id=f"eval-{model.id}-{case.id}-{turn_index}",
+                    ):
+                        event_type = event.get("type")
+                        if event_type == "text_delta":
+                            answer_parts.append(str(event.get("delta", "")))
+                        elif event_type == "sources":
+                            value = event.get("sources", [])
+                            if isinstance(value, list):
+                                sources = value
+                        elif event_type == "status":
+                            statuses.append(str(event.get("status", "")))
+                        elif event_type == "error":
+                            error = dict(event)
+            except TimeoutError:
+                error = {
+                    "type": "model_timeout",
+                    "message": (
+                        "model response exceeded the configured evaluation timeout "
+                        f"({model.request_timeout_seconds:g}s)"
+                    ),
+                }
             except Exception as exception:
                 error = {"type": type(exception).__name__, "message": str(exception)}
             answer = "".join(answer_parts).strip()

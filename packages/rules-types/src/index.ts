@@ -15,6 +15,11 @@ export interface RuleSearchHit {
   excerpt: string;
   version: string;
   score: number;
+  /** The child chunk that produced the excerpt, when the backend exposes it. */
+  chunkId?: string | null;
+  chunkIndex?: number | null;
+  matchScore?: number;
+  parentScore?: number;
   metadata: Record<string, unknown>;
 }
 

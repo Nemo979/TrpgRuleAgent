@@ -104,22 +104,33 @@ export function createRuleTools(options: RuleToolsOptions): [
     parameters: readParameters,
     async execute(params, context) {
       const uniqueIds = [...new Set(params.ids)];
-      options.budget.consumeRead(uniqueIds.length);
+      options.budget.consumeReadToolCall();
       const documents = await options.client.read(
         { rulesetId: options.rulesetId, ids: uniqueIds },
         context.signal,
       );
-      const registered = documents.map((document) => options.citations.register(document));
+      const admitted = options.budget.admitDocuments(documents);
+      if (admitted.length === 0 && documents.length > 0) {
+        return {
+          content: [{ type: "text", text: "命中规则文档，但文档超过本轮证据预算，未注册为证据。请缩小问题。" }],
+          details: { documents: [], citations: [] } satisfies ReadToolDetails,
+        };
+      }
+      const registered = admitted.map((document) => options.citations.register(document));
       const text = registered.map(({ label, document }) => [
         `[${label}] ${document.fullPath}`,
         `文档 ID：${document.id}`,
         document.content,
       ].join("\n")).join("\n\n---\n\n");
+      const skipped = documents.length - admitted.length;
+      const partialNotice = skipped > 0
+        ? `\n\n部分文档因证据预算被跳过（${skipped} 篇）；跳过内容不是证据。`
+        : "";
 
       return {
-        content: [{ type: "text", text: text || "没有读取到规则文档。" }],
+        content: [{ type: "text", text: (text || "没有读取到规则文档。") + partialNotice }],
         details: {
-          documents,
+          documents: admitted,
           citations: registered.map(({ label, document }) => ({
             id: document.id,
             label,

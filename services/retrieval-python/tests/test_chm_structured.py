@@ -118,6 +118,73 @@ class ChmStructuredTest(unittest.TestCase):
         self.assertEqual(report["splitParents"], 1)
         self.assertEqual(report["fallbackParents"], 0)
 
+    def test_splits_generic_pf1e_entries_without_spell_name_special_case(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "catalog.html").write_text(
+                """
+                <h2>法术</h2>
+                <h3>职业法术列表</h3><p>一级：油腻术、护盾术。</p>
+                <h3>油腻术 (Grease)</h3>
+                <p>School conjuration; Level sorcerer/wizard 1</p>
+                <p>Casting Time 1 standard action; Range close; Duration 1 min./level</p>
+                <p>Saving Throw Reflex partial; Spell Resistance yes</p>
+                <h2>专长</h2>
+                <h3>敏捷专长 (Agile Feat)</h3>
+                <p>Prerequisites Dexterity 13.</p><p>Benefit You move quickly.</p>
+                <h2>魔法物品</h2>
+                <h3>银月戒指 (Silvermoon Ring)</h3>
+                <p>Aura faint; Caster Level 5th; Slot ring; Price 12,000 gp</p>
+                <h2>职业变体</h2>
+                <h3>混血术士</h3><p>Replaces the normal bloodline feature.</p>
+                <h2>职业能力</h2>
+                <h3>勇猛</h3><p>Level 3; Class Skills Acrobatics and Climb.</p>
+                <p>Description The character gains a bonus.</p>
+                """,
+                encoding="utf-8",
+            )
+            document = self.document("catalog.html", "目录正文" * 2_000)
+            audit = {"documents": [{"id": document.id, "strategy": "split_catalog_entries"}]}
+
+            values, report = transform_documents([document], root, audit)
+
+        self.assertEqual(
+            {value.metadata["entryType"] for value in values},
+            {"spell", "feat", "magic_item", "archetype", "class_ability"},
+        )
+        grease = next(value for value in values if value.metadata["entryType"] == "spell")
+        self.assertIn("油腻术", grease.content)
+        self.assertEqual(grease.metadata["nameZh"], "油腻术")
+        self.assertEqual(grease.metadata["nameEn"], "Grease")
+        self.assertEqual(grease.metadata["legacyParentId"], document.id)
+        self.assertEqual(grease.metadata["sourcePosition"]["blockStart"], 3)
+        self.assertNotIn("职业法术列表", [value.title for value in values])
+        self.assertEqual(report["splitParents"], 1)
+
+    def test_creates_independent_rule_table_and_filters_navigation_shells(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "tables.html").write_text(
+                """
+                <h2>职业变体</h2><p>职业变体</p>
+                <h3>职业变体</h3><p>职业变体</p>
+                <h3>守望者</h3><p>Replaces one class feature with a watchful ability.</p>
+                <h2>战斗修正</h2>
+                <table><tr><th>情况</th><th>修正</th></tr>
+                <tr><td>隐蔽</td><td>—2</td></tr></table>
+                """,
+                encoding="utf-8",
+            )
+            document = self.document("tables.html", "表格与职业变体" * 500)
+            audit = {"documents": [{"id": document.id, "strategy": "split_tables_with_context"}]}
+
+            values, _report = transform_documents([document], root, audit)
+
+        self.assertEqual([value.metadata["entryType"] for value in values], ["archetype", "rule_table"])
+        self.assertEqual(values[0].title, "守望者")
+        self.assertIn("隐蔽", values[1].content)
+        self.assertTrue(all(value.metadata["legacyParentId"] == document.id for value in values))
+
 
 if __name__ == "__main__":
     unittest.main()

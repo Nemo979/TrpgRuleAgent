@@ -1,7 +1,15 @@
+import re
+import unicodedata
 from typing import Dict, Iterable, List, Optional, Sequence
 
 from .domain import RuleDocument, SearchHit
 from .retriever import InMemoryRetriever
+from .retriever import (
+    _FAVORED_CLASS_MARKERS,
+    _MULTICLASS_MARKERS,
+    _is_favored_class_document,
+    _is_multiclass_document,
+)
 from .vector_retriever import ChromaVectorRetriever
 
 
@@ -69,6 +77,7 @@ class HybridRetriever:
             scores[document_id] += (
                 max(0, hit.document.priority) / self.priority_scale
             )
+            scores[document_id] += intent_rerank_bonus(query, hit.document)
 
         ranked_ids = sorted(scores, key=scores.get, reverse=True)
         return [
@@ -76,6 +85,10 @@ class HybridRetriever:
                 hits_by_id[document_id].document,
                 hits_by_id[document_id].excerpt,
                 scores[document_id],
+                chunk_id=hits_by_id[document_id].chunk_id,
+                chunk_index=hits_by_id[document_id].chunk_index,
+                match_score=hits_by_id[document_id].match_score,
+                parent_score=scores[document_id],
             )
             for document_id in ranked_ids[:limit]
         ]
@@ -108,3 +121,48 @@ class HybridRetriever:
         if any(hit.document.id == leader_id for hit in other_hits):
             return
         scores[leader_id] += missing_channel_weight / (self.rrf_k + 1)
+
+
+def intent_rerank_bonus(query: str, document: RuleDocument) -> float:
+    """Apply small, backend-independent boosts after RRF fusion.
+
+    RRF intentionally discards absolute BM25/vector scores.  Without a final
+    intent signal, an exact semantic entry can lose to several broad class
+    tables simply because they appear in both channels.  These bonuses are
+    generic title/category signals and do not name any individual rule.
+    """
+    query_value = _compact(query)
+    title_value = _compact(document.title)
+    metadata = document.metadata
+    bonus = 0.0
+    if title_value and title_value in query_value:
+        bonus += 0.12
+    for key in ("entryNameZh", "entryNameEn", "nameZh", "nameEn"):
+        value = _compact(str(metadata.get(key, "")))
+        if value and value in query_value:
+            bonus += 0.10
+            break
+
+    multiclass_intent = _has_marker(query, _MULTICLASS_MARKERS)
+    favored_class_intent = _has_marker(query, _FAVORED_CLASS_MARKERS)
+    if multiclass_intent:
+        if _is_multiclass_document(document):
+            bonus += 0.08
+        if _is_favored_class_document(document):
+            bonus -= 0.08
+    if favored_class_intent:
+        if _is_favored_class_document(document):
+            bonus += 0.08
+        if _is_multiclass_document(document):
+            bonus -= 0.05
+    return bonus
+
+
+def _compact(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    return "".join(re.findall(r"[a-z0-9\u4e00-\u9fff]+", normalized))
+
+
+def _has_marker(value: str, markers: Sequence[str]) -> bool:
+    compact = _compact(value)
+    return any(_compact(marker) in compact for marker in markers)

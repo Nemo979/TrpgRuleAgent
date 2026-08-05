@@ -100,6 +100,21 @@ describe("rule tools integration", () => {
     );
   });
 
+  it("证据预算逐文档接纳，超大文档不会丢弃小文档", () => {
+    const budget = new ToolBudget({
+      maxToolCalls: 8,
+      maxSearchCalls: 3,
+      maxDocumentsRead: 8,
+      maxEvidenceCharacters: 10,
+    });
+    budget.consumeReadToolCall();
+    const accepted = budget.admitDocuments([
+      { content: "x".repeat(20) },
+      { content: "短规则" },
+    ]);
+    expect(accepted).toEqual([{ content: "短规则" }]);
+  });
+
   it("超过每轮搜索预算时拒绝继续调用服务", async () => {
     const fetchMock = vi.fn().mockImplementation(async () =>
       new Response(JSON.stringify({ data: [] }), { status: 200 }),

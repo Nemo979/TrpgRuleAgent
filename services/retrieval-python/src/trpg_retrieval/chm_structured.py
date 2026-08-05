@@ -16,8 +16,43 @@ from .importers.chm import decode_document
 _SPACE = re.compile(r"[ \t\f\v]+")
 _SPLIT_STRATEGIES = {"split_headings", "split_headings_and_tables"}
 _TABLE_STRATEGIES = {"keep_table_aware", "split_headings_and_tables"}
+_ENTRY_STRATEGIES = {"split_catalog_entries", "split_tables_with_context"}
+_EVIDENCE_CHARACTER_LIMIT = 80_000
 _BLOCK_TAGS = {"p", "li", "dt", "dd", "pre", "blockquote"}
 _SKIP_TAGS = {"script", "style", "noscript"}
+
+_ENTRY_FIELD_LABELS = {
+    "spell": (
+        "school", "level", "casting time", "components", "range", "target",
+        "effect", "area", "duration", "saving throw", "spell resistance",
+        "学派", "法术等级", "施法时间", "成分", "距离", "目标", "效果", "范围",
+        "持续时间", "豁免", "法术抗力",
+    ),
+    "feat": (
+        "prerequisites", "benefit", "normal", "special", "先决条件", "好处", "正常", "特殊",
+    ),
+    "magic_item": (
+        "aura", "caster level", "slot", "price", "weight", "requirements", "construction",
+        "cost", "灵光", "施法者等级", "部位", "价格", "重量", "制作要求", "制作", "成本",
+    ),
+    "class_ability": (
+        "level", "class skill", "class skills", "class features", "requirements", "special",
+        "description", "weapon and armor proficiency", "等级", "职业技能", "职业能力", "需求",
+        "特殊", "效果", "描述",
+    ),
+    "archetype": (
+        "replaces", "replaced", "modified", "altered", "requirements", "替代", "替换", "修改",
+        "改变", "需求",
+    ),
+}
+
+_ENTRY_CATEGORY_MARKERS = {
+    "spell": ("法术", "spell", "spells"),
+    "feat": ("专长", "feat", "feats"),
+    "magic_item": ("魔法物品", "magic item", "magic items"),
+    "archetype": ("职业变体", "archetype", "variant"),
+    "class_ability": ("职业能力", "职业特性", "class feature", "class ability", "class features"),
+}
 
 
 @dataclass(frozen=True)
@@ -160,6 +195,19 @@ class Section:
         return "\n\n".join(block.text for block in self.blocks if block.text).strip()
 
 
+@dataclass(frozen=True)
+class EntryCandidate:
+    heading_path: tuple[str, ...]
+    blocks: tuple[HtmlBlock, ...]
+    block_start: int
+    block_end: int
+    entry_type: str
+
+    @property
+    def content(self) -> str:
+        return "\n\n".join(block.text for block in self.blocks if block.text).strip()
+
+
 def extract_blocks(path: Path) -> list[HtmlBlock]:
     text, _encoding = decode_document(path.read_bytes())
     parser = StructuredHtmlParser()
@@ -211,11 +259,18 @@ def transform_documents(
         strategy = strategy_by_id.get(document.id, "keep")
         source_file = str(document.metadata.get("sourceFile", ""))
         html_path = extracted / source_file
-        if strategy not in _SPLIT_STRATEGIES | _TABLE_STRATEGIES or not html_path.is_file():
+        if strategy not in _SPLIT_STRATEGIES | _TABLE_STRATEGIES | _ENTRY_STRATEGIES or not html_path.is_file():
             transformed.append(document)
             mappings[document.id] = [document.id]
             continue
         blocks = extract_blocks(html_path)
+        if strategy in _ENTRY_STRATEGIES:
+            children = _entry_documents(document, blocks, include_tables=True)
+            if children:
+                transformed.extend(children)
+                mappings[document.id] = [child.id for child in children]
+                counts["splitParents"] += 1
+                continue
         if strategy in _SPLIT_STRATEGIES:
             sections = partition_sections(blocks)
             children = _section_documents(document, sections)
@@ -234,15 +289,501 @@ def transform_documents(
             counts["tableEnhancedParents"] += 1
 
     lengths = [len(document.content) for document in transformed]
+    duplicate_groups: dict[str, list[str]] = {}
+    entry_type_counts: dict[str, int] = {}
+    navigation_shell_count = 0
+    for value in transformed:
+        key = _content_key(value.content)
+        if key:
+            duplicate_groups.setdefault(key, []).append(value.id)
+        entry_type = value.metadata.get("entryType")
+        if entry_type:
+            entry_type_counts[str(entry_type)] = entry_type_counts.get(str(entry_type), 0) + 1
+        heading_path = value.metadata.get("headingPath", [])
+        if isinstance(heading_path, list) and _is_heading_shell(value.content, heading_path):
+            navigation_shell_count += 1
+    duplicate_groups = {
+        key: ids for key, ids in duplicate_groups.items() if len(ids) > 1
+    }
+    documents_by_id = {value.id: value for value in transformed}
+    duplicate_entry_groups = {
+        key: ids
+        for key, ids in duplicate_groups.items()
+        if any(documents_by_id[item].metadata.get("entryType") != "rule_table" for item in ids)
+        and len({documents_by_id[item].metadata.get("legacyParentId") for item in ids}) <= 1
+    }
+    duplicate_table_groups = {
+        key: ids
+        for key, ids in duplicate_groups.items()
+        if all(documents_by_id[item].metadata.get("entryType") == "rule_table" for item in ids)
+    }
+    duplicate_cross_parent_groups = {
+        key: ids
+        for key, ids in duplicate_groups.items()
+        if key not in duplicate_entry_groups and key not in duplicate_table_groups
+    }
     report = {
         "inputDocumentCount": len(mappings),
         "outputDocumentCount": len(transformed),
         **counts,
         "maximumParentLength": max(lengths, default=0),
         "over10000": sum(length > 10_000 for length in lengths),
+        "overEvidenceBudget": sum(length > _EVIDENCE_CHARACTER_LIMIT for length in lengths),
+        "duplicateContentGroupCount": len(duplicate_groups),
+        "duplicateContentGroups": list(duplicate_groups.values()),
+        "duplicateEntryContentGroupCount": len(duplicate_entry_groups),
+        "duplicateEntryContentGroups": list(duplicate_entry_groups.values()),
+        "duplicateRuleTableGroupCount": len(duplicate_table_groups),
+        "duplicateRuleTableGroups": list(duplicate_table_groups.values()),
+        "duplicateCrossParentGroupCount": len(duplicate_cross_parent_groups),
+        "duplicateCrossParentGroups": list(duplicate_cross_parent_groups.values()),
+        "navigationShellCount": navigation_shell_count,
+        "entryTypeCounts": entry_type_counts,
+        "qualityGate": {
+            "passed": not duplicate_entry_groups
+            and navigation_shell_count == 0
+            and not any(length > _EVIDENCE_CHARACTER_LIMIT for length in lengths),
+            "evidenceCharacterLimit": _EVIDENCE_CHARACTER_LIMIT,
+        },
         "mappings": mappings,
     }
     return transformed, report
+
+
+def _entry_documents(
+    document: RuleDocument,
+    blocks: Sequence[HtmlBlock],
+    *,
+    include_tables: bool,
+) -> list[RuleDocument]:
+    """Build semantic parents from PF1e catalog entries and standalone tables.
+
+    CHM catalog pages use several different labels, but their stable shape is
+    usually a heading followed by a small set of labelled fields.  The field
+    check is deliberately independent of any particular spell name: this is
+    what keeps an entry such as Grease working while leaving spell-list
+    headings and navigation indexes in their original parent document.
+    """
+    candidates = _entry_candidates(document, blocks)
+    consumed = {
+        index
+        for candidate in candidates
+        for index in range(candidate.block_start, candidate.block_end)
+    }
+    values: list[RuleDocument] = []
+    seen: set[str] = set()
+    for index, candidate in enumerate(candidates):
+        child = _entry_document(document, candidate, index)
+        key = _content_key(child.content)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        values.append(child)
+
+    if include_tables:
+        table_index = 0
+        for block_index, block in enumerate(blocks):
+            if block.kind != "table" or block_index in consumed or not _standalone_table(block):
+                continue
+            table_index += 1
+            heading_path = _heading_path_at(blocks, block_index)
+            child = _table_document(document, block, heading_path, block_index, table_index)
+            key = _content_key(child.content)
+            if key and key not in seen:
+                seen.add(key)
+                values.append(child)
+    return values
+
+
+def _entry_candidates(
+    document: RuleDocument,
+    blocks: Sequence[HtmlBlock],
+) -> list[EntryCandidate]:
+    headings = [
+        (index, block)
+        for index, block in enumerate(blocks)
+        if block.kind == "heading"
+    ]
+    candidates: list[EntryCandidate] = []
+    for heading_offset, (start, heading) in enumerate(headings):
+        end = len(blocks)
+        for next_start, next_heading in headings[heading_offset + 1:]:
+            if next_heading.level <= heading.level:
+                end = next_start
+                break
+        body = blocks[start + 1:end]
+        heading_path = tuple(_heading_path_at(blocks, start))
+        # A catalog wrapper such as "CRB 核心规则手册" can itself look like a
+        # spell because all of its descendants contribute spell fields.  If
+        # it contains paragraph-style entry anchors, keep the children and
+        # do not emit the wrapper as a duplicate oversized entry.
+        if any(
+            block.kind == "paragraph"
+            and _looks_like_entry_title(block.text)
+            and _looks_like_entry_start(document, blocks, position)
+            for position, block in enumerate(blocks[start + 1:end], start + 1)
+        ):
+            continue
+        if (
+            any(block.kind == "heading" and block.level > heading.level for block in body)
+            and _is_catalog_heading(heading.text)
+        ):
+            continue
+        entry_type = _classify_entry(document, heading_path, heading.text, body)
+        if not entry_type or not _substantive_entry_body(body, heading_path):
+            continue
+        candidate = EntryCandidate(
+            heading_path=heading_path,
+            blocks=tuple(blocks[start:end]),
+            block_start=start,
+            block_end=end,
+            entry_type=entry_type,
+        )
+        if _content_key(candidate.content) in {
+            _content_key(value.content) for value in candidates
+        }:
+            continue
+        candidates.append(candidate)
+
+    # A large portion of the source CHM uses plain paragraphs as entry titles
+    # rather than h1-h6 elements.  Spell catalogs, for example, have the
+    # stable shape "中文名 (English Name)" followed by a field table and
+    # prose.  Treat those titles as anchors too; relying on HTML headings
+    # alone leaves the entire catalog as one parent document.
+    paragraph_starts = [
+        index
+        for index, block in enumerate(blocks)
+        if block.kind == "paragraph"
+        and _looks_like_entry_title(block.text)
+        and _looks_like_entry_start(document, blocks, index)
+    ]
+    for index, start in enumerate(paragraph_starts):
+        end = paragraph_starts[index + 1] if index + 1 < len(paragraph_starts) else len(blocks)
+        title = blocks[start].text
+        parent_path = _heading_path_at(blocks, start)
+        heading_path = tuple([*parent_path, title])
+        body = blocks[start + 1:end]
+        entry_type = _classify_entry(document, heading_path, title, body)
+        if not entry_type or not _substantive_entry_body(body, heading_path):
+            continue
+        candidate = EntryCandidate(
+            heading_path=heading_path,
+            blocks=tuple(blocks[start:end]),
+            block_start=start,
+            block_end=end,
+            entry_type=entry_type,
+        )
+        if _content_key(candidate.content) in {
+            _content_key(value.content) for value in candidates
+        }:
+            continue
+        candidates.append(candidate)
+    return candidates
+
+
+_ENTRY_TITLE_PATTERN = re.compile(r"^.{1,160}\s*[\(（][^()（）\n]{2,160}[\)）]$")
+
+
+def _looks_like_entry_title(value: str) -> bool:
+    normalized = re.sub(r"\s+", " ", value).strip()
+    if not _ENTRY_TITLE_PATTERN.match(normalized):
+        return False
+    name_zh, name_en = _entry_names(normalized)
+    return bool(name_zh and name_en)
+
+
+def _looks_like_entry_start(
+    document: RuleDocument,
+    blocks: Sequence[HtmlBlock],
+    start: int,
+) -> bool:
+    context = " ".join([document.full_path, blocks[start].text]).casefold()
+    following = blocks[start + 1 : min(len(blocks), start + 4)]
+    following_text = "\n".join(block.text for block in following)
+    if following and following[0].kind == "table":
+        if any(
+            _field_count(following_text, labels) >= 1
+            for labels in (
+                ("学派", "school"),
+                ("先决条件", "prerequisites"),
+                ("灵光", "aura"),
+                ("替代", "replaces"),
+            )
+        ):
+            return True
+    if _contains_marker(context, _ENTRY_CATEGORY_MARKERS["feat"]):
+        return _field_count(following_text, ("先决条件", "prerequisites", "好处", "benefit")) >= 1
+    if _contains_marker(context, _ENTRY_CATEGORY_MARKERS["magic_item"]):
+        return _field_count(following_text, ("灵光", "aura", "价格", "price")) >= 1
+    if _contains_marker(context, _ENTRY_CATEGORY_MARKERS["archetype"]):
+        return _field_count(following_text, ("替代", "replaces", "修改", "modified")) >= 1
+    if _contains_marker(context, ("职业", "class")):
+        if re.search(r"\b(?:ex|su|sp)\b|（[^）]*(?:ex|su|sp)[^）]*）", following_text, re.IGNORECASE):
+            return True
+        first = next((block for block in following if block.text.strip()), None)
+        return bool(first and first.kind == "paragraph" and len(_compact(first.text)) >= 20)
+    return False
+
+
+def _classify_entry(
+    document: RuleDocument,
+    heading_path: Sequence[str],
+    title: str,
+    body: Sequence[HtmlBlock],
+) -> str | None:
+    body_text = "\n".join(block.text for block in body)
+    if not body_text.strip():
+        return None
+    context = " ".join([document.full_path, *heading_path]).casefold()
+    field_counts = {
+        entry_type: _field_count(body_text, labels)
+        for entry_type, labels in _ENTRY_FIELD_LABELS.items()
+    }
+
+    # Category context wins over an ambiguous field such as Level or Special.
+    strong_fields = {
+        "spell": ("school", "casting time", "components", "range", "target", "duration", "学派", "施法时间", "成分", "距离", "目标", "持续时间"),
+        "feat": ("prerequisites", "benefit", "先决条件", "好处"),
+        "magic_item": ("aura", "caster level", "slot", "price", "灵光", "施法者等级", "部位", "价格"),
+        "archetype": ("replaces", "replaced", "modified", "altered", "替代", "替换", "修改", "改变"),
+        "class_ability": ("class skill", "class skills", "class features", "description", "职业技能", "职业能力", "描述"),
+    }
+    for entry_type in ("spell", "feat", "magic_item", "archetype", "class_ability"):
+        if not _contains_marker(context, _ENTRY_CATEGORY_MARKERS[entry_type]):
+            continue
+        if entry_type == "archetype":
+            if not _looks_like_catalog_label(title):
+                return entry_type
+        if any(_field_count(body_text, (label,)) for label in strong_fields[entry_type]):
+            return entry_type
+        if field_counts[entry_type] >= 2 and entry_type not in {"spell", "class_ability"}:
+            return entry_type
+
+    if field_counts["spell"] >= 2:
+        return "spell"
+    if field_counts["magic_item"] >= 2:
+        return "magic_item"
+    if field_counts["archetype"] >= 1 and field_counts["class_ability"] >= 1:
+        return "archetype"
+    if _contains_marker(context, ("职业", "class")) and re.search(
+        r"\b(?:ex|su|sp)\b|（[^）]*(?:ex|su|sp)[^）]*）",
+        body_text,
+        re.IGNORECASE,
+    ):
+        return "class_ability"
+    if _contains_marker(context, ("职业", "class")):
+        return "class_ability"
+    if field_counts["feat"] >= 1:
+        return "feat"
+    if field_counts["class_ability"] >= 2:
+        return "class_ability"
+    return None
+
+
+def _looks_like_catalog_label(value: str) -> bool:
+    folded = value.casefold()
+    return any(
+        marker in folded
+        for marker in ("列表", "目录", "表格", "list", "catalog", "table", "index")
+    )
+
+
+def _is_catalog_heading(value: str) -> bool:
+    folded = value.casefold()
+    return any(
+        marker in folded
+        for markers in _ENTRY_CATEGORY_MARKERS.values()
+        for marker in markers
+    ) or _looks_like_catalog_label(value)
+
+
+def _field_count(text: str, labels: Sequence[str]) -> int:
+    folded = text.casefold()
+    count = 0
+    for label in labels:
+        pattern = re.compile(
+            r"(?<![\w-])" + re.escape(label.casefold()) + r"(?=\s*(?::|：|[-—]|\s|$))"
+        )
+        if pattern.search(folded):
+            count += 1
+    return count
+
+
+def _contains_marker(value: str, markers: Sequence[str]) -> bool:
+    return any(marker.casefold() in value for marker in markers)
+
+
+def _substantive_entry_body(body: Sequence[HtmlBlock], heading_path: Sequence[str]) -> bool:
+    prose = "\n".join(block.text for block in body if block.kind != "table").strip()
+    if not prose:
+        return False
+    if _is_heading_shell(prose, heading_path):
+        return False
+    return len(_compact(prose)) >= 12
+
+
+def _heading_path_at(blocks: Sequence[HtmlBlock], position: int) -> list[str]:
+    stack: list[tuple[int, str]] = []
+    for block in blocks[:position + 1]:
+        if block.kind != "heading":
+            continue
+        while stack and stack[-1][0] >= block.level:
+            stack.pop()
+        stack.append((block.level, block.text))
+    return [value for _level, value in stack]
+
+
+def _entry_document(
+    document: RuleDocument,
+    candidate: EntryCandidate,
+    index: int,
+) -> RuleDocument:
+    content = candidate.content
+    suffix_path = _deduplicated_suffix(document, candidate.heading_path)
+    full_path = " > ".join([document.full_path, *suffix_path])
+    title = suffix_path[-1] if suffix_path else candidate.heading_path[-1]
+    name_zh, name_en = _entry_names(title)
+    heading_path = [*document.full_path.split(" > "), *suffix_path]
+    metadata = _entry_metadata(
+        document,
+        candidate.entry_type,
+        title,
+        name_zh,
+        name_en,
+        heading_path,
+        candidate.block_start,
+        candidate.block_end,
+        candidate.blocks,
+    )
+    digest = _entry_digest(index, candidate.entry_type, candidate.heading_path, content)
+    return RuleDocument(
+        id=f"{document.id}:entry:{digest}",
+        ruleset_id=document.ruleset_id,
+        source_id=document.source_id,
+        source_title=document.source_title,
+        title=title,
+        full_path=full_path,
+        content=content,
+        version=document.version,
+        priority=document.priority,
+        metadata=metadata,
+    )
+
+
+def _table_document(
+    document: RuleDocument,
+    block: HtmlBlock,
+    heading_path: Sequence[str],
+    block_index: int,
+    table_index: int,
+) -> RuleDocument:
+    suffix_path = _deduplicated_suffix(document, heading_path)
+    table_label = f"表格 {table_index}"
+    title = heading_path[-1] if heading_path else document.title
+    full_path = " > ".join([document.full_path, *suffix_path, table_label])
+    content = "\n\n".join([value for value in [*heading_path, block.text] if value]).strip()
+    name_zh, name_en = _entry_names(title)
+    metadata = _entry_metadata(
+        document,
+        "rule_table",
+        title,
+        name_zh,
+        name_en,
+        [*document.full_path.split(" > "), *suffix_path, table_label],
+        block_index,
+        block_index + 1,
+        [block],
+    )
+    metadata["tableIndex"] = table_index
+    digest = _entry_digest(table_index, "rule_table", heading_path, content)
+    return RuleDocument(
+        id=f"{document.id}:table:{digest}",
+        ruleset_id=document.ruleset_id,
+        source_id=document.source_id,
+        source_title=document.source_title,
+        title=title,
+        full_path=full_path,
+        content=content,
+        version=document.version,
+        priority=document.priority,
+        metadata=metadata,
+    )
+
+
+def _entry_metadata(
+    document: RuleDocument,
+    entry_type: str,
+    title: str,
+    name_zh: str | None,
+    name_en: str | None,
+    heading_path: Sequence[str],
+    block_start: int,
+    block_end: int,
+    blocks: Sequence[HtmlBlock],
+) -> dict[str, Any]:
+    position = {
+        "blockStart": block_start,
+        "blockEnd": max(block_start, block_end - 1),
+        "headingLevel": blocks[0].level if blocks and blocks[0].kind == "heading" else None,
+    }
+    metadata = {
+        **document.metadata,
+        "structureVersion": 2,
+        "legacyParentId": document.id,
+        "entryType": entry_type,
+        "entryName": title,
+        "nameZh": name_zh,
+        "nameEn": name_en,
+        "entryNameZh": name_zh,
+        "entryNameEn": name_en,
+        "headingPath": list(heading_path),
+        "sourcePosition": position,
+        "originalPosition": {**position, "headingPath": list(heading_path)},
+        "structuralBlocks": _structural_blocks(blocks, list(heading_path)),
+    }
+    return metadata
+
+
+def _entry_names(title: str) -> tuple[str | None, str | None]:
+    value = re.sub(r"\s+", " ", title).strip()
+    match = re.match(r"^(.+?)\s*[\(（]([^\)）]+)[\)）]$", value)
+    if match:
+        left, right = match.group(1).strip(), match.group(2).strip()
+        if re.search(r"[\u3400-\u9fff]", left) and re.search(r"[A-Za-z]", right):
+            return left, right
+        if re.search(r"[A-Za-z]", left) and re.search(r"[\u3400-\u9fff]", right):
+            return right, left
+    match = re.match(r"^(.+?)\s*/\s*(.+)$", value)
+    if match:
+        left, right = match.group(1).strip(), match.group(2).strip()
+        if re.search(r"[\u3400-\u9fff]", left) and re.search(r"[A-Za-z]", right):
+            return left, right
+        if re.search(r"[A-Za-z]", left) and re.search(r"[\u3400-\u9fff]", right):
+            return right, left
+    match = re.match(r"^([A-Za-z][A-Za-z0-9 +'’./-]*)\s*[—–:]\s*(.+)$", value)
+    if match and re.search(r"[\u3400-\u9fff]", match.group(2)):
+        return match.group(2).strip(), match.group(1).strip()
+    if re.search(r"[\u3400-\u9fff]", value):
+        return value, None
+    if re.search(r"[A-Za-z]", value):
+        return None, value
+    return None, None
+
+
+def _entry_digest(index: int, entry_type: str, heading_path: Sequence[str], content: str) -> str:
+    digest_source = f"{index}\0{entry_type}\0{' > '.join(heading_path)}\0{content[:240]}"
+    return hashlib.sha1(digest_source.encode("utf-8")).hexdigest()[:10]
+
+
+def _standalone_table(block: HtmlBlock) -> bool:
+    if block.kind != "table" or len(block.rows) < 2:
+        return False
+    data_rows = block.rows[1:]
+    return any(any(_compact(cell) for cell in row) for row in data_rows)
+
+
+def _content_key(value: str) -> str:
+    return _compact(value)
 
 
 def _section_documents(document: RuleDocument, sections: Sequence[Section]) -> list[RuleDocument]:

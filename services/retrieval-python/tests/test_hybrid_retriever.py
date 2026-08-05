@@ -1,7 +1,7 @@
 import unittest
 
 from trpg_retrieval.domain import RuleDocument, SearchHit
-from trpg_retrieval.hybrid_retriever import HybridRetriever
+from trpg_retrieval.hybrid_retriever import HybridRetriever, intent_rerank_bonus
 
 
 def document(identifier: str, priority: int = 0) -> RuleDocument:
@@ -102,6 +102,35 @@ class HybridRetrieverTest(unittest.TestCase):
         hits = retriever.search("query", [lower_priority, higher_priority], 2)
 
         self.assertEqual(hits[0].document.id, "higher")
+
+    def test_intent_bonus_prefers_exact_favored_class_title(self) -> None:
+        exact = RuleDocument(
+            id="favored",
+            ruleset_id="pathfinder-1e",
+            source_id="crb",
+            source_title="职业",
+            title="天赋职业",
+            full_path="职业 > 天赋职业",
+            content="Favored Class 规则。",
+            version="1e",
+            priority=0,
+        )
+        broad = RuleDocument(
+            id="talent",
+            ruleset_id="pathfinder-1e",
+            source_id="crb",
+            source_title="职业",
+            title="盗贼天赋",
+            full_path="职业 > 盗贼天赋",
+            content="职业天赋能力。",
+            version="1e",
+            priority=0,
+        )
+
+        self.assertGreater(
+            intent_rerank_bonus("天赋职业是什么", exact),
+            intent_rerank_bonus("天赋职业是什么", broad),
+        )
 
 
 if __name__ == "__main__":

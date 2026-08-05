@@ -62,9 +62,15 @@ class ChromaVectorRetriever:
         child_documents = (result.get("documents") or [[]])[0]
         metadatas = (result.get("metadatas") or [[]])[0]
         distances = (result.get("distances") or [[]])[0]
+        child_ids = (result.get("ids") or [[]])[0]
 
-        best_by_parent: Dict[str, Tuple[float, str]] = {}
-        for child, metadata, distance in zip(child_documents, metadatas, distances):
+        best_by_parent: Dict[str, Tuple[float, str, Optional[str], Optional[int]]] = {}
+        for child, metadata, distance, child_id in zip(
+            child_documents,
+            metadatas,
+            distances,
+            child_ids or [None] * len(child_documents),
+        ):
             if metadata is None or child is None or distance is None:
                 continue
             parent_id = str(metadata["parentId"])
@@ -72,15 +78,28 @@ class ChromaVectorRetriever:
             score = (1.0 - float(distance)) + max(0.0, priority) / 10000.0
             existing = best_by_parent.get(parent_id)
             if existing is None or score > existing[0]:
-                best_by_parent[parent_id] = (score, str(child))
+                best_by_parent[parent_id] = (
+                    score,
+                    str(child),
+                    str(child_id) if child_id is not None else None,
+                    int(metadata["chunkIndex"]) if metadata.get("chunkIndex") is not None else None,
+                )
 
         ranked = sorted(best_by_parent.items(), key=lambda item: item[1][0], reverse=True)
         parent_ids = [parent_id for parent_id, _value in ranked[:limit]]
         parents = self.repository.read(self.ruleset_id, parent_ids)
         parent_by_id = {document.id: document for document in parents}
         return [
-            SearchHit(parent_by_id[parent_id], excerpt, score)
-            for parent_id, (score, excerpt) in ranked[:limit]
+            SearchHit(
+                parent_by_id[parent_id],
+                excerpt,
+                score,
+                chunk_id=chunk_id,
+                chunk_index=chunk_index,
+                match_score=score,
+                parent_score=score,
+            )
+            for parent_id, (score, excerpt, chunk_id, chunk_index) in ranked[:limit]
             if parent_id in parent_by_id
         ]
 

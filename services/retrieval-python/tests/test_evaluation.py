@@ -35,9 +35,21 @@ class EvaluationTest(unittest.TestCase):
 
             cases = load_cases(path)
 
-        self.assertEqual(len(cases), 1)
-        self.assertEqual(cases[0].id, "aao-trigger")
-        self.assertEqual(cases[0].relevant_ids, ["pf1e-example"])
+            self.assertEqual(len(cases), 1)
+            self.assertEqual(cases[0].id, "aao-trigger")
+            self.assertEqual(cases[0].relevant_ids, ["pf1e-example"])
+
+    def test_loads_must_not_lead_with_constraints(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cases.jsonl"
+            path.write_text(
+                '{"id":"favored","query":"天赋职业是什么","relevantIds":["favored"],"mustNotLeadWith":["multiclass"]}\n',
+                encoding="utf-8",
+            )
+
+            cases = load_cases(path)
+
+        self.assertEqual(cases[0].must_not_lead_with, ["multiclass"])
 
     def test_rejects_case_without_relevant_documents(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

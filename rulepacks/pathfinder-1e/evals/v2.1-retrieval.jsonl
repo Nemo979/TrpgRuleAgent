@@ -1,0 +1,7 @@
+{"id":"grease-exact","query":"油腻术","relevantIds":["pf1e-c0d7975a2ef5:entry:6a199c2cc2"],"mustNotLeadWith":["pf1e-fdb6bd11b9eb"]}
+{"id":"grease-explain","query":"油腻术解释一下","relevantIds":["pf1e-c0d7975a2ef5:entry:6a199c2cc2"]}
+{"id":"grease-english","query":"Grease 法术是什么","relevantIds":["pf1e-c0d7975a2ef5:entry:6a199c2cc2"]}
+{"id":"grease-fields","query":"油腻术的豁免和持续时间","relevantIds":["pf1e-c0d7975a2ef5:entry:6a199c2cc2"]}
+{"id":"multiclass-rule","query":"兼职规则是什么","relevantIds":["pf1e-4c80e254e3e2"],"mustNotLeadWith":["pf1e-fdb6bd11b9eb"]}
+{"id":"multiclass-levels","query":"多职业等级如何计算","relevantIds":["pf1e-4c80e254e3e2"],"mustNotLeadWith":["pf1e-fdb6bd11b9eb"]}
+{"id":"favored-class","query":"天赋职业是什么","relevantIds":["pf1e-fdb6bd11b9eb"]}

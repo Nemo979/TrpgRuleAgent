@@ -15,6 +15,7 @@ class RetrievalCase:
     id: str
     query: str
     relevant_ids: Sequence[str]
+    must_not_lead_with: Sequence[str] = ()
 
 
 def load_cases(path: Path) -> List[RetrievalCase]:
@@ -31,6 +32,7 @@ def load_cases(path: Path) -> List[RetrievalCase]:
                 id=str(value["id"]),
                 query=str(value["query"]),
                 relevant_ids=[str(item) for item in relevant_ids],
+                must_not_lead_with=[str(item) for item in value.get("mustNotLeadWith", [])],
             ))
     if not cases:
         raise ValueError("retrieval evaluation set is empty")
@@ -65,6 +67,12 @@ def evaluate(
             ),
             None,
         )
+        lead_id = results[0].document.id if results else None
+        lead_legacy_id = str(results[0].document.metadata.get("legacyParentId", "")) if results else None
+        must_not_violation = bool(
+            case.must_not_lead_with
+            and (lead_id in case.must_not_lead_with or lead_legacy_id in case.must_not_lead_with)
+        )
         if rank is not None:
             hits += 1
             reciprocal_rank_sum += 1.0 / rank
@@ -74,6 +82,7 @@ def evaluate(
             "rank": rank,
             "topIds": result_ids,
             "topPaths": [result.document.full_path for result in results],
+            "mustNotLeadWithViolation": must_not_violation,
         })
         status = "hit@%d" % rank if rank is not None else "miss"
         top_path = results[0].document.full_path if results else "<none>"
@@ -85,6 +94,10 @@ def evaluate(
         "limit": limit,
         "hitRate": round(hits / case_count, 4),
         "mrr": round(reciprocal_rank_sum / case_count, 4),
+        "mustNotLeadWithViolations": sum(
+            1 for row in rows if row["mustNotLeadWithViolation"]
+        ),
+        "constraintPass": not any(row["mustNotLeadWithViolation"] for row in rows),
         "cases": rows,
     }
     print(

@@ -14,8 +14,11 @@ _QUERY_ALIASES = {
     "人物": ("角色",),
     "照亮": ("照明半径",),
     "燃烧多久": ("持续时间",),
+    "多职业": ("兼职", "混职", "混职系统", "职业等级组合"),
+    "兼职": ("多职业", "混职", "混职系统", "职业等级组合"),
 }
 _SAFE_RETRIEVAL_EXPANSIONS = ("照亮", "燃烧多久")
+_MULTICLASS_QUERY_MARKERS = ("兼职", "多职业", "混职", "混合职业", "职业等级组合")
 _RULE_CATEGORIES = (
     "弱点",
     "特技",
@@ -73,6 +76,7 @@ class RetrievalCoordinator:
             expanded
             if _is_character_creation_query(query)
             or any(marker in query for marker in _SAFE_RETRIEVAL_EXPANSIONS)
+            or any(marker in query for marker in _MULTICLASS_QUERY_MARKERS)
             else query
         )
         hits = self.base.search(
@@ -85,13 +89,17 @@ class RetrievalCoordinator:
             (
                 SearchHit(
                 hit.document,
-                hit.excerpt,
+                    hit.excerpt,
                     hit.score
                     + self.heading_bonus
                     * (
                         heading_match_score(expanded, hit.document)
                         + character_creation_heading_score(query, hit.document)
                     ),
+                    chunk_id=hit.chunk_id,
+                    chunk_index=hit.chunk_index,
+                    match_score=hit.match_score,
+                    parent_score=hit.parent_score,
                 ),
                 heading_match_score(expanded, hit.document),
             )

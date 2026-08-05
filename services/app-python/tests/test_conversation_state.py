@@ -1,9 +1,79 @@
+import json
 import unittest
 
 from trpg_app.conversation_state import ConversationState
 
 
 class ConversationStateTest(unittest.TestCase):
+    def test_tracks_structured_character_state_across_four_user_rounds(self) -> None:
+        state = ConversationState.from_messages(
+            [
+                {"role": "user", "content": "我想创建一个角色，5级法师，种族为精灵"},
+                {
+                    "role": "assistant",
+                    "content": "你可以考虑法师5/战士1，并兼职1级战士。",
+                },
+                {"role": "user", "content": "我改成法师5/战士1，兼职1级战士"},
+                {"role": "user", "content": "我想提高生存能力，不考虑近战"},
+                {"role": "user", "content": "继续升法师"},
+            ]
+        )
+
+        self.assertEqual(state.task, "创建角色")
+        self.assertEqual(state.characterLevel, 6)
+        self.assertEqual(state.classLevels, {"法师": 5, "战士": 1})
+        self.assertEqual(state.plannedDipLevels, {"战士": 1})
+        self.assertEqual(state.plannedClassLevels, {"法师": None})
+        self.assertEqual(state.rolePreference, "不考虑近战")
+        self.assertEqual(state.race, "精灵")
+        self.assertEqual(state.facts["种族"], "精灵")
+
+    def test_recognizes_level_notations_and_replaces_previous_class_choice(self) -> None:
+        state = ConversationState.from_messages(
+            [
+                {"role": "user", "content": "5级法师"},
+                {"role": "user", "content": "法师3"},
+                {"role": "user", "content": "法师5"},
+                {"role": "user", "content": "法师5/战士1"},
+            ]
+        )
+
+        self.assertEqual(state.classLevels, {"法师": 5, "战士": 1})
+        self.assertEqual(state.characterLevel, 6)
+
+        state.observe("法师5")
+        self.assertEqual(state.classLevels, {"法师": 5})
+        self.assertEqual(state.characterLevel, 5)
+
+    def test_extracts_remaining_structured_fields(self) -> None:
+        state = ConversationState.from_messages(
+            [
+                {
+                    "role": "user",
+                    "content": (
+                        "种族为精灵，力量18，敏捷14，"
+                        "专长为警觉，法术为火球术、护盾术"
+                    ),
+                }
+            ]
+        )
+
+        self.assertEqual(state.race, "精灵")
+        self.assertEqual(state.abilityScores, {"力量": 18, "敏捷": 14})
+        self.assertEqual(state.feats, ["警觉"])
+        self.assertEqual(state.spells, ["火球术", "护盾术"])
+
+    def test_prompt_context_contains_structured_state_and_legacy_facts(self) -> None:
+        state = ConversationState.from_messages(
+            [{"role": "user", "content": "5级法师，种族为精灵"}]
+        )
+
+        context = json.loads(state.prompt_context())
+        self.assertEqual(context["characterLevel"], 5)
+        self.assertEqual(context["classLevels"], {"法师": 5})
+        self.assertEqual(context["race"], "精灵")
+        self.assertEqual(context["facts"]["种族"], "精灵")
+
     def test_extracts_explicit_character_creation_choices(self) -> None:
         state = ConversationState.from_messages(
             [
@@ -85,9 +155,26 @@ class ConversationStateTest(unittest.TestCase):
 
     def test_does_not_infer_facts_from_assistant_messages(self) -> None:
         state = ConversationState.from_messages(
-            [{"role": "assistant", "content": "你可以选择猫作为真身"}]
+            [
+                {
+                    "role": "assistant",
+                    "content": (
+                        "你可以选择猫作为真身，5级法师，兼职1级战士；"
+                        "我想提高生存能力，不考虑近战，继续升法师。"
+                    ),
+                }
+            ]
         )
         self.assertEqual(state.facts, {})
+        self.assertIsNone(state.characterLevel)
+        self.assertEqual(state.classLevels, {})
+        self.assertEqual(state.plannedClassLevels, {})
+        self.assertEqual(state.plannedDipLevels, {})
+        self.assertIsNone(state.rolePreference)
+        self.assertIsNone(state.race)
+        self.assertEqual(state.abilityScores, {})
+        self.assertEqual(state.feats, [])
+        self.assertEqual(state.spells, [])
 
 
 if __name__ == "__main__":

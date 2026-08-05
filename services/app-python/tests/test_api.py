@@ -377,7 +377,7 @@ class AppApiTest(unittest.TestCase):
             [event["type"] for event in events],
             ["status", "status", "status", "text_delta", "sources", "done"],
         )
-        self.assertIn("没有找到足够可靠的可引用依据", events[3]["delta"])
+        self.assertIn("当前绑定的规则库没有找到匹配结果", events[3]["delta"])
         self.assertEqual(events[4]["sources"], [])
         self.assertFalse(any(event["type"] == "error" for event in events))
 

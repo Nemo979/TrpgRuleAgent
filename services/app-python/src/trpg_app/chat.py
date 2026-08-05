@@ -13,6 +13,7 @@ from openai import AsyncOpenAI
 from .config import ModelConfig
 from .conversation_state import ConversationState
 from .libraries import Library
+from .query_intent import QueryIntent, build_query_plan, classify_intent
 
 
 logger = logging.getLogger("uvicorn.error")
@@ -236,20 +237,40 @@ class EvidenceBudget:
     searches: int = 0
     documents: int = 0
     evidence_characters: int = 0
+    skipped_documents: int = 0
+    last_skipped_reasons: list[str] = field(default_factory=list)
 
     def consume_search(self) -> None:
         if self.searches >= self.max_searches:
             raise ValueError("检索已达到本轮安全上限")
         self.searches += 1
 
-    def consume_documents(self, documents: list[dict[str, Any]]) -> None:
-        new_characters = sum(len(str(item.get("content", ""))) for item in documents)
-        if self.documents + len(documents) > self.max_documents:
-            raise ValueError("读取章节数量已达到本轮安全上限")
-        if self.evidence_characters + new_characters > self.max_evidence_characters:
-            raise ValueError("证据文本已达到本轮上下文预算")
-        self.documents += len(documents)
-        self.evidence_characters += new_characters
+    def consume_documents(self, documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Admit readable evidence one document at a time.
+
+        A single oversized document must not discard smaller documents in the
+        same read request.  The caller can surface ``last_skipped_reasons`` and
+        decide whether an entirely rejected batch should stop the loop.
+        """
+        accepted: list[dict[str, Any]] = []
+        self.last_skipped_reasons = []
+        for document in documents:
+            if self.documents + len(accepted) >= self.max_documents:
+                self.last_skipped_reasons.append("document_limit")
+                continue
+            characters = len(str(document.get("content", "")))
+            if self.evidence_characters + sum(
+                len(str(item.get("content", ""))) for item in accepted
+            ) + characters > self.max_evidence_characters:
+                self.last_skipped_reasons.append("evidence_budget")
+                continue
+            accepted.append(document)
+        self.documents += len(accepted)
+        self.evidence_characters += sum(
+            len(str(item.get("content", ""))) for item in accepted
+        )
+        self.skipped_documents += len(documents) - len(accepted)
+        return accepted
 
 
 @dataclass
@@ -356,8 +377,23 @@ async def run_rule_turn(
 ) -> AsyncIterator[dict[str, Any]]:
     gateway = gateway_factory(model)
     state = ConversationState.from_messages(messages)
+    latest_user_message = next(
+        (
+            str(message.get("content", ""))
+            for message in reversed(messages)
+            if message.get("role") == "user"
+        ),
+        "",
+    )
     conversation: list[dict[str, Any]] = [
-        {"role": "system", "content": _system_prompt(library, state)}
+        {
+            "role": "system",
+            "content": _system_prompt(
+                library,
+                state,
+                latest_user_message,
+            ),
+        }
     ]
     trimmed, dropped_count = _trim_messages(messages, model.context_window)
     conversation.extend(trimmed)
@@ -365,14 +401,7 @@ async def run_rule_turn(
     citations = CitationRegistry()
     controller = ToolLoopController(
         conversation_state=state,
-        latest_user_message=next(
-            (
-                str(message.get("content", ""))
-                for message in reversed(messages)
-                if message.get("role") == "user"
-            ),
-            "",
-        ),
+        latest_user_message=latest_user_message,
     )
 
     if dropped_count:
@@ -713,13 +742,17 @@ async def _finish_after_controller_stop(
         )
     if not citations.by_document_id:
         yield {"type": "status", "status": "answering"}
+        reason_message = {
+            "no_results": "当前绑定的规则库没有找到匹配结果。请尝试使用更具体的规则术语。",
+            "evidence_budget": "已命中候选规则，但相关文档超过本轮证据预算，未能注册可引用证据。请缩小问题范围。",
+            "read_failed": "已命中候选规则，但当前候选无法读取为完整证据。请尝试更具体的条目或规则术语。",
+        }.get(
+            stop_reason,
+            "本轮检索没有找到足够可靠的可引用依据。",
+        )
         yield {
             "type": "text_delta",
-            "delta": (
-                f"在当前绑定的「{library.manifest.name}」规则库中，"
-                "本轮检索没有找到足够可靠的可引用依据。"
-                "这个问题可能属于其他规则库，或需要更具体的规则术语。"
-            ),
+            "delta": f"在当前绑定的「{library.manifest.name}」规则库中，{reason_message}",
         }
         yield {"type": "sources", "sources": []}
         yield {"type": "done"}
@@ -761,6 +794,19 @@ def _final_answer_conversation(
         )
         for label, document in citations.by_document_id.values()
     )
+    build_guidance = ""
+    if classify_intent(question) == QueryIntent.BUILD_ADVICE:
+        build_guidance = (
+            "本题是构筑问题，必须按以下顺序回答：\n"
+            "1. 当前已知构筑\n"
+            "2. 规则事实（每条只写证据支持的规则原文）\n"
+            "3. 构筑建议（明确标注这是基于规则的推导）\n"
+            "4. 收益与损失\n"
+            "5. 适用条件\n"
+            "6. 缺失信息\n"
+            "7. 来源\n"
+            "不得把模型经验或主观推荐写成规则事实；证据未覆盖的内容必须标为缺失信息。\n"
+        )
     return [
         {
             "role": "system",
@@ -771,7 +817,8 @@ def _final_answer_conversation(
                 "[S1]、[S2] 等脚注；证据没有覆盖的部分明确说证据不足。"
                 "用户已选择的不同字段默认只是并列状态；除非规则原文明示约束或对应"
                 "关系，不得声称一个字段会限定另一个字段。尤其不得根据表格位置、"
-                "出现顺序或名称相似自行推断对应关系。"
+                "出现顺序或名称相似自行推断对应关系。\n"
+                f"{build_guidance}"
             ),
         },
         {
@@ -802,6 +849,7 @@ def _latest_user_content(conversation: list[dict[str, Any]]) -> str:
 def _system_prompt(
     library: Library,
     state: ConversationState | None = None,
+    latest_user_message: str = "",
 ) -> str:
     manifest = library.manifest
     identity = {
@@ -812,6 +860,7 @@ def _system_prompt(
         "revision": manifest.revision,
     }
     state_context = (state or ConversationState()).prompt_context()
+    query_plan = build_query_plan(latest_user_message, state)
     return (
         f"{SYSTEM_PROMPT}\n\n"
         "当前绑定规则库（这些字段仅用于标识规则范围）：\n"
@@ -821,6 +870,14 @@ def _system_prompt(
             f"{state_context}"
             if state_context
             else ""
+        )
+        + "\n\n本轮问题意图和检索计划（仅用于拆分搜索，不是规则证据）：\n"
+        + json.dumps(
+            {
+                "intent": query_plan.intent.value,
+                "queries": list(query_plan.queries),
+            },
+            ensure_ascii=False,
         )
     )
 
@@ -935,16 +992,23 @@ def _execute_tool(
                 status="reading",
                 stop_reason="repeated_documents",
             )
-        try:
-            budget.consume_documents(new_documents)
-        except ValueError:
+        admitted_documents = budget.consume_documents(new_documents)
+        if not admitted_documents:
+            reason = "evidence_budget" if budget.last_skipped_reasons else "read_failed"
             return ToolExecution(
-                content='{"status":"stopped","reason":"evidence_budget"}',
+                content=json.dumps(
+                    {
+                        "status": "stopped",
+                        "reason": reason,
+                        "skippedDocuments": len(new_documents),
+                    },
+                    ensure_ascii=False,
+                ),
                 status="reading",
-                stop_reason="evidence_budget",
+                stop_reason=reason,
             )
         result = []
-        for document in new_documents:
+        for document in admitted_documents:
             label = citations.register(document)
             result.append(
                 {
@@ -956,10 +1020,20 @@ def _execute_tool(
                 }
             )
         controller.after_read()
+        if budget.last_skipped_reasons:
+            result.insert(
+                0,
+                {
+                    "status": "partial",
+                    "skippedDocuments": len(new_documents) - len(admitted_documents),
+                    "skippedReasons": budget.last_skipped_reasons,
+                    "instruction": "只能根据已注册的文档回答；被跳过文档不是证据。",
+                },
+            )
         return ToolExecution(
             content=json.dumps(result, ensure_ascii=False),
             status="reading",
-            new_documents=len(new_documents),
+            new_documents=len(admitted_documents),
         )
     stop_reason = controller.after_invalid_tool_call()
     return ToolExecution(

@@ -215,6 +215,7 @@ def build_index(
                 "fullPath": parent.full_path,
                 "version": parent.version,
                 "priority": parent.priority,
+                "chunkId": chunk.id,
                 "chunkIndex": chunk.index,
             })
         write_started_at = time.time()

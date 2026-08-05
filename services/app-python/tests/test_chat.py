@@ -15,13 +15,17 @@ from trpg_app.config import ModelConfig
 
 
 class EvidenceBudgetTest(unittest.TestCase):
-    def test_allows_adaptive_reads_until_character_budget(self) -> None:
+    def test_admits_small_documents_when_a_later_document_exceeds_budget(self) -> None:
         budget = EvidenceBudget(max_documents=10, max_evidence_characters=20)
-        budget.consume_documents([{"content": "短规则"}, {"content": "另一条"}])
+        accepted = budget.consume_documents([{"content": "短规则"}, {"content": "另一条"}])
+        self.assertEqual(len(accepted), 2)
         self.assertEqual(budget.documents, 2)
 
-        with self.assertRaisesRegex(ValueError, "上下文预算"):
-            budget.consume_documents([{"content": "x" * 20}])
+        accepted = budget.consume_documents([{"content": "x" * 20}, {"content": "小条"}])
+        self.assertEqual([item["content"] for item in accepted], ["小条"])
+        self.assertEqual(budget.documents, 3)
+        self.assertEqual(budget.skipped_documents, 1)
+        self.assertIn("evidence_budget", budget.last_skipped_reasons)
 
     def test_strips_provider_thinking_before_visible_answer(self) -> None:
         content = "内部分析内容\n</think>\n\n最终回答。[S1]"
