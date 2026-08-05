@@ -17,7 +17,7 @@
 
 原始 PF1e CHM 已登记到受控本地源目录，SHA-256 为
 `00d5689b1b99d7aa5192b6c81e84034dc89f47e4fd49a47bb45e10724ac3ab9d`。
-候选修订为 `20260805T084935Z`，包含 4,539 个条目/表格文档和 42,858 个向量子块；候选质量门通过，当前 `current` 未切换。
+候选修订为 `20260805T084935Z`，包含 4,539 个条目/表格文档和 42,858 个向量子块；候选质量门通过，已切换为 release 的 `current`。
 
 质量门报告和候选索引审计位于候选修订的 `audit/` 目录。长期集 ID 审计显示现有 85/30 题评测引用的相关 ID 在候选、旧 current 和演示 fixture 中均不完整存在，不能把其当前 miss 率当作真实回退率；必须先从可审计的规则导出重新映射相关 ID。
 
@@ -40,9 +40,9 @@
 - `data/libraries/pathfinder-1e/current/vector-index/chroma`
 - MiMo 配置为 `mimo-v2.5`，密钥变量为 `MIMO_API_KEY`
 
-release 的 current 仍是旧修订，未被候选数据覆盖。候选真实 MiMo 评测已使用 release 的
+release 的 `.env` 和 ChromaDB 已保留，current 已切换到最新候选。候选真实 MiMo 评测已使用 release 的
 配置和环境变量、候选条目文档及候选 Chroma 索引运行；检索阶段进入了 thinking/searching/
 reading/answering，但供应商流式回答在 120 秒整体评测超时内未完成，报告记录为
 `model_timeout`。评测器已增加整体超时保护，报告位于候选修订 `audit/` 目录。
 
-正式发布前仍需完成长期集相关 ID 重映射、长期集/结构化集 Hit@5 验收、MiMo 答案验收、服务提交号与规则修订号核对、原子切换和 release/main 推送。
+仍需完成长期集相关 ID 重映射、长期集/结构化集 Hit@5 验收、MiMo 答案验收，以及 release/main 的远端推送；本地 current 切换和旧 PF1e 修订清理已完成。
