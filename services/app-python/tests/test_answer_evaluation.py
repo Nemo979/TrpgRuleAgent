@@ -8,10 +8,14 @@ from unittest.mock import patch
 from trpg_app.answer_evaluation import (
     AnswerCase,
     AnswerTurn,
+    JudgeInput,
     _normalize,
+    _parse_judge_response,
+    build_reference,
     evaluate_model,
     grade_turn,
     load_cases,
+    load_document_texts,
 )
 
 
@@ -103,6 +107,15 @@ class AnswerEvaluationTest(unittest.TestCase):
         runner = _ScriptedRunner(event_batches)
         with patch("trpg_app.answer_evaluation.run_rule_turn", new=runner):
             return asyncio.run(evaluate_model(_FakeModel(), _FakeLibrary(), cases))
+
+    def _run_with_judge(self, cases, event_batches, judge):
+        runner = _ScriptedRunner(event_batches)
+        with patch("trpg_app.answer_evaluation.run_rule_turn", new=runner):
+            return asyncio.run(
+                evaluate_model(
+                    _FakeModel(), _FakeLibrary(), cases, judge=judge
+                )
+            )
 
     def test_evaluate_counts_tool_calls_and_budget(self) -> None:
         cases = [
@@ -207,6 +220,118 @@ class AnswerEvaluationTest(unittest.TestCase):
 
         self.assertEqual(report["turnCount"], 2)
         self.assertEqual(report["passedTurns"], 2)
+
+    def test_evaluate_skips_judge_when_none(self) -> None:
+        cases = [AnswerCase("c1", (AnswerTurn("q", ("p",), (("x",),)),))]
+        events = [
+            {"type": "text_delta", "delta": "x"},
+            {"type": "sources", "sources": [{"documentId": "p"}]},
+            {"type": "done"},
+        ]
+        report = self._run(cases, [events])
+
+        turn = report["cases"][0]["turns"][0]
+        self.assertIsNone(turn.get("factualCorrect"))
+        self.assertIsNone(turn.get("hallucinationFree"))
+        self.assertIsNone(report["factualPassRate"])
+        self.assertIsNone(report["hallucinationRate"])
+        self.assertEqual(report["judgedTurns"], 0)
+
+    def test_evaluate_records_judge_verdict_and_aggregates(self) -> None:
+        class _RecordingJudge:
+            def __init__(self):
+                self.calls = []
+
+            async def __call__(self, inp: JudgeInput):
+                self.calls.append(inp)
+                return {
+                    "factual_correct": True,
+                    "hallucination_free": False,
+                    "reason": "answer adds an unsupported claim",
+                }
+
+        judge = _RecordingJudge()
+        cases = [AnswerCase("c1", (AnswerTurn("硬度？", ("p",), (("60",),)),))]
+        events = [
+            {"type": "text_delta", "delta": "硬度为60。"},
+            {"type": "sources", "sources": [{"documentId": "p"}]},
+            {"type": "done"},
+        ]
+        report = self._run_with_judge(cases, [events], judge)
+
+        turn = report["cases"][0]["turns"][0]
+        self.assertTrue(turn["factualCorrect"])
+        self.assertFalse(turn["hallucinationFree"])
+        self.assertEqual(turn["judgeReason"], "answer adds an unsupported claim")
+        self.assertIsNone(turn.get("judgeError"))
+        self.assertEqual(report["judgedTurns"], 1)
+        self.assertEqual(report["factualPassRate"], 1.0)
+        self.assertEqual(report["hallucinationRate"], 1.0)
+        # The judge received the flattened gold facts and the question.
+        self.assertEqual(judge.calls[0].query, "硬度？")
+        self.assertIn("60", judge.calls[0].facts)
+
+    def test_evaluate_runs_judge_with_reference_map(self) -> None:
+        captured = {}
+
+        class _RefJudge:
+            async def __call__(self, inp: JudgeInput):
+                captured["reference"] = inp.reference
+                return {"factual_correct": True, "hallucination_free": True, "reason": "ok"}
+
+        reference_map = {"doc-1": "原文：硬度为60。"}
+        cases = [AnswerCase("c1", (AnswerTurn("硬度？", ("doc-1",), (("60",),)),))]
+        events = [
+            {"type": "text_delta", "delta": "硬度为60。"},
+            {"type": "sources", "sources": [{"documentId": "doc-1"}]},
+            {"type": "done"},
+        ]
+        runner = _ScriptedRunner([events])
+        with patch("trpg_app.answer_evaluation.run_rule_turn", new=runner):
+            asyncio.run(
+                evaluate_model(
+                    _FakeModel(),
+                    _FakeLibrary(),
+                    cases,
+                    judge=_RefJudge(),
+                    reference_map=reference_map,
+                )
+            )
+
+        self.assertIn("原文：硬度为60。", captured["reference"])
+
+    def test_parse_judge_response_handles_json_and_prose(self) -> None:
+        clean = _parse_judge_response(
+            '{"factual_correct": true, "hallucination_free": false, "reason": "x"}'
+        )
+        self.assertTrue(clean["factual_correct"])
+        self.assertFalse(clean["hallucination_free"])
+
+        wrapped = _parse_judge_response(
+            'Sure.\n```json\n{"factual_correct": "yes", "hallucination_free": "no", "reason": "y"}\n```'
+        )
+        self.assertTrue(wrapped["factual_correct"])
+        self.assertFalse(wrapped["hallucination_free"])
+
+        unparseable = _parse_judge_response("I cannot grade this.")
+        self.assertIsNone(unparseable["factual_correct"])
+        self.assertIn("unparseable", unparseable["reason"])
+
+    def test_load_document_texts_and_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "documents.jsonl"
+            path.write_text(
+                json.dumps({"id": "doc-1", "content": "硬度为60。"}) + "\n"
+                + json.dumps({"id": "doc-2", "content": "其他。"}) + "\n",
+                encoding="utf-8",
+            )
+            texts = load_document_texts(path)
+
+        self.assertEqual(texts["doc-1"], "硬度为60。")
+        self.assertEqual(
+            build_reference(["doc-1", "missing"], texts), "[doc-1]\n硬度为60。"
+        )
+        self.assertEqual(build_reference(["missing"], texts), "")
 
 
 if __name__ == "__main__":

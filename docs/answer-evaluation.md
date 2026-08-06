@@ -14,8 +14,10 @@
 | 引用支持度 | `sourceMatch` | 模型最终附带的来源中，至少有一个 `documentId` 或 `legacyParentId` 落在题面 `relevantIds` 内。 |
 | 工具预算 | `toolCalls` / `withinBudget` | 统计 SSE 中 `searching`/`reading` 状态事件数作为工具调用近似计数；超过软阈值 `TOOL_CALL_BUDGET`（默认 12）标记超预算。 |
 | 无依据结论率 | `unsupportedTurns` / `unsupportedRate` | 已给出非空答案、但未命中相关来源、且无错误的轮次占比；衡量"答了却没依据"的比例。 |
+| LLM 事实正确性 | `factualCorrect` / `factualPassRate` | 由 `--judge-model` 指定的裁判模型对"答案是否准确陈述 gold 事实且未自相矛盾"给布尔判定；整轮 `factualPassRate` 为通过占比（仅当有裁判时输出）。 |
+| 幻觉/无依据 | `hallucinationFree` / `hallucinationRate` | 裁判判定答案是否含有不被问题、gold 事实或参考正文支持的陈述；`hallucinationRate` 为含幻觉轮次占比。 |
 
-聚合报告还包含 `passRate`（通过轮次占比）、`toolCallTotal` / `toolCallMax`。
+聚合报告还包含 `passRate`（通过轮次占比）、`toolCallTotal` / `toolCallMax`、`judgedTurns`。未启用 `--judge-model` 时，`factualCorrect` / `hallucinationFree` 每行均为 `null`，`factualPassRate` / `hallucinationRate` 为 `null`。
 
 归一化（`_normalize`）对全角/半角、空格、多种连字符做统一，避免"–2"与"-2"被判为不同事实。
 
@@ -47,13 +49,16 @@ PYTHONPATH=services/app-python/src:services/retrieval-python/src \
   --index-dir data/libraries/pathfinder-1e/current/vector-index \
   --cases rulepacks/pathfinder-1e/evals/answer-cases.jsonl \
   --models mimo-v2.5 agnes sensenova \
+  --judge-model mimo-v2.5 \
   --report data/pathfinder-1e/generated/answer-eval.json
 ```
 
-或通过 npm：
+`--judge-model` 为可选项：指定一个**已配置**的模型作为 LLM 裁判。启用后，每个非空且无错误的答案都会被发给裁判，附带"问题 + 扁平化 gold 事实 + 命中来源的正文（来自 `--documents`）"，由裁判返回 `factual_correct` / `hallucination_free` / `reason` 的结构化判定。裁判调用失败会被容错为 `judgeError`，不会中断整轮评测。
+
+或通过 npm（含裁判）：
 
 ```bash
-npm run eval:answer:pf
+npm run eval:answer:pf:judge
 ```
 
 ### 运行基线的环境前提
@@ -68,7 +73,8 @@ npm run eval:answer:pf
 
 ## 当前局限与待补
 
-- `requiredAny` 是关键词/表述命中，不是语义事实判定；强事实正确性需接入 LLM-judge 或人工复核。
+- `requiredAny` 是关键词/表述命中，不是语义事实判定；`--judge-model` 提供的 LLM 裁判是对前者的语义补全，但裁判本身也可能误判，建议与人工抽查并行。
+- 裁判默认不带 `response_format`，依赖提示词强约束 JSON 输出 + 正则抽取，对不遵守 JSON 的端点会更宽松（解析失败记为 `null` 而非判失败）。
 - 引用支持度对照的是**金标** `relevantIds`，若金标不全，可能误判合法引用为不支持；这是已知偏差。
 - 工具预算为 SSE 状态事件的近似计数，不区分搜索与读取，也不等于服务端 `EvidenceBudget` 内部计数。
-- PF1E 已有 v2.0 / v2.1 两套真实金标题集；**Agnes / SenseNova 与 GSS 的真实金标题集尚未建立**，且尚无 LLM-judge 事实信号。
+- PF1E 已有 v2.0 / v2.1 两套真实金标题集；**Agnes / SenseNova 与 GSS 的真实金标题集尚未建立**。

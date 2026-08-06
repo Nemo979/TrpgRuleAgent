@@ -153,7 +153,7 @@ npx vitest run <test-file> --pool=forks --maxWorkers=1
 1. 管理员规则上传与发布页面；目前只有命令行工作流。
 2. 上下文摘要、Token 计量和比简单滑动窗口更完整的上下文管理。
 3. 动态检索预算；当前搜索、读取和证据字符上限仍是固定安全值。
-4. 答案级评测骨架（已落地，见 `services/app-python/src/trpg_app/answer_evaluation.py` 与 `docs/answer-evaluation.md`）：事实点(`requiredAny`)、引用支持度(`source_match`)、工具预算(`toolCalls`/`withinBudget`)、无依据结论率(`unsupportedRate`) 四项指标 + 多轮/错误/超时处理 + 单测。待补：真实多模型金标题集、LLM-judge 事实正确性、跨 PF1E/GSS 题集。
+4. 答案级评测（已落地，见 `services/app-python/src/trpg_app/answer_evaluation.py` 与 `docs/answer-evaluation.md`）：事实点(`requiredAny`)、引用支持度(`source_match`)、工具预算(`toolCalls`/`withinBudget`)、无依据结论率(`unsupportedRate`)、**LLM-judge 事实正确性/幻觉(`factualCorrect`/`hallucinationFree`, 经 `--judge-model`)** 五项指标 + 多轮/错误/超时/judge 容错 + 单测。PF1E 已有 v2.0/v2.1 真实金标题集。待补：Agnes / SenseNova / GSS 的真实金标题集。
 5. 检索质量：结构化切块、重排器和剩余漏召回题优化。
 6. PDF/CHM 图片、扫描件 OCR 和复杂表格理解。
 7. 生产基础设施：HTTPS 反代、登录限流、监控、tracing、备份和正式发布流水线。
