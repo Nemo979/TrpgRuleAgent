@@ -12,6 +12,15 @@ from .chat import run_rule_turn
 from .config import ModelConfig, load_config
 from .libraries import Library, LibraryManifest
 
+# Status values emitted by trpg_app.chat during tool execution. Counting these
+# events gives an observational proxy for how many retrieval/read tool calls a
+# turn triggered (the server enforces its own EvidenceBudget separately).
+TOOL_STATUS_EVENTS = ("searching", "reading")
+# Soft observation threshold for the evaluation harness: the chat loop allows at
+# most 10 decisions and one tool per decision, plus recovery searches, so a well
+# behaved turn stays well under this. Used only to flag runaway tool usage.
+TOOL_CALL_BUDGET = 12
+
 
 @dataclass(frozen=True)
 class AnswerTurn:
@@ -114,6 +123,7 @@ async def evaluate_model(
             sources: list[dict[str, Any]] = []
             error: dict[str, Any] | None = None
             statuses: list[str] = []
+            tool_calls = 0
             try:
                 async with asyncio.timeout(model.request_timeout_seconds):
                     async for event in run_rule_turn(
@@ -130,7 +140,10 @@ async def evaluate_model(
                             if isinstance(value, list):
                                 sources = value
                         elif event_type == "status":
-                            statuses.append(str(event.get("status", "")))
+                            status_value = str(event.get("status", ""))
+                            statuses.append(status_value)
+                            if status_value in TOOL_STATUS_EVENTS:
+                                tool_calls += 1
                         elif event_type == "error":
                             error = dict(event)
             except TimeoutError:
@@ -154,6 +167,8 @@ async def evaluate_model(
                     "answer": answer,
                     "sources": sources,
                     "statuses": statuses,
+                    "toolCalls": tool_calls,
+                    "withinBudget": tool_calls <= TOOL_CALL_BUDGET,
                     **grade,
                 }
             )
@@ -169,12 +184,26 @@ async def evaluate_model(
                 "turns": case_rows,
             }
         )
+    all_turn_rows = [row for case_row in rows for row in case_row["turns"]]
+    answered_turns = [row for row in all_turn_rows if row.get("answer")]
+    unsupported_turns = [
+        row
+        for row in answered_turns
+        if not row["sourceMatch"] and row.get("error") is None
+    ]
     return {
         "modelId": model.id,
         "caseCount": len(cases),
         "turnCount": turn_count,
         "passedTurns": passed_turns,
         "passRate": round(passed_turns / max(turn_count, 1), 4),
+        "toolCallBudget": TOOL_CALL_BUDGET,
+        "toolCallTotal": sum(row["toolCalls"] for row in all_turn_rows),
+        "toolCallMax": max((row["toolCalls"] for row in all_turn_rows), default=0),
+        "unsupportedTurns": len(unsupported_turns),
+        "unsupportedRate": round(
+            len(unsupported_turns) / max(len(answered_turns), 1), 4
+        ),
         "cases": rows,
     }
 
