@@ -157,7 +157,7 @@ npx vitest run <test-file> --pool=forks --maxWorkers=1
 2. 上下文摘要、Token 计量和比简单滑动窗口更完整的上下文管理。
 3. 动态检索预算；当前搜索、读取和证据字符上限仍是固定安全值。
 4. 答案级评测（已落地，见 `services/app-python/src/trpg_app/answer_evaluation.py` 与 `docs/answer-evaluation.md`）：事实点(`requiredAny`)、引用支持度(`source_match`)、工具预算(`toolCalls`/`withinBudget`)、无依据结论率(`unsupportedRate`)、**LLM-judge 事实正确性/幻觉(`factualCorrect`/`hallucinationFree`, 经 `--judge-model`)** 五项指标 + 多轮/错误/超时/judge 容错 + 单测。PF1E 已有 v2.0/v2.1 真实金标题集。前端仍保留 Agnes/SenseNova 可选，并将 MiMo 设为新对话默认模型；**Agnes / SenseNova 明确不在本轮评测范围**。待补：GSS 的真实金标题集。
-5. 检索质量：结构化切块、重排器和剩余漏召回题优化。
+5. 检索质量：结构化切块、重排器和剩余漏召回题优化。V2.2 Stage 0 已修复锚点章节切分（CRB 战斗规则 10 子章节恢复）与 table 策略页正文丢失（overview 兜底），候选重建为 7140 文档、质量门通过；85/30 题相关 ID 100% 覆盖，检索基线待确认。
 6. PDF/CHM 图片、扫描件 OCR 和复杂表格理解。
 7. 生产基础设施：HTTPS 反代、登录限流、监控、tracing、备份和正式发布流水线。
 8. 实际试用验收后一次删除旧 Node Web/Gateway 和微信小程序实现。
