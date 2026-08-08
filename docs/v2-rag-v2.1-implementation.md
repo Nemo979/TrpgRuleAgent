@@ -31,6 +31,26 @@
 - V2.1 专项检索：7/7 Hit@5，MRR 1.0；油腻术、多职业和天赋职业约束均通过。
 - 条目质量门：重复条目 0、导航空壳 0、超证据预算 0。
 
+## V2.2 Stage 0 修复：锚点章节切分与候选重建
+
+V2.2 基线收拢时发现 8/5 结构化候选（`20260805T084935Z`）丢失 CRB 战斗规则整章：
+Word 导出的 CHM 页面用 `<A name="章节名">` 锚点标记章节标题，audit 的 heading 信号与
+`StructuredHtmlParser` 均未识别，页面被判为 `split_tables_with_context` 并整页压成
+单文档。修复（`d232618`）：
+
+- `chm_structure_audit`：将合理的 `<A name>` 标签计为 heading 信号（过滤 Word 工具
+  锚点 OLE_LINK/URL 编码/数字标签），使章节页改判 `split_headings_and_tables`。
+- `chm_structured`：解析器把内部文本匹配锚点名的 name 锚点升级为 level-2 heading，
+  `partition_sections` 因此按锚点切出 10 个战斗子章节文档。
+- 超预算目录条目（>80k 字符）按稳定的「等级：」字段段兜底拆分，段前段落为法术标题，
+  解决无括号英文名的法术页把整页尾部聚合成单个超大 entry 的问题。
+- 重复 entry 分组要求真实 `entryType`，纯导航壳父文档不再被误判为重复而拉低质量门。
+
+重建候选改用 v1 数据源 CHM（v2.20 SC 提取，保留 2140 个父文档含属性/战斗规则等基础
+章节；v1.9 easyread CHM 不含这些页面）。重建后 6533 个结构化文档、`overEvidenceBudget=0`、
+`duplicateEntryContentGroupCount=0`、质量门通过；85/30 题相关 ID 100% 覆盖（旧 ID 直接
+保留或经 `legacyParentId` 匹配）。
+
 ## release 环境核对
 
 本机 release 工作树为 `/Users/nemo_xu/.codex/worktrees/7444/TrpgRuleAgent`，分支与
