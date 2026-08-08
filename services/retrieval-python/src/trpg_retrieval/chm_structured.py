@@ -426,11 +426,11 @@ def _entry_documents(
                 values.append(child)
 
     overview = _overview_document(document, blocks, consumed)
-    if overview is not None:
-        key = _content_key(overview.content)
+    for child in overview:
+        key = _content_key(child.content)
         if key and key not in seen:
             seen.add(key)
-            values.append(overview)
+            values.append(child)
     return values
 
 
@@ -438,45 +438,82 @@ def _overview_document(
     document: RuleDocument,
     blocks: Sequence[HtmlBlock],
     consumed: set[int],
-) -> RuleDocument | None:
+) -> list[RuleDocument]:
     """Keep prose that no entry candidate covered.
 
     Table-heavy pages (strategy ``split_tables_with_context``) used to drop
     every paragraph that was not part of an extracted entry, losing most of
-    the parent's prose.  The uncovered paragraphs become a single overview
-    section so the chapter text stays retrievable.
+    the parent's prose.  The uncovered paragraphs become overview sections
+    so the chapter text stays retrievable.
     """
-    content = "\n\n".join(
+    heading_path = document.full_path.split(" > ")
+    paragraphs = [
         block.text
         for index, block in enumerate(blocks)
-        if index not in consumed and block.kind == "paragraph" and block.text
-    ).strip()
-    if not content:
-        return None
-    digest = hashlib.sha1(f"overview\0{content[:200]}".encode("utf-8")).hexdigest()[:10]
-    heading_path = document.full_path.split(" > ")
-    metadata = {
-        **document.metadata,
-        "structureVersion": 2,
-        "legacyParentId": document.id,
-        "entryType": "section",
-        "headingPath": heading_path,
-        "structuralBlocks": [
-            {"headingPath": heading_path, "content": content},
-        ],
-    }
-    return RuleDocument(
-        id=f"{document.id}:section:{digest}",
-        ruleset_id=document.ruleset_id,
-        source_id=document.source_id,
-        source_title=document.source_title,
-        title=document.title,
-        full_path=document.full_path,
-        content=content,
-        version=document.version,
-        priority=document.priority,
-        metadata=metadata,
-    )
+        if index not in consumed
+        and block.kind == "paragraph"
+        and block.text
+        and not _is_heading_shell(block.text, [*heading_path, document.title])
+    ]
+    if not paragraphs:
+        return []
+    values: list[RuleDocument] = []
+    for part in _chunk_paragraphs(paragraphs):
+        content = "\n\n".join(part).strip()
+        if not content:
+            continue
+        digest = hashlib.sha1(f"overview\0{content[:200]}".encode("utf-8")).hexdigest()[:10]
+        metadata = {
+            **document.metadata,
+            "structureVersion": 2,
+            "legacyParentId": document.id,
+            "entryType": "section",
+            "headingPath": heading_path,
+            "structuralBlocks": [
+                {"headingPath": heading_path, "content": content},
+            ],
+        }
+        values.append(
+            RuleDocument(
+                id=f"{document.id}:section:{digest}",
+                ruleset_id=document.ruleset_id,
+                source_id=document.source_id,
+                source_title=document.source_title,
+                title=document.title,
+                full_path=document.full_path,
+                content=content,
+                version=document.version,
+                priority=document.priority,
+                metadata=metadata,
+            )
+        )
+    return values
+
+
+def _chunk_paragraphs(paragraphs: Sequence[str], maximum: int = 8_000) -> list[list[str]]:
+    """Group paragraphs so each chunk stays under the evidence limit."""
+    chunks: list[list[str]] = []
+    current: list[str] = []
+    current_length = 0
+    step = max(maximum - 50, 1)
+    for paragraph in paragraphs:
+        if len(paragraph) > maximum:
+            if current:
+                chunks.append(current)
+                current = []
+                current_length = 0
+            for start in range(0, len(paragraph), step):
+                chunks.append([paragraph[start:start + maximum]])
+            continue
+        if current and current_length + len(paragraph) > maximum:
+            chunks.append(current)
+            current = []
+            current_length = 0
+        current.append(paragraph)
+        current_length += len(paragraph)
+    if current:
+        chunks.append(current)
+    return chunks
 
 
 _FIELD_START_RE = re.compile(r"^\s*等级\s*[：:]")
