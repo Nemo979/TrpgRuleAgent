@@ -9,6 +9,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from .chm_structure_audit import plausible_anchor_label
 from .domain import RuleDocument
 from .importers.chm import decode_document
 
@@ -76,6 +77,7 @@ class StructuredHtmlParser(HTMLParser):
         self._table_rows: list[tuple[str, ...]] = []
         self._row: list[str] | None = None
         self._cell_parts: list[str] | None = None
+        self._anchor_name: str | None = None
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         lowered = tag.lower()
@@ -90,6 +92,12 @@ class StructuredHtmlParser(HTMLParser):
             self._table_depth += 1
             if self._table_depth == 1:
                 self._table_rows = []
+            return
+        if lowered == "a" and not self._table_depth:
+            attributes = {key.lower(): value or "" for key, value in attrs}
+            anchor_name = attributes.get("name", "")
+            if anchor_name and plausible_anchor_label(anchor_name):
+                self._anchor_name = anchor_name
             return
         if self._table_depth:
             if lowered == "tr" and self._table_depth == 1:
@@ -124,6 +132,18 @@ class StructuredHtmlParser(HTMLParser):
                 self._skip_depth -= 1
             return
         if self._skip_depth:
+            return
+        if lowered == "a" and self._anchor_name:
+            name = self._anchor_name
+            self._anchor_name = None
+            if self._block_tag in (None, "paragraph"):
+                value = _normalize("".join([*self._parts, *self._loose_parts]))
+                if _anchor_text_matches(value, name):
+                    self._parts = []
+                    self._loose_parts = []
+                    self._block_tag = None
+                    self._block_level = 0
+                    self.blocks.append(HtmlBlock("heading", name, level=2))
             return
         if self._table_depth:
             if lowered in {"td", "th"} and self._cell_parts is not None:
@@ -309,7 +329,10 @@ def transform_documents(
     duplicate_entry_groups = {
         key: ids
         for key, ids in duplicate_groups.items()
-        if any(documents_by_id[item].metadata.get("entryType") != "rule_table" for item in ids)
+        if any(
+            documents_by_id[item].metadata.get("entryType") not in (None, "rule_table")
+            for item in ids
+        )
         and len({documents_by_id[item].metadata.get("legacyParentId") for item in ids}) <= 1
     }
     duplicate_table_groups = {
@@ -375,6 +398,15 @@ def _entry_documents(
     for index, candidate in enumerate(candidates):
         child = _entry_document(document, candidate, index)
         key = _content_key(child.content)
+        if len(child.content) > _EVIDENCE_CHARACTER_LIMIT:
+            splits = _field_split_entry(document, candidate)
+            if splits:
+                for split in splits:
+                    split_key = _content_key(split.content)
+                    if split_key and split_key not in seen:
+                        seen.add(split_key)
+                        values.append(split)
+                continue
         if not key or key in seen:
             continue
         seen.add(key)
@@ -392,6 +424,80 @@ def _entry_documents(
             if key and key not in seen:
                 seen.add(key)
                 values.append(child)
+    return values
+
+
+_FIELD_START_RE = re.compile(r"^\s*等级\s*[：:]")
+
+
+def _looks_like_field_start(value: str) -> bool:
+    return bool(_FIELD_START_RE.match(value))
+
+
+def _field_split_entry(
+    document: RuleDocument,
+    candidate: EntryCandidate,
+) -> list[RuleDocument]:
+    """Re-split an oversized catalog entry on ``等级：`` field paragraphs.
+
+    Some catalog pages end with spells whose titles carry no parenthesised
+    English name; the whole page tail collapses into one oversized entry.
+    The stable ``等级：`` field opener marks each spell's start, with the
+    preceding paragraph as its title.
+    """
+    blocks = list(candidate.blocks)
+    field_starts = [
+        index
+        for index, block in enumerate(blocks)
+        if block.kind == "paragraph" and _looks_like_field_start(block.text)
+    ]
+    if not field_starts:
+        return []
+    values: list[RuleDocument] = []
+    for offset, field_index in enumerate(field_starts):
+        title_index = (
+            field_index - 1
+            if field_index > 0 and blocks[field_index - 1].kind == "paragraph"
+            else field_index
+        )
+        end = field_starts[offset + 1] if offset + 1 < len(field_starts) else len(blocks)
+        title_block = blocks[title_index]
+        title = title_block.text.split("\n", 1)[0].strip()
+        split_heading_path = [*candidate.heading_path, title]
+        body = blocks[title_index:end]
+        content = "\n\n".join(block.text for block in body if block.text).strip()
+        if not content:
+            continue
+        suffix_path = _deduplicated_suffix(document, split_heading_path)
+        full_path = " > ".join([document.full_path, *suffix_path])
+        heading_path = [*document.full_path.split(" > "), *suffix_path]
+        name_zh, name_en = _entry_names(title)
+        metadata = _entry_metadata(
+            document,
+            candidate.entry_type,
+            title,
+            name_zh,
+            name_en,
+            heading_path,
+            title_index,
+            end,
+            body,
+        )
+        digest = _entry_digest(10_000 + offset, candidate.entry_type, split_heading_path, content)
+        values.append(
+            RuleDocument(
+                id=f"{document.id}:entry:{digest}",
+                ruleset_id=document.ruleset_id,
+                source_id=document.source_id,
+                source_title=document.source_title,
+                title=title,
+                full_path=full_path,
+                content=content,
+                version=document.version,
+                priority=document.priority,
+                metadata=metadata,
+            )
+        )
     return values
 
 
@@ -947,6 +1053,11 @@ def _normalize(value: str) -> str:
 
 def _compact(value: str) -> str:
     return "".join(character.casefold() for character in value if character.isalnum())
+
+
+def _anchor_text_matches(text: str, name: str) -> bool:
+    compact_text = _compact(text)
+    return bool(compact_text) and compact_text.startswith(_compact(name))
 
 
 def load_documents(path: Path) -> list[RuleDocument]:

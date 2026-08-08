@@ -46,6 +46,34 @@ class ChmStructuredTest(unittest.TestCase):
         self.assertEqual(sections[1].heading_path, ["战斗动作", "全防御"])
         self.assertIn("| 动作 | 加值 |", sections[1].content())
 
+    def test_splits_word_anchor_chapters_into_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "combat.html"
+            path.write_text(
+                """
+                <html><body>
+                <a name="战斗中的数据计算">战斗中的数据计算</a>
+                <p>先攻取决于敏捷。</p>
+                <a name="战斗中的动作">战斗中的动作</a>
+                <p>标准动作可以进行攻击。</p>
+                <a name="OLE_LINK1">OLE_LINK1</a>
+                <p>域代码说明。</p>
+                </body></html>
+                """,
+                encoding="utf-8",
+            )
+
+            blocks = extract_blocks(path)
+            sections = partition_sections(blocks)
+
+        heading_paths = [section.heading_path for section in sections]
+        self.assertEqual(
+            heading_paths,
+            [["战斗中的数据计算"], ["战斗中的动作"]],
+        )
+        self.assertIn("先攻取决于敏捷", sections[0].content())
+        self.assertNotIn("域代码说明", sections[0].content())
+
     def test_splits_heading_documents_and_preserves_legacy_parent_id(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -69,6 +97,69 @@ class ChmStructuredTest(unittest.TestCase):
         self.assertGreaterEqual(len(values), 2)
         self.assertTrue(all(value.metadata["legacyParentId"] == document.id for value in values))
         self.assertEqual(report["splitParents"], 1)
+
+    def test_splits_word_anchor_chapters_via_heading_and_table_strategy(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            html = root / "combat.html"
+            first = "先攻取决于敏捷修正。" * 20
+            second = "标准动作可以发起攻击。" * 20
+            html.write_text(
+                f"<a name=\"战斗中的数据计算\">战斗中的数据计算</a><p>{first}</p>"
+                f"<a name=\"战斗中的动作\">战斗中的动作</a><p>{second}</p>",
+                encoding="utf-8",
+            )
+            document = self.document("combat.html", f"战斗中的数据计算\n{first}\n{second}")
+            audit = {
+                "documents": [
+                    {"id": document.id, "strategy": "split_headings_and_tables"}
+                ]
+            }
+
+            values, report = transform_documents([document], root, audit)
+
+        titles = [value.title for value in values]
+        self.assertEqual(titles, ["战斗中的数据计算", "战斗中的动作"])
+        self.assertEqual(
+            [value.metadata["headingPath"] for value in values],
+            [
+                ["核心规则", "战斗动作", "战斗中的数据计算"],
+                ["核心规则", "战斗动作", "战斗中的动作"],
+            ],
+        )
+        self.assertTrue(all(value.metadata["legacyParentId"] == document.id for value in values))
+        self.assertEqual(report["splitParents"], 1)
+
+    def test_splits_oversized_entry_on_level_field_paragraphs(self) -> None:
+        from trpg_retrieval.chm_structured import (
+            EntryCandidate,
+            HtmlBlock,
+            _field_split_entry,
+        )
+
+        document = self.document("spells.html", "诅咒集")
+        blocks = [
+            HtmlBlock("paragraph", "诅咒法术\n简介。"),
+            HtmlBlock("paragraph", "等级：法师 3\n施放时间：标准动作"),
+            HtmlBlock("paragraph", "描述文字。"),
+            HtmlBlock("paragraph", "元素诅咒\n简介。"),
+            HtmlBlock("paragraph", "等级：德鲁伊 3\n施放时间：1轮"),
+            HtmlBlock("paragraph", "描述文字。"),
+        ]
+        candidate = EntryCandidate(
+            heading_path=("法术", "诅咒集"),
+            blocks=tuple(blocks),
+            block_start=0,
+            block_end=len(blocks),
+            entry_type="spell",
+        )
+
+        values = _field_split_entry(document, candidate)
+
+        self.assertEqual([value.title for value in values], ["诅咒法术", "元素诅咒"])
+        self.assertEqual(values[0].metadata["entryType"], "spell")
+        self.assertIn("等级：法师 3", values[0].content)
+        self.assertIn("等级：德鲁伊 3", values[1].content)
 
     def test_keeps_short_parent_and_adds_table_row_search_blocks(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

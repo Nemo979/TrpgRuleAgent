@@ -30,11 +30,45 @@ class ChmStructureAuditTest(unittest.TestCase):
 
             signals = inspect_html(path)
 
-        self.assertEqual(signals.headings, ("战斗动作", "撤退"))
+        self.assertEqual(signals.headings, ("战斗动作", "withdraw", "撤退"))
         self.assertEqual(signals.table_count, 1)
         self.assertEqual(signals.table_row_count, 2)
         self.assertEqual(signals.anchor_count, 2)
         self.assertEqual(signals.bold_labels, ("全防御",))
+
+    def test_counts_word_section_anchors_as_headings_and_filters_tooling(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "combat.html"
+            path.write_text(
+                """
+                <html><body>
+                <a name="如何进行战斗">如何进行战斗</a>
+                <p>规则正文。</p>
+                <a name="OLE_LINK1">OLE_LINK1</a>
+                <a name="G1210">G1210</a>
+                <a name="RANGE!A45:E71">RANGE!A45:E71</a>
+                <a name="Acolyte%20of%20Apocrypha">Acolyte of Apocrypha</a>
+                </body></html>
+                """,
+                encoding="utf-8",
+            )
+
+            signals = inspect_html(path)
+
+        self.assertEqual(signals.headings, ("如何进行战斗",))
+        self.assertEqual(signals.anchor_count, 5)
+
+    def test_recommends_heading_and_table_strategy_for_anchored_chapter(self) -> None:
+        signals = HtmlSignals(("如何进行战斗", "战斗修正"), 7, 60, 10, ())
+
+        self.assertEqual(
+            recommend_strategy(
+                content_length=43_000,
+                full_path="规则 > CRB基本规则 > 战斗规则",
+                signals=signals,
+            ),
+            "split_headings_and_tables",
+        )
 
     def test_recommends_catalog_and_heading_strategies(self) -> None:
         catalog = HtmlSignals(("法术",), 2, 10, 0, tuple(f"法术{i}" for i in range(30)))

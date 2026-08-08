@@ -16,6 +16,8 @@ from .importers.chm import decode_document
 _SPACE = re.compile(r"\s+")
 _CATALOG_MARKERS = ("法术", "专长", "装备", "魔法物品", "职业")
 _VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
+_WORD_ANCHOR_PREFIXES = ("ole_link", "toc", "ref", "bookmark", "msocom")
+_LABEL_NUMBER_RE = re.compile(r"^[A-Za-z]+\d+$|^\d+[A-Za-z]+$")
 
 
 @dataclass(frozen=True)
@@ -50,6 +52,12 @@ class HtmlStructureParser(HTMLParser):
             self.table_row_count += 1
         elif attributes.get("id") or (lowered == "a" and attributes.get("name")):
             self.anchor_count += 1
+            if (
+                lowered == "a"
+                and not self._table_depth
+                and plausible_anchor_label(attributes.get("name", ""))
+            ):
+                self.headings.append(attributes["name"])
         if self._capture is not None and lowered not in _VOID_TAGS:
             self._capture_depth += 1
         elif lowered in {"h1", "h2", "h3", "h4", "h5", "h6"}:
@@ -339,6 +347,26 @@ def _plausible_label(value: str, maximum: int) -> bool:
     if not 1 < len(value) <= maximum:
         return False
     if re.fullmatch(r"[\d\W_]+", value):
+        return False
+    return True
+
+
+def plausible_anchor_label(value: str) -> bool:
+    """Word-style section anchors use ``<A name="章节名">`` as headings.
+
+    Keep real section titles while rejecting tooling anchors: OLE link
+    bookmarks, URL-encoded names, spreadsheet ranges, and label-number
+    identifiers such as ``G1210``.
+    """
+    if not _plausible_label(value, 160):
+        return False
+    normalized = value.strip("_")
+    if not normalized or any(marker in normalized for marker in ("%", "!", ":")):
+        return False
+    lowered = normalized.casefold()
+    if any(lowered.startswith(prefix) for prefix in _WORD_ANCHOR_PREFIXES):
+        return False
+    if _LABEL_NUMBER_RE.match(normalized):
         return False
     return True
 
