@@ -48,9 +48,11 @@ PYTHONPATH=services/app-python/src:services/retrieval-python/src \
   --documents data/libraries/pathfinder-1e/current/documents.jsonl \
   --index-dir data/libraries/pathfinder-1e/current/vector-index \
   --cases rulepacks/pathfinder-1e/evals/answer-cases.jsonl \
-  --models mimo-v2.5 agnes sensenova \
+  --models mimo-v2.5 \
   --judge-model mimo-v2.5 \
   --report data/pathfinder-1e/generated/answer-eval.json
+
+> Agnes 与 SenseNova 不在本次评测范围，故 `--models` 仅列 `mimo-v2.5`。二者的排除是评测口径的取舍，前端仍把它们保留在下拉框、可选择，仅将 MiMo 设为打开页面默认模型。
 ```
 
 `--judge-model` 为可选项：指定一个**已配置**的模型作为 LLM 裁判。启用后，每个非空且无错误的答案都会被发给裁判，附带"问题 + 扁平化 gold 事实 + 命中来源的正文（来自 `--documents`）"，由裁判返回 `factual_correct` / `hallucination_free` / `reason` 的结构化判定。裁判调用失败会被容错为 `judgeError`，不会中断整轮评测。
@@ -77,4 +79,4 @@ npm run eval:answer:pf:judge
 - 裁判默认不带 `response_format`，依赖提示词强约束 JSON 输出 + 正则抽取，对不遵守 JSON 的端点会更宽松（解析失败记为 `null` 而非判失败）。
 - 引用支持度对照的是**金标** `relevantIds`，若金标不全，可能误判合法引用为不支持；这是已知偏差。
 - 工具预算为 SSE 状态事件的近似计数，不区分搜索与读取，也不等于服务端 `EvidenceBudget` 内部计数。
-- PF1E 已有 v2.0 / v2.1 两套真实金标题集；**Agnes / SenseNova 与 GSS 的真实金标题集尚未建立**。
+- PF1E 已有 v2.0 / v2.1 两套真实金标题集；**GSS 的真实金标题集尚未建立**（Agnes / SenseNova 已明确不在评测范围）。

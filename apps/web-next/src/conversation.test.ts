@@ -60,6 +60,17 @@ describe("createConversationForLibrary", () => {
       createConversationForLibrary(libraries, [], "pathfinder-1e", identity),
     ).toBeNull();
   });
+
+  it("prefers the mimo model as the default for a new conversation", () => {
+    const mixedModels: ModelOption[] = [
+      { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash（SenseNova）", contextWindow: 64_000 },
+      { id: "agnes-2.5-flash", label: "Agnes 2.5 Flash", contextWindow: 64_000 },
+      { id: "mimo-v2.5", label: "Xiaomi MiMo V2.5", contextWindow: 32_000 },
+    ];
+    expect(
+      createConversationForLibrary(libraries, mixedModels, "pathfinder-1e", identity),
+    ).toMatchObject({ modelId: "mimo-v2.5" });
+  });
 });
 
 describe("conversation-bound source requests", () => {

@@ -81,7 +81,7 @@ cp .env.example .env
 
 ### 3. 准备规则库
 
-管理员通过 `trpg-library extract-chm` 或 `extract-pdf` 提取文本规则，再使用 `build-jsonl` 和 `publish` 分阶段构建、原子发布。完整命令见 [Web/Python 重构目标](docs/refactor-target.md)。
+管理员通过 `trpg-library extract-chm` 或 `extract-pdf` 提取文本规则，再使用 `build-jsonl` 和 `publish` 分阶段构建、原子发布。完整命令见 [Web/Python 迁移与管理员命令记录](docs/refactor-target.md)。
 
 规则正文、解析结果和向量索引不会提交到仓库。
 
@@ -188,7 +188,9 @@ PYTHONPATH=services/retrieval-python/src python3 -m unittest discover -s service
 
 ## 下一步
 
-1. 增加管理员规则上传与发布页面。
-2. 增加对话摘要、Token 计量和动态检索预算。
-3. 增加答案级评测与剩余检索漏召回优化。
-4. 实际试用验收后一次删除旧 Node/BYOK 和微信小程序实现。
+总体改造顺序以 [V2.2 可行性与执行方案](docs/v2.2-feasibility-plan.md) 为准：
+
+1. 收拢并保存可复现、可回滚的 release 基线。
+2. 运行近重复 Phase0 与 Context/Token/Evidence/Latency 只读测量。
+3. 根据数据决定优先实施检索多样性、动态证据预算或上下文管理。
+4. 质量稳定后再增加受限复杂任务规划；Memory、Multi-Agent 和微服务拆分暂缓。
