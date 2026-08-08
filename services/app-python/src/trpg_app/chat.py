@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import re
+import time
 import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Callable, Protocol
@@ -13,6 +14,12 @@ from openai import AsyncOpenAI
 from .config import ModelConfig
 from .conversation_state import ConversationState
 from .libraries import Library
+from .observability import (
+    TurnPhaseTimer,
+    estimate_tokens,
+    log_turn_metrics,
+    summarize_messages,
+)
 from .query_intent import QueryIntent, build_query_plan, classify_intent
 
 
@@ -377,6 +384,7 @@ async def run_rule_turn(
 ) -> AsyncIterator[dict[str, Any]]:
     gateway = gateway_factory(model)
     state = ConversationState.from_messages(messages)
+    timer = TurnPhaseTimer()
     latest_user_message = next(
         (
             str(message.get("content", ""))
@@ -403,12 +411,16 @@ async def run_rule_turn(
         conversation_state=state,
         latest_user_message=latest_user_message,
     )
+    system_tokens = estimate_tokens(_system_prompt(library, state, latest_user_message))
+    history = summarize_messages(messages)
 
     if dropped_count:
         yield {"type": "context_truncated", "droppedMessages": dropped_count}
     yield {"type": "status", "status": "thinking"}
     for decision_index in range(1, 11):
+        decision_started = time.monotonic()
         decision = await gateway.decide(conversation, TOOLS)
+        timer.decision_seconds += time.monotonic() - decision_started
         conversation.append(decision.assistant_message)
         if not decision.tool_calls:
             # Compatibility fallback for models that do not follow finish_answer.
@@ -450,6 +462,18 @@ async def run_rule_turn(
                         decision_index=decision_index,
                     ):
                         yield event
+                    _log_turn_metrics(
+                        request_id=request_id,
+                        model=model,
+                        library=library,
+                        timer=timer,
+                        context={"historyTokens": history["tokens"], "systemTokens": system_tokens},
+                        budget=budget,
+                        citations=citations,
+                        stop_reason="model_skipped_tools",
+                        dropped_messages=dropped_count,
+                        final_answer_tokens=0,
+                    )
                     return
                 if budget.searches:
                     _log_tool_step(
@@ -475,10 +499,34 @@ async def run_rule_turn(
                         decision_index=decision_index,
                     ):
                         yield event
+                    _log_turn_metrics(
+                        request_id=request_id,
+                        model=model,
+                        library=library,
+                        timer=timer,
+                        context={"historyTokens": history["tokens"], "systemTokens": system_tokens},
+                        budget=budget,
+                        citations=citations,
+                        stop_reason="model_stopped_without_evidence",
+                        dropped_messages=dropped_count,
+                        final_answer_tokens=0,
+                    )
                     return
                 raise RuntimeError("模型未读取规则证据")
-            async for event in _stream_final_answer(gateway, conversation, citations):
+            async for event in _stream_final_answer(gateway, conversation, citations, timer):
                 yield event
+            _log_turn_metrics(
+                request_id=request_id,
+                model=model,
+                library=library,
+                timer=timer,
+                context={"historyTokens": history["tokens"], "systemTokens": system_tokens},
+                budget=budget,
+                citations=citations,
+                stop_reason="model_finish",
+                dropped_messages=dropped_count,
+                final_answer_tokens=0,
+            )
             return
 
         requested_calls = list(decision.tool_calls)
@@ -520,12 +568,37 @@ async def run_rule_turn(
                     decision_index=decision_index,
                 ):
                     yield event
+                _log_turn_metrics(
+                    request_id=request_id,
+                    model=model,
+                    library=library,
+                    timer=timer,
+                    context={"historyTokens": history["tokens"], "systemTokens": system_tokens},
+                    budget=budget,
+                    citations=citations,
+                    stop_reason="model_finished_without_evidence",
+                    dropped_messages=dropped_count,
+                    final_answer_tokens=0,
+                )
                 return
-            async for event in _stream_final_answer(gateway, conversation, citations):
+            async for event in _stream_final_answer(gateway, conversation, citations, timer):
                 yield event
+            _log_turn_metrics(
+                request_id=request_id,
+                model=model,
+                library=library,
+                timer=timer,
+                context={"historyTokens": history["tokens"], "systemTokens": system_tokens},
+                budget=budget,
+                citations=citations,
+                stop_reason="model_finish",
+                dropped_messages=dropped_count,
+                final_answer_tokens=0,
+            )
             return
 
         tool_call = requested_calls[0]
+        tool_started = time.monotonic()
         execution = _execute_tool(
             name=tool_call.name,
             arguments=tool_call.arguments,
@@ -534,6 +607,10 @@ async def run_rule_turn(
             citations=citations,
             controller=controller,
         )
+        if tool_call.name == "search_rules":
+            timer.retrieval_seconds += time.monotonic() - tool_started
+        elif tool_call.name == "read_rules":
+            timer.read_seconds += time.monotonic() - tool_started
         yield {"type": "status", "status": execution.status}
         conversation.append(
             {
@@ -580,6 +657,18 @@ async def run_rule_turn(
                 decision_index=decision_index,
             ):
                 yield event
+            _log_turn_metrics(
+                request_id=request_id,
+                model=model,
+                library=library,
+                timer=timer,
+                context={"historyTokens": history["tokens"], "systemTokens": system_tokens},
+                budget=budget,
+                citations=citations,
+                stop_reason=execution.stop_reason,
+                dropped_messages=dropped_count,
+                final_answer_tokens=0,
+            )
             return
     _log_tool_step(
         request_id=request_id,
@@ -604,21 +693,39 @@ async def run_rule_turn(
         decision_index=10,
     ):
         yield event
+    _log_turn_metrics(
+        request_id=request_id,
+        model=model,
+        library=library,
+        timer=timer,
+        context={"historyTokens": history["tokens"], "systemTokens": system_tokens},
+        budget=budget,
+        citations=citations,
+        stop_reason="decision_limit",
+        dropped_messages=dropped_count,
+        final_answer_tokens=0,
+    )
 
 
 async def _stream_final_answer(
     gateway: ModelGateway,
     conversation: list[dict[str, Any]],
     citations: CitationRegistry,
+    timer: TurnPhaseTimer | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     answer_conversation = _final_answer_conversation(conversation, citations)
     yield {"type": "status", "status": "answering"}
     last_issue = "empty"
+    final_answer_tokens = 0
     for attempt in range(2):
+        answer_started = time.monotonic()
         answer_parts = [
             delta async for delta in gateway.stream_answer(answer_conversation)
         ]
+        if timer is not None:
+            timer.final_generation_seconds += time.monotonic() - answer_started
         content = "".join(answer_parts)
+        final_answer_tokens = max(final_answer_tokens, estimate_tokens(content))
         last_issue = _answer_quality_issue(content) or ""
         if not last_issue:
             for delta in answer_parts:
@@ -627,7 +734,7 @@ async def _stream_final_answer(
             if suffix:
                 yield {"type": "text_delta", "delta": suffix}
             yield {"type": "sources", "sources": citations.public()}
-            yield {"type": "done"}
+            yield {"type": "done", "finalAnswerTokens": final_answer_tokens}
             return
         logger.warning(
             "answer_quality_rejected issue=%s attempt=%s",
@@ -1053,6 +1160,42 @@ def _query_hash(value: str) -> str:
     if not normalized:
         return "empty"
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
+
+
+def _log_turn_metrics(
+    *,
+    request_id: str | None,
+    model: ModelConfig,
+    library: Library,
+    timer: TurnPhaseTimer,
+    context: dict[str, Any],
+    budget: EvidenceBudget,
+    citations: CitationRegistry,
+    stop_reason: str | None,
+    dropped_messages: int,
+    final_answer_tokens: int,
+) -> None:
+    evidence_tokens = sum(
+        estimate_tokens(str(document.get("content", "")))
+        for _label, document in citations.by_document_id.values()
+    )
+    log_turn_metrics(
+        request_id=request_id,
+        model_id=model.id,
+        library_id=library.manifest.id,
+        timer=timer,
+        context={
+            **context,
+            "outputReserveTokens": estimate_tokens(str(model.max_output_tokens * 4)),
+            "finalAnswerTokens": final_answer_tokens,
+        },
+        search_count=budget.searches,
+        read_documents=budget.documents,
+        evidence_characters=budget.evidence_characters,
+        evidence_tokens=evidence_tokens,
+        stop_reason=stop_reason,
+        dropped_messages=dropped_messages,
+    )
 
 
 def _log_tool_step(
