@@ -130,6 +130,34 @@ class ChmStructuredTest(unittest.TestCase):
         self.assertTrue(all(value.metadata["legacyParentId"] == document.id for value in values))
         self.assertEqual(report["splitParents"], 1)
 
+    def test_keeps_uncovered_prose_as_overview_in_table_strategy(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            html = root / "conditions.html"
+            html.write_text(
+                "<p>状态（Conditions）：如果角色受到多种状态影响，各状态的效果将全部产生作用。</p>"
+                "<p>出血（Bleed）：受到出血伤害的生物在行动轮开始时受到伤害。</p>"
+                "<table><tr><th>状态</th><th>效果</th></tr>"
+                "<tr><td>目盲</td><td>AC-2</td></tr></table>",
+                encoding="utf-8",
+            )
+            document = self.document("conditions.html", "状态规则正文。")
+            audit = {
+                "documents": [
+                    {"id": document.id, "strategy": "split_tables_with_context"}
+                ]
+            }
+
+            values, report = transform_documents([document], root, audit)
+
+        contents = [value.content for value in values]
+        self.assertTrue(
+            any("各状态的效果将全部产生作用" in content for content in contents),
+            "uncovered prose must be kept as an overview section",
+        )
+        self.assertTrue(any("| 状态 | 效果 |" in content and "目盲 | AC-2" in content for content in contents))
+        self.assertEqual(report["splitParents"], 1)
+
     def test_splits_oversized_entry_on_level_field_paragraphs(self) -> None:
         from trpg_retrieval.chm_structured import (
             EntryCandidate,
@@ -241,7 +269,7 @@ class ChmStructuredTest(unittest.TestCase):
 
         self.assertEqual(
             {value.metadata["entryType"] for value in values},
-            {"spell", "feat", "magic_item", "archetype", "class_ability"},
+            {"spell", "feat", "magic_item", "archetype", "class_ability", "section"},
         )
         grease = next(value for value in values if value.metadata["entryType"] == "spell")
         self.assertIn("油腻术", grease.content)
@@ -271,7 +299,10 @@ class ChmStructuredTest(unittest.TestCase):
 
             values, _report = transform_documents([document], root, audit)
 
-        self.assertEqual([value.metadata["entryType"] for value in values], ["archetype", "rule_table"])
+        self.assertEqual(
+            [value.metadata["entryType"] for value in values],
+            ["archetype", "rule_table", "section"],
+        )
         self.assertEqual(values[0].title, "守望者")
         self.assertIn("隐蔽", values[1].content)
         self.assertTrue(all(value.metadata["legacyParentId"] == document.id for value in values))

@@ -424,7 +424,59 @@ def _entry_documents(
             if key and key not in seen:
                 seen.add(key)
                 values.append(child)
+
+    overview = _overview_document(document, blocks, consumed)
+    if overview is not None:
+        key = _content_key(overview.content)
+        if key and key not in seen:
+            seen.add(key)
+            values.append(overview)
     return values
+
+
+def _overview_document(
+    document: RuleDocument,
+    blocks: Sequence[HtmlBlock],
+    consumed: set[int],
+) -> RuleDocument | None:
+    """Keep prose that no entry candidate covered.
+
+    Table-heavy pages (strategy ``split_tables_with_context``) used to drop
+    every paragraph that was not part of an extracted entry, losing most of
+    the parent's prose.  The uncovered paragraphs become a single overview
+    section so the chapter text stays retrievable.
+    """
+    content = "\n\n".join(
+        block.text
+        for index, block in enumerate(blocks)
+        if index not in consumed and block.kind == "paragraph" and block.text
+    ).strip()
+    if not content:
+        return None
+    digest = hashlib.sha1(f"overview\0{content[:200]}".encode("utf-8")).hexdigest()[:10]
+    heading_path = document.full_path.split(" > ")
+    metadata = {
+        **document.metadata,
+        "structureVersion": 2,
+        "legacyParentId": document.id,
+        "entryType": "section",
+        "headingPath": heading_path,
+        "structuralBlocks": [
+            {"headingPath": heading_path, "content": content},
+        ],
+    }
+    return RuleDocument(
+        id=f"{document.id}:section:{digest}",
+        ruleset_id=document.ruleset_id,
+        source_id=document.source_id,
+        source_title=document.source_title,
+        title=document.title,
+        full_path=document.full_path,
+        content=content,
+        version=document.version,
+        priority=document.priority,
+        metadata=metadata,
+    )
 
 
 _FIELD_START_RE = re.compile(r"^\s*等级\s*[：:]")
