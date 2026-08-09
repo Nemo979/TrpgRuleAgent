@@ -51,6 +51,37 @@ Word 导出的 CHM 页面用 `<A name="章节名">` 锚点标记章节标题，a
 `duplicateEntryContentGroupCount=0`、质量门通过；85/30 题相关 ID 100% 覆盖（旧 ID 直接
 保留或经 `legacyParentId` 匹配）。
 
+## V2.2 Stage 0 修复：table 策略页正文丢失与 overview 兜底
+
+重建后评测发现 `split_tables_with_context` 页面把未归属条目的所有段落全部丢弃，
+119 个父文档丢失 >50% 正文（如 CRB 状态 5895→186 字符、负载能力 5999→仅表格），
+导致战斗/状态类题目漏召回。修复（`85ae374`、`a7b5f4a`）：
+
+- 未被条目候选覆盖的段落合并为 overview 章节文档（`entryType=section`），正文重新可检索；
+- overview 按段落分块（单段 >8k 字符时字符级切分），超长段落不再撑爆证据预算；
+- 只重复章节标题的导航标签段落视为导航壳剔除，质量门恢复绿色。
+
+最终候选：**7140 个结构化文档、质量门通过**，部署为 revision `20260809T004148Z`
+（`data/libraries/pathfinder-1e/builds/`，旧 `20260805T084935Z` 保留为回滚点）。
+
+## V2.2 Stage 0/1 基线评测结果（新候选）
+
+- **85 题长期混合检索**：Hit@5 = **90.6%**、MRR = **0.7351**、约束全通过
+  （修复前旧候选 Hit@5=78.8%，主要收益来自战斗/状态章节正文恢复）。
+- **30 题结构化专项**：Hit@5 = **83.3%**、MRR = **0.6750**。5 个 miss 均为相关文档
+  存在但排名未进 Top-5（双武器减值、术士/牧师目录、借机攻击表格），属 Stage 2 重排
+  器优化范畴，非数据缺失。
+- **答案级评测（MiMo）**：4 题 6 轮全部通过，事实正确率 100%、幻觉率 0%、无依据率 0%；
+  工具调用 14 次在 12 预算内（含服务端恢复读取）。
+- **Stage 1A Phase0 近重复只读审计**（`diversity_audit.py`）：85 题 Top-50，
+  阈值 0.90。Top-8 重复占位共 16（平均 0.19/题，15/85 题有重复）、独立规则点平均
+  7.69/8、桶内近重复 22 对、跨桶 22 对。结论：近重复温和，不构成 Top-8 挤占问题，
+  进入 Phase1 多样性排序需另据收益评估，非当前阻塞。
+- **Stage 1B 聚合指标**（`observability.py`）：每轮输出 JSON 指标行（阶段耗时、
+  Token 估算、搜索/读取次数、裁剪消息、停止原因），不记录正文，见
+  `services/app-python/src/trpg_app/observability.py`。
+- 检索服务 60 项、app-python 90 项测试通过。
+
 ## release 环境核对
 
 本机 release 工作树为 `/Users/nemo_xu/.codex/worktrees/7444/TrpgRuleAgent`，分支与

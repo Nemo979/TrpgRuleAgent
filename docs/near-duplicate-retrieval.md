@@ -311,6 +311,13 @@ return reranked[:limit]  # 搜索 limit 不变；Agent 侧再自行取前 8 作�
 
 ## 9. 待确认
 
+> **Phase0 审计结果（20260809，候选 `20260809T004148Z`）**：85 题 Top-50 扫描，
+> 阈值 0.90，Top-8 重复占位共 16（平均 0.19/题、15/85 题）、独立规则点平均 7.69/8、
+> 桶内近重复 22 对、跨桶 22 对。近重复温和，未发现 Top-8 被近重复挤占的显著案例，
+> 进入 Phase1 需另据收益评估（不构成当前阻塞）。审计工具与报告：
+> `services/retrieval-python/src/trpg_retrieval/diversity_audit.py`、
+> 新候选 `audit/phase0-near-duplicate.json`。
+
 1. `ruleLibraryId + semantic_key` 的分层是否覆盖当前所有文档形态？跨桶审计发现的漏检形态需要补哪些规则？
 2. `dup_threshold` **不预设默认值**；Phase0 从 **0.90** 起标定（见 §4.B / 前置条件 4），是否需据误合并 / 漏合并下修？待 Phase0 审计报告确定。
 3. 强制信号校验的词典（可以/不能、骰子表达式等）是否够？是否需要补充 PF1e 特有术语？
