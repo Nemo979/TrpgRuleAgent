@@ -413,6 +413,7 @@ async def run_rule_turn(
     )
     system_tokens = estimate_tokens(_system_prompt(library, state, latest_user_message))
     history = summarize_messages(messages)
+    final_answer_tokens: list[int] = [0]
 
     if dropped_count:
         yield {"type": "context_truncated", "droppedMessages": dropped_count}
@@ -472,7 +473,7 @@ async def run_rule_turn(
                         citations=citations,
                         stop_reason="model_skipped_tools",
                         dropped_messages=dropped_count,
-                        final_answer_tokens=0,
+                        final_answer_tokens=final_answer_tokens[0],
                     )
                     return
                 if budget.searches:
@@ -509,11 +510,11 @@ async def run_rule_turn(
                         citations=citations,
                         stop_reason="model_stopped_without_evidence",
                         dropped_messages=dropped_count,
-                        final_answer_tokens=0,
+                        final_answer_tokens=final_answer_tokens[0],
                     )
                     return
                 raise RuntimeError("模型未读取规则证据")
-            async for event in _stream_final_answer(gateway, conversation, citations, timer):
+            async for event in _stream_final_answer(gateway, conversation, citations, timer, final_answer_tokens):
                 yield event
             _log_turn_metrics(
                 request_id=request_id,
@@ -525,7 +526,7 @@ async def run_rule_turn(
                 citations=citations,
                 stop_reason="model_finish",
                 dropped_messages=dropped_count,
-                final_answer_tokens=0,
+                final_answer_tokens=final_answer_tokens[0],
             )
             return
 
@@ -578,10 +579,10 @@ async def run_rule_turn(
                     citations=citations,
                     stop_reason="model_finished_without_evidence",
                     dropped_messages=dropped_count,
-                    final_answer_tokens=0,
+                    final_answer_tokens=final_answer_tokens[0],
                 )
                 return
-            async for event in _stream_final_answer(gateway, conversation, citations, timer):
+            async for event in _stream_final_answer(gateway, conversation, citations, timer, final_answer_tokens):
                 yield event
             _log_turn_metrics(
                 request_id=request_id,
@@ -593,7 +594,7 @@ async def run_rule_turn(
                 citations=citations,
                 stop_reason="model_finish",
                 dropped_messages=dropped_count,
-                final_answer_tokens=0,
+                final_answer_tokens=final_answer_tokens[0],
             )
             return
 
@@ -667,7 +668,7 @@ async def run_rule_turn(
                 citations=citations,
                 stop_reason=execution.stop_reason,
                 dropped_messages=dropped_count,
-                final_answer_tokens=0,
+                final_answer_tokens=final_answer_tokens[0],
             )
             return
     _log_tool_step(
@@ -703,7 +704,7 @@ async def run_rule_turn(
         citations=citations,
         stop_reason="decision_limit",
         dropped_messages=dropped_count,
-        final_answer_tokens=0,
+        final_answer_tokens=final_answer_tokens[0],
     )
 
 
@@ -712,11 +713,12 @@ async def _stream_final_answer(
     conversation: list[dict[str, Any]],
     citations: CitationRegistry,
     timer: TurnPhaseTimer | None = None,
+    final_answer_tokens: list[int] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     answer_conversation = _final_answer_conversation(conversation, citations)
     yield {"type": "status", "status": "answering"}
     last_issue = "empty"
-    final_answer_tokens = 0
+    final_answer_tokens_estimate = 0
     for attempt in range(2):
         answer_started = time.monotonic()
         answer_parts = [
@@ -725,7 +727,7 @@ async def _stream_final_answer(
         if timer is not None:
             timer.final_generation_seconds += time.monotonic() - answer_started
         content = "".join(answer_parts)
-        final_answer_tokens = max(final_answer_tokens, estimate_tokens(content))
+        final_answer_tokens_estimate = max(final_answer_tokens_estimate, estimate_tokens(content))
         last_issue = _answer_quality_issue(content) or ""
         if not last_issue:
             for delta in answer_parts:
@@ -734,7 +736,9 @@ async def _stream_final_answer(
             if suffix:
                 yield {"type": "text_delta", "delta": suffix}
             yield {"type": "sources", "sources": citations.public()}
-            yield {"type": "done", "finalAnswerTokens": final_answer_tokens}
+            yield {"type": "done", "finalAnswerTokens": final_answer_tokens_estimate}
+            if final_answer_tokens is not None:
+                final_answer_tokens[0] = final_answer_tokens_estimate
             return
         logger.warning(
             "answer_quality_rejected issue=%s attempt=%s",
@@ -1186,7 +1190,7 @@ def _log_turn_metrics(
         timer=timer,
         context={
             **context,
-            "outputReserveTokens": estimate_tokens(str(model.max_output_tokens * 4)),
+            "outputReserveTokens": model.max_output_tokens,
             "finalAnswerTokens": final_answer_tokens,
         },
         search_count=budget.searches,
