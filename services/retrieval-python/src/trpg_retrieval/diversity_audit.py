@@ -139,8 +139,9 @@ def audit_case(
     results: Sequence[RuleDocument],
     threshold: float,
 ) -> CaseAudit:
-    top_ids = [result.id for result in results]
-    keys = [semantic_key(result) for result in results]
+    documents = [result if isinstance(result, RuleDocument) else result.document for result in results]
+    top_ids = [document.id for document in documents]
+    keys = [semantic_key(document) for document in documents]
     top_keys = keys[:_TOP_KEYS]
     key_counts = Counter(key for key in top_keys if key)
     top8_duplicate_slots = sum(count - 1 for count in key_counts.values() if count > 1)
@@ -157,12 +158,12 @@ def audit_case(
         for offset, left_index in enumerate(indexes):
             for right_index in indexes[offset + 1:]:
                 jaccard = shingle_jaccard(
-                    results[left_index].content or "",
-                    results[right_index].content or "",
+                    documents[left_index].content or "",
+                    documents[right_index].content or "",
                 )
                 if jaccard >= threshold:
                     in_bucket.append(
-                        AuditPair(results[left_index].id, results[right_index].id, jaccard, True)
+                        AuditPair(documents[left_index].id, documents[right_index].id, jaccard, True)
                     )
 
     for left_index in range(len(keys)):
@@ -172,12 +173,12 @@ def audit_case(
             if keys[left_index] is None or keys[right_index] is None:
                 continue
             jaccard = shingle_jaccard(
-                results[left_index].content or "",
-                results[right_index].content or "",
+                documents[left_index].content or "",
+                documents[right_index].content or "",
             )
             if jaccard >= threshold:
                 cross_bucket.append(
-                    AuditPair(results[left_index].id, results[right_index].id, jaccard, False)
+                    AuditPair(documents[left_index].id, documents[right_index].id, jaccard, False)
                 )
 
     return CaseAudit(
