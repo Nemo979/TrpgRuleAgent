@@ -3,6 +3,7 @@ import unicodedata
 from typing import Iterable, List, Optional, Sequence
 
 from .domain import RuleDocument, SearchHit
+from .retriever import _compact
 from .service import RuleRetriever
 
 
@@ -226,11 +227,6 @@ def _heading_components(document: RuleDocument) -> list[str]:
         values.extend(str(value) for value in path if value)
     values.extend([document.title, *document.full_path.split(" > ")])
     return list(dict.fromkeys(values))
-
-
-def _compact(value: str) -> str:
-    normalized = unicodedata.normalize("NFKC", value).casefold()
-    return "".join(re.findall(r"[a-z0-9\u4e00-\u9fff]+", normalized))
 
 
 def _is_direct_lookup(query: str) -> bool:

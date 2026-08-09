@@ -8,8 +8,8 @@ from trpg_app.observability import (
 
 
 class TokenEstimateTest(unittest.TestCase):
-    def test_cjk_text_estimates_four_characters_per_token(self) -> None:
-        self.assertEqual(estimate_tokens("油腻术" * 4), 3)
+    def test_cjk_text_estimates_two_characters_per_token(self) -> None:
+        self.assertEqual(estimate_tokens("油腻术" * 4), 6)
         self.assertEqual(estimate_tokens(""), 0)
 
     def test_short_text_has_at_least_one_token(self) -> None:

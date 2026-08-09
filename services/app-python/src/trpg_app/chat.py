@@ -415,6 +415,20 @@ async def run_rule_turn(
     history = summarize_messages(messages)
     final_answer_tokens: list[int] = [0]
 
+    def _emit_turn_metrics(stop_reason: str, final_tokens: int = 0) -> None:
+        _log_turn_metrics(
+            request_id=request_id,
+            model=model,
+            library=library,
+            timer=timer,
+            context={"historyTokens": history["tokens"], "systemTokens": system_tokens},
+            budget=budget,
+            citations=citations,
+            stop_reason=stop_reason,
+            dropped_messages=dropped_count,
+            final_answer_tokens=final_tokens,
+        )
+
     if dropped_count:
         yield {"type": "context_truncated", "droppedMessages": dropped_count}
     yield {"type": "status", "status": "thinking"}
@@ -463,18 +477,7 @@ async def run_rule_turn(
                         decision_index=decision_index,
                     ):
                         yield event
-                    _log_turn_metrics(
-                        request_id=request_id,
-                        model=model,
-                        library=library,
-                        timer=timer,
-                        context={"historyTokens": history["tokens"], "systemTokens": system_tokens},
-                        budget=budget,
-                        citations=citations,
-                        stop_reason="model_skipped_tools",
-                        dropped_messages=dropped_count,
-                        final_answer_tokens=final_answer_tokens[0],
-                    )
+                    _emit_turn_metrics("model_skipped_tools", final_answer_tokens[0])
                     return
                 if budget.searches:
                     _log_tool_step(
@@ -500,34 +503,12 @@ async def run_rule_turn(
                         decision_index=decision_index,
                     ):
                         yield event
-                    _log_turn_metrics(
-                        request_id=request_id,
-                        model=model,
-                        library=library,
-                        timer=timer,
-                        context={"historyTokens": history["tokens"], "systemTokens": system_tokens},
-                        budget=budget,
-                        citations=citations,
-                        stop_reason="model_stopped_without_evidence",
-                        dropped_messages=dropped_count,
-                        final_answer_tokens=final_answer_tokens[0],
-                    )
+                    _emit_turn_metrics("model_stopped_without_evidence", final_answer_tokens[0])
                     return
                 raise RuntimeError("模型未读取规则证据")
             async for event in _stream_final_answer(gateway, conversation, citations, timer, final_answer_tokens):
                 yield event
-            _log_turn_metrics(
-                request_id=request_id,
-                model=model,
-                library=library,
-                timer=timer,
-                context={"historyTokens": history["tokens"], "systemTokens": system_tokens},
-                budget=budget,
-                citations=citations,
-                stop_reason="model_finish",
-                dropped_messages=dropped_count,
-                final_answer_tokens=final_answer_tokens[0],
-            )
+            _emit_turn_metrics("model_finish", final_answer_tokens[0])
             return
 
         requested_calls = list(decision.tool_calls)
@@ -569,33 +550,11 @@ async def run_rule_turn(
                     decision_index=decision_index,
                 ):
                     yield event
-                _log_turn_metrics(
-                    request_id=request_id,
-                    model=model,
-                    library=library,
-                    timer=timer,
-                    context={"historyTokens": history["tokens"], "systemTokens": system_tokens},
-                    budget=budget,
-                    citations=citations,
-                    stop_reason="model_finished_without_evidence",
-                    dropped_messages=dropped_count,
-                    final_answer_tokens=final_answer_tokens[0],
-                )
+                _emit_turn_metrics("model_finished_without_evidence", final_answer_tokens[0])
                 return
             async for event in _stream_final_answer(gateway, conversation, citations, timer, final_answer_tokens):
                 yield event
-            _log_turn_metrics(
-                request_id=request_id,
-                model=model,
-                library=library,
-                timer=timer,
-                context={"historyTokens": history["tokens"], "systemTokens": system_tokens},
-                budget=budget,
-                citations=citations,
-                stop_reason="model_finish",
-                dropped_messages=dropped_count,
-                final_answer_tokens=final_answer_tokens[0],
-            )
+            _emit_turn_metrics("model_finish", final_answer_tokens[0])
             return
 
         tool_call = requested_calls[0]
@@ -658,18 +617,7 @@ async def run_rule_turn(
                 decision_index=decision_index,
             ):
                 yield event
-            _log_turn_metrics(
-                request_id=request_id,
-                model=model,
-                library=library,
-                timer=timer,
-                context={"historyTokens": history["tokens"], "systemTokens": system_tokens},
-                budget=budget,
-                citations=citations,
-                stop_reason=execution.stop_reason,
-                dropped_messages=dropped_count,
-                final_answer_tokens=final_answer_tokens[0],
-            )
+            _emit_turn_metrics(execution.stop_reason, final_answer_tokens[0])
             return
     _log_tool_step(
         request_id=request_id,
@@ -694,18 +642,7 @@ async def run_rule_turn(
         decision_index=10,
     ):
         yield event
-    _log_turn_metrics(
-        request_id=request_id,
-        model=model,
-        library=library,
-        timer=timer,
-        context={"historyTokens": history["tokens"], "systemTokens": system_tokens},
-        budget=budget,
-        citations=citations,
-        stop_reason="decision_limit",
-        dropped_messages=dropped_count,
-        final_answer_tokens=final_answer_tokens[0],
-    )
+    _emit_turn_metrics("decision_limit", final_answer_tokens[0])
 
 
 async def _stream_final_answer(

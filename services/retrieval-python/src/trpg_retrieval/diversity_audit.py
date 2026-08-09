@@ -142,10 +142,24 @@ def audit_case(
     documents = [result if isinstance(result, RuleDocument) else result.document for result in results]
     top_ids = [document.id for document in documents]
     keys = [semantic_key(document) for document in documents]
+    shingle_sets = [
+        shingles(document.content or "")
+        for document in documents
+    ]
     top_keys = keys[:_TOP_KEYS]
     key_counts = Counter(key for key in top_keys if key)
     top8_duplicate_slots = sum(count - 1 for count in key_counts.values() if count > 1)
     top8_unique_keys = len(key_counts)
+
+    def _pair_jaccard(left_index: int, right_index: int) -> float:
+        left = shingle_sets[left_index]
+        right = shingle_sets[right_index]
+        if not left or not right:
+            return 0.0
+        union = left | right
+        if not union:
+            return 0.0
+        return len(left & right) / len(union)
 
     in_bucket: List[AuditPair] = []
     cross_bucket: List[AuditPair] = []
@@ -157,10 +171,7 @@ def audit_case(
     for indexes in buckets.values():
         for offset, left_index in enumerate(indexes):
             for right_index in indexes[offset + 1:]:
-                jaccard = shingle_jaccard(
-                    documents[left_index].content or "",
-                    documents[right_index].content or "",
-                )
+                jaccard = _pair_jaccard(left_index, right_index)
                 if jaccard >= threshold:
                     in_bucket.append(
                         AuditPair(documents[left_index].id, documents[right_index].id, jaccard, True)
@@ -172,10 +183,7 @@ def audit_case(
                 continue
             if keys[left_index] is None or keys[right_index] is None:
                 continue
-            jaccard = shingle_jaccard(
-                documents[left_index].content or "",
-                documents[right_index].content or "",
-            )
+            jaccard = _pair_jaccard(left_index, right_index)
             if jaccard >= threshold:
                 cross_bucket.append(
                     AuditPair(documents[left_index].id, documents[right_index].id, jaccard, False)

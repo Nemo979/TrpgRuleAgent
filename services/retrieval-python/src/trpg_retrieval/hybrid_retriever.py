@@ -1,5 +1,3 @@
-import re
-import unicodedata
 from typing import Dict, Iterable, List, Optional, Sequence
 
 from .domain import RuleDocument, SearchHit
@@ -7,6 +5,8 @@ from .retriever import InMemoryRetriever
 from .retriever import (
     _FAVORED_CLASS_MARKERS,
     _MULTICLASS_MARKERS,
+    _compact,
+    _has_marker,
     _is_favored_class_document,
     _is_multiclass_document,
 )
@@ -156,13 +156,3 @@ def intent_rerank_bonus(query: str, document: RuleDocument) -> float:
         if _is_multiclass_document(document):
             bonus -= 0.05
     return bonus
-
-
-def _compact(value: str) -> str:
-    normalized = unicodedata.normalize("NFKC", value).casefold()
-    return "".join(re.findall(r"[a-z0-9\u4e00-\u9fff]+", normalized))
-
-
-def _has_marker(value: str, markers: Sequence[str]) -> bool:
-    compact = _compact(value)
-    return any(_compact(marker) in compact for marker in markers)

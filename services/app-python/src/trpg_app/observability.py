@@ -15,11 +15,17 @@ from typing import Any, Sequence
 logger = logging.getLogger("uvicorn.error")
 
 _CJK_BOUNDARY = 0x2E80
-_TOKEN_PER_CHARACTER = 4
+_TOKEN_PER_CHARACTER = 2
 
 
 def estimate_tokens(value: str) -> int:
-    """Conservative estimate: CJK-heavy rule text is ~1 token per 4 chars."""
+    """Rough token estimate for CJK-heavy rule text.
+
+    CJK text is typically ~1-2 tokens per character in modern tokenizers,
+    so 2 characters per token is a reasonable mid-range approximation for
+    observability logs.  It is an estimate only and must not gate context
+    budgets on its own.
+    """
     if not value:
         return 0
     characters = sum(
