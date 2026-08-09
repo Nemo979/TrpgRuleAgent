@@ -167,6 +167,24 @@ class ConversationState:
             or self.spells
         )
 
+    def field_count(self) -> int:
+        """Return a privacy-safe count of populated state values."""
+        return sum(
+            [
+                int(bool(self.task)),
+                int(self.characterLevel is not None),
+                len(self.classLevels),
+                len(self.plannedClassLevels),
+                len(self.plannedDipLevels),
+                int(bool(self.rolePreference)),
+                int(bool(self.race)),
+                len(self.abilityScores),
+                len(self.feats),
+                len(self.spells),
+                len(self.facts),
+            ]
+        )
+
     def answer_guidance(self, question: str) -> str:
         mentioned = [
             (question.rfind(field), _FIELD_ALIASES.get(field, field))

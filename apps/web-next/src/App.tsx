@@ -5,6 +5,7 @@ import { loadBootstrap, loadSource, login, streamChat } from "./api";
 import {
   createConversationForLibrary,
   createSourceSelection,
+  hasLibraryRevisionMismatch,
   isSameSourceRequest,
 } from "./conversation";
 import type { SourceSelection } from "./conversation";
@@ -348,7 +349,7 @@ export function App() {
                 </details>
               </div>
             </header>
-            {activeLibrary && active.libraryRevision !== activeLibrary.revision && (
+            {hasLibraryRevisionMismatch(active, activeLibrary) && (
               <div className="revision-warning">规则库已经更新，旧回答的来源可能失效。</div>
             )}
             <section className="messages">

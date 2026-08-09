@@ -13,6 +13,7 @@ from trpg_app.answer_evaluation import (
     _parse_judge_response,
     build_reference,
     evaluate_model,
+    expand_history,
     grade_turn,
     load_cases,
     load_document_texts,
@@ -25,8 +26,10 @@ class _ScriptedRunner:
     def __init__(self, event_batches):
         self.event_batches = list(event_batches)
         self.calls = 0
+        self.messages = []
 
     async def __call__(self, *, model, library, messages, request_id=None):
+        self.messages.append([dict(message) for message in messages])
         batch = self.event_batches[self.calls]
         self.calls += 1
         for event in batch:
@@ -67,6 +70,31 @@ class AnswerEvaluationTest(unittest.TestCase):
             cases = load_cases(path)
 
         self.assertEqual(cases[0].turns[0].required_any, (("-2", "减2"),))
+
+    def test_expands_compact_history_template(self) -> None:
+        history = expand_history(
+            {
+                "turnCount": 3,
+                "fillerUser": "普通问题",
+                "fillerAssistant": "普通回答",
+                "events": [{"turn": 1, "user": "5级法师"}],
+            }
+        )
+
+        self.assertEqual(len(history), 6)
+        self.assertEqual(history[0], {"role": "user", "content": "5级法师"})
+        self.assertEqual(history[-1], {"role": "assistant", "content": "普通回答"})
+
+    def test_rejects_invalid_history_template(self) -> None:
+        with self.assertRaises(ValueError):
+            expand_history(
+                {
+                    "turnCount": 2,
+                    "fillerUser": "u",
+                    "fillerAssistant": "a",
+                    "events": [{"turn": 3, "user": "outside"}],
+                }
+            )
 
     def test_grades_facts_and_legacy_parent_source(self) -> None:
         turn = AnswerTurn("问题", ("parent",), (("-2", "减2"), ("副手",)))
@@ -220,6 +248,25 @@ class AnswerEvaluationTest(unittest.TestCase):
 
         self.assertEqual(report["turnCount"], 2)
         self.assertEqual(report["passedTurns"], 2)
+
+    def test_evaluate_prepends_case_history_without_reporting_content(self) -> None:
+        case = AnswerCase(
+            "history-case",
+            (AnswerTurn("现在呢？", ("p",), (("-2",),)),),
+            ({"role": "user", "content": "我选择混血术士作为职业"},),
+        )
+        events = [
+            {"type": "text_delta", "delta": "-2"},
+            {"type": "sources", "sources": [{"documentId": "p"}]},
+            {"type": "done"},
+        ]
+        runner = _ScriptedRunner([events])
+        with patch("trpg_app.answer_evaluation.run_rule_turn", new=runner):
+            report = asyncio.run(evaluate_model(_FakeModel(), _FakeLibrary(), [case]))
+
+        self.assertEqual(runner.messages[0][0]["content"], "我选择混血术士作为职业")
+        self.assertEqual(report["cases"][0]["historyMessages"], 1)
+        self.assertNotIn("我选择混血术士作为职业", json.dumps(report, ensure_ascii=False))
 
     def test_evaluate_skips_judge_when_none(self) -> None:
         cases = [AnswerCase("c1", (AnswerTurn("q", ("p",), (("x",),)),))]

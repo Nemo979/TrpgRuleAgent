@@ -477,6 +477,7 @@ async def run_rule_turn(
                 "originalHistoryTokens": original_history["tokens"],
                 "systemTokens": system_tokens,
                 "stateTokens": state_tokens,
+                "stateFieldCount": state.field_count(),
                 **context_budget.metrics(),
             },
             budget=budget,

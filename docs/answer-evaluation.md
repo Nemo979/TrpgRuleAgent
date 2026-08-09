@@ -23,7 +23,7 @@
 
 ## 题集格式
 
-每行一个 JSON。`rulepacks/pathfinder-1e/evals/answer-cases.jsonl`（v2.0，5 个多轮 case）与 `v2.1-answer-cases.jsonl`（v2.1，4 轮对话）已是带真实 gold 来源 ID 与事实点的题集，可直接作为复现输入，也是格式参照：
+每行一个 JSON。`rulepacks/pathfinder-1e/evals/answer-cases.jsonl`（v2.0，4 个 case / 6 轮）与 `v2.1-answer-cases.jsonl`（v2.1，4 轮对话）已是带真实 gold 来源 ID 与事实点的题集，可直接作为复现输入，也是格式参照：
 
 ```json
 {"id":"example.flanking","turns":[
@@ -38,6 +38,21 @@
 - `query`：用户问题。
 - `relevantIds`：该题期望被引用的来源 ID（支持 `legacyParentId` 兼容，如 `pf1e-xxxx:entry:yyyy`）。
 - `requiredAny`：每组为"任一命中即可"的事实表述候选列表；全部组命中才算事实正确。
+
+可选 `history` 用于在目标轮之前注入预置历史。它可以是显式消息数组，也可以是只用于评测的紧凑模板：
+
+```json
+{"history":{
+  "turnCount":12,
+  "fillerUser":"本轮不修改角色设定。",
+  "fillerAssistant":"收到。",
+  "events":[{"turn":1,"user":"我选择混血术士作为职业"}]
+}}
+```
+
+模板在内存中展开成 user/assistant 消息；报告只记录 `historyMessages` 数量，不复制历史正文。
+12/24/48 轮正式夹具和确定性状态契约见
+[长会话与 revision 评测](long-conversation-evaluation.md)。
 
 ## 复现
 

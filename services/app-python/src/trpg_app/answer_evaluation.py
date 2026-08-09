@@ -171,6 +171,57 @@ class AnswerTurn:
 class AnswerCase:
     id: str
     turns: tuple[AnswerTurn, ...]
+    history: tuple[dict[str, str], ...] = ()
+
+
+def expand_history(value: Any, line_number: int = 0) -> tuple[dict[str, str], ...]:
+    """Expand explicit messages or a compact synthetic turn template."""
+    if value is None:
+        return ()
+    if isinstance(value, list):
+        messages = value
+    elif isinstance(value, dict):
+        turn_count = value.get("turnCount")
+        filler_user = value.get("fillerUser")
+        filler_assistant = value.get("fillerAssistant")
+        events_value = value.get("events", [])
+        if (
+            not isinstance(turn_count, int)
+            or not 1 <= turn_count <= 128
+            or not isinstance(filler_user, str)
+            or not isinstance(filler_assistant, str)
+            or not isinstance(events_value, list)
+        ):
+            raise ValueError(f"invalid history template at line {line_number}")
+        events: dict[int, dict[str, Any]] = {}
+        for event in events_value:
+            if not isinstance(event, dict) or not isinstance(event.get("turn"), int):
+                raise ValueError(f"invalid history event at line {line_number}")
+            turn = int(event["turn"])
+            if not 1 <= turn <= turn_count or turn in events:
+                raise ValueError(f"invalid history event turn at line {line_number}")
+            events[turn] = event
+        messages = []
+        for turn in range(1, turn_count + 1):
+            event = events.get(turn, {})
+            messages.extend(
+                [
+                    {"role": "user", "content": event.get("user", filler_user)},
+                    {"role": "assistant", "content": event.get("assistant", filler_assistant)},
+                ]
+            )
+    else:
+        raise ValueError(f"invalid answer history at line {line_number}")
+    normalized: list[dict[str, str]] = []
+    for message in messages:
+        if (
+            not isinstance(message, dict)
+            or message.get("role") not in {"user", "assistant"}
+            or not isinstance(message.get("content"), str)
+        ):
+            raise ValueError(f"invalid answer history message at line {line_number}")
+        normalized.append({"role": str(message["role"]), "content": str(message["content"])})
+    return tuple(normalized)
 
 
 def load_cases(path: Path) -> list[AnswerCase]:
@@ -209,7 +260,13 @@ def load_cases(path: Path) -> list[AnswerCase]:
                 )
             if any(not turn.required_any for turn in turns):
                 raise ValueError(f"empty requiredAny group at line {line_number}")
-            cases.append(AnswerCase(str(value["id"]), tuple(turns)))
+            cases.append(
+                AnswerCase(
+                    str(value["id"]),
+                    tuple(turns),
+                    expand_history(value.get("history"), line_number),
+                )
+            )
     if not cases:
         raise ValueError("answer evaluation set is empty")
     return cases
@@ -254,7 +311,7 @@ async def evaluate_model(
     passed_turns = 0
     turn_count = 0
     for case in cases:
-        messages: list[dict[str, str]] = []
+        messages: list[dict[str, str]] = [dict(message) for message in case.history]
         case_rows: list[dict[str, Any]] = []
         for turn_index, turn in enumerate(case.turns, start=1):
             turn_count += 1
@@ -346,6 +403,7 @@ async def evaluate_model(
         rows.append(
             {
                 "id": case.id,
+                "historyMessages": len(case.history),
                 "passed": len(case_rows) == len(case.turns)
                 and all(row["passed"] for row in case_rows),
                 "turns": case_rows,
