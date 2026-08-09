@@ -16,6 +16,8 @@ from .conversation_state import ConversationState
 from .libraries import Library
 from .observability import (
     TurnPhaseTimer,
+    UsageTotals,
+    estimate_message_tokens,
     estimate_tokens,
     log_turn_metrics,
     summarize_messages,
@@ -135,6 +137,13 @@ class ModelDecision:
     content: str
     tool_calls: tuple[ToolInvocation, ...]
     assistant_message: dict[str, Any]
+    usage: TokenUsage | None = None
+
+
+@dataclass(frozen=True)
+class TokenUsage:
+    prompt_tokens: int
+    completion_tokens: int
 
 
 class ModelGateway(Protocol):
@@ -161,6 +170,7 @@ class OpenAIModelGateway:
             timeout=model.request_timeout_seconds,
             max_retries=model.max_retries,
         )
+        self._last_stream_usage: TokenUsage | None = None
 
     async def decide(
         self,
@@ -188,12 +198,14 @@ class OpenAIModelGateway:
             content=_visible_content(message.content or "", self.model.strip_thinking),
             tool_calls=calls,
             assistant_message=message.model_dump(exclude_none=True),
+            usage=_token_usage(response.usage),
         )
 
     async def stream_answer(
         self,
         messages: list[dict[str, Any]],
     ) -> AsyncIterator[str]:
+        self._last_stream_usage = None
         stream = await self.client.chat.completions.create(
             model=self.model.model,
             messages=messages,
@@ -203,6 +215,9 @@ class OpenAIModelGateway:
         )
         buffered: list[str] = []
         async for chunk in stream:
+            chunk_usage = getattr(chunk, "usage", None)
+            if chunk_usage is not None:
+                self._last_stream_usage = _token_usage(chunk_usage)
             if not chunk.choices:
                 continue
             content = chunk.choices[0].delta.content
@@ -216,10 +231,25 @@ class OpenAIModelGateway:
             if visible:
                 yield visible
 
+    def take_stream_usage(self) -> TokenUsage | None:
+        usage = self._last_stream_usage
+        self._last_stream_usage = None
+        return usage
+
     def _extra_body(self) -> dict[str, Any] | None:
         if not self.model.disable_thinking:
             return None
         return {"chat_template_kwargs": {"enable_thinking": False}}
+
+
+def _token_usage(value: Any) -> TokenUsage | None:
+    if value is None:
+        return None
+    prompt_tokens = getattr(value, "prompt_tokens", None)
+    completion_tokens = getattr(value, "completion_tokens", None)
+    if prompt_tokens is None or completion_tokens is None:
+        return None
+    return TokenUsage(int(prompt_tokens), int(completion_tokens))
 
 
 def _visible_content(content: str, strip_thinking: bool) -> str:
@@ -393,14 +423,12 @@ async def run_rule_turn(
         ),
         "",
     )
+    system_prompt = _system_prompt(library, state, latest_user_message)
+    state_context = state.prompt_context()
     conversation: list[dict[str, Any]] = [
         {
             "role": "system",
-            "content": _system_prompt(
-                library,
-                state,
-                latest_user_message,
-            ),
+            "content": system_prompt,
         }
     ]
     trimmed, dropped_count = _trim_messages(messages, model.context_window)
@@ -411,8 +439,10 @@ async def run_rule_turn(
         conversation_state=state,
         latest_user_message=latest_user_message,
     )
-    system_tokens = estimate_tokens(_system_prompt(library, state, latest_user_message))
-    history = summarize_messages(messages)
+    state_tokens = estimate_tokens(state_context)
+    system_tokens = max(0, estimate_tokens(system_prompt) - state_tokens)
+    history = summarize_messages(trimmed)
+    original_history = summarize_messages(messages)
     final_answer_tokens: list[int] = [0]
 
     def _emit_turn_metrics(stop_reason: str, final_tokens: int = 0) -> None:
@@ -421,21 +451,38 @@ async def run_rule_turn(
             model=model,
             library=library,
             timer=timer,
-            context={"historyTokens": history["tokens"], "systemTokens": system_tokens},
+            context={
+                "historyTokens": history["tokens"],
+                "originalHistoryTokens": original_history["tokens"],
+                "systemTokens": system_tokens,
+                "stateTokens": state_tokens,
+            },
             budget=budget,
             citations=citations,
             stop_reason=stop_reason,
             dropped_messages=dropped_count,
             final_answer_tokens=final_tokens,
+            intent=classify_intent(latest_user_message).value,
+            query_hashes=[_query_hash(query) for query in controller.seen_queries],
+            usage=timer.usage,
         )
 
     if dropped_count:
         yield {"type": "context_truncated", "droppedMessages": dropped_count}
     yield {"type": "status", "status": "thinking"}
     for decision_index in range(1, 11):
+        decision_prompt_tokens = estimate_message_tokens(conversation)
         decision_started = time.monotonic()
         decision = await gateway.decide(conversation, TOOLS)
         timer.decision_seconds += time.monotonic() - decision_started
+        timer.usage.add(
+            prompt_tokens=decision.usage.prompt_tokens if decision.usage else None,
+            completion_tokens=decision.usage.completion_tokens if decision.usage else None,
+            estimated_prompt_tokens=decision_prompt_tokens,
+            estimated_completion_tokens=estimate_tokens(
+                json.dumps(decision.assistant_message, ensure_ascii=False)
+            ),
+        )
         conversation.append(decision.assistant_message)
         if not decision.tool_calls:
             # Compatibility fallback for models that do not follow finish_answer.
@@ -657,6 +704,7 @@ async def _stream_final_answer(
     last_issue = "empty"
     final_answer_tokens_estimate = 0
     for attempt in range(2):
+        answer_prompt_tokens = estimate_message_tokens(answer_conversation)
         answer_started = time.monotonic()
         answer_parts = [
             delta async for delta in gateway.stream_answer(answer_conversation)
@@ -664,6 +712,15 @@ async def _stream_final_answer(
         if timer is not None:
             timer.final_generation_seconds += time.monotonic() - answer_started
         content = "".join(answer_parts)
+        if timer is not None:
+            take_usage = getattr(gateway, "take_stream_usage", None)
+            provider_usage = take_usage() if callable(take_usage) else None
+            timer.usage.add(
+                prompt_tokens=provider_usage.prompt_tokens if provider_usage else None,
+                completion_tokens=provider_usage.completion_tokens if provider_usage else None,
+                estimated_prompt_tokens=answer_prompt_tokens,
+                estimated_completion_tokens=estimate_tokens(content),
+            )
         final_answer_tokens_estimate = max(final_answer_tokens_estimate, estimate_tokens(content))
         last_issue = _answer_quality_issue(content) or ""
         if not last_issue:
@@ -1115,6 +1172,9 @@ def _log_turn_metrics(
     stop_reason: str | None,
     dropped_messages: int,
     final_answer_tokens: int,
+    intent: str,
+    query_hashes: list[str],
+    usage: UsageTotals,
 ) -> None:
     evidence_tokens = sum(
         estimate_tokens(str(document.get("content", "")))
@@ -1136,6 +1196,9 @@ def _log_turn_metrics(
         evidence_tokens=evidence_tokens,
         stop_reason=stop_reason,
         dropped_messages=dropped_messages,
+        intent=intent,
+        query_hashes=query_hashes,
+        usage=usage,
     )
 
 

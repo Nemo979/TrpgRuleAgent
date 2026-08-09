@@ -75,25 +75,25 @@ Word 导出的 CHM 页面用 `<A name="章节名">` 锚点标记章节标题，a
   工具调用 14 次在 12 预算内（含服务端恢复读取）。
 - **Stage 1A Phase0 近重复只读审计**（`diversity_audit.py`）：85 题 Top-50，
   阈值 0.90。Top-8 重复占位共 16（平均 0.19/题，15/85 题有重复）、独立规则点平均
-  7.69/8、桶内近重复 22 对、跨桶 22 对。结论：近重复温和，不构成 Top-8 挤占问题，
-  进入 Phase1 多样性排序需另据收益评估，非当前阻塞。
-- **Stage 1B 聚合指标**（`observability.py`）：每轮输出 JSON 指标行（阶段耗时、
-  Token 估算、搜索/读取次数、裁剪消息、停止原因），不记录正文，见
-  `services/app-python/src/trpg_app/observability.py`。
-- 检索服务 60 项、app-python 90 项测试通过。
+  7.69/8、桶内近重复 22 对、跨桶 22 对；35/44 高相似候选对触发数字/距离安全否决。
+  0.95 对照档仍有桶内 22 对、跨桶 6 对和 19 对安全否决。结论：近重复温和且自动合并风险偏高，
+  当前不进入 Phase1 多样性排序。
+- **Stage 1B 聚合指标**（`observability.py` / `observability_report.py`）：每轮输出 JSON 指标行，
+  provider 有 usage 时记录真实 prompt/completion token，否则逐调用保守估算；记录意图、查询摘要哈希、
+  System/State/History/Evidence/Output Reserve、工具次数和阶段耗时，不记录正文。支持生成基线报告并与旧报告比较。
+- **真实 MiMo 指标基线**：6/6 轮通过、26 次调用 usage 覆盖率 100%；总延迟 mean/p95
+  57.35/75.24 秒，累计 prompt token mean/p95 78,332/147,689。浏览器历史 p95 仅 83 token，
+  因此下一阶段优先控制同轮工具/决策上下文，不先做滚动摘要。完整评审见 `docs/v2.2-stage1-review.md`。
 
 ## release 环境核对
 
 本机 release 工作树为 `/Users/nemo_xu/.codex/worktrees/7444/TrpgRuleAgent`，分支与
-`origin/release` 同步（提交 `c40c818`）。该环境已配置 `.env`，并存在 ChromaDB：
+`origin/release` 同步（Stage 1 开发基线提交 `c309a56`）。该环境已配置 `.env`，并存在 ChromaDB：
 
-- `data/libraries/pathfinder-1e/current` → `builds/20260801T134116Z`
+- `data/libraries/pathfinder-1e/current` → `builds/20260809T004148Z`
 - `data/libraries/pathfinder-1e/current/vector-index/chroma`
 - MiMo 配置为 `mimo-v2.5`，密钥变量为 `MIMO_API_KEY`
 
-release 的 `.env` 和 ChromaDB 已保留，current 已切换到最新候选。候选真实 MiMo 评测已使用 release 的
-配置和环境变量、候选条目文档及候选 Chroma 索引运行；检索阶段进入了 thinking/searching/
-reading/answering，但供应商流式回答在 120 秒整体评测超时内未完成，报告记录为
-`model_timeout`。评测器已增加整体超时保护，报告位于候选修订 `audit/` 目录。
-
-仍需完成长期集相关 ID 重映射、长期集/结构化集 Hit@5 验收、MiMo 答案验收，以及 release/main 的远端推送；本地 current 切换和旧 PF1e 修订清理已完成。
+release 的 `.env` 和 ChromaDB 已保留，current 已切换到最新候选。长期集、结构化集、MiMo 答案验收
+和 Stage 1 指标基线均已完成，报告位于候选修订 `audit/` 目录。分支发布、合入 `release` 与是否同步
+`main` 仍按既有授权边界单独执行。

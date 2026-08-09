@@ -4,7 +4,9 @@ import unittest
 
 from trpg_retrieval.diversity_audit import (
     audit_case,
+    audit_set,
     normalize_text,
+    safety_signals,
     semantic_key,
     shingle_jaccard,
     shingles,
@@ -95,6 +97,29 @@ class ShingleJaccardTest(unittest.TestCase):
         self.assertEqual(english, {"attack of opportunity"})
 
 
+class SafetyVetoTest(unittest.TestCase):
+    def test_detects_polarity_number_action_and_duration_mismatches(self) -> None:
+        signals = safety_signals(
+            "你可以用标准动作维持 2 轮，造成 1d6 点伤害。",
+            "你不能用迅捷动作维持 3 轮，造成 2d6 点伤害。",
+        )
+
+        self.assertIn("polarity", signals)
+        self.assertIn("dice", signals)
+        self.assertIn("numbers", signals)
+        self.assertIn("actionType", signals)
+        self.assertIn("duration", signals)
+
+    def test_identical_critical_fields_do_not_veto(self) -> None:
+        self.assertEqual(
+            safety_signals(
+                "你可以用标准动作造成 1d6 点伤害。",
+                "此时你可以用标准动作造成 1d6 点伤害。",
+            ),
+            (),
+        )
+
+
 class CaseAuditTest(unittest.TestCase):
     def _results(self) -> list:
         return [
@@ -130,6 +155,46 @@ class CaseAuditTest(unittest.TestCase):
         case = audit_case("cross", "借机攻击", results, threshold=0.90)
 
         self.assertTrue(any(not pair.same_key for pair in case.cross_bucket_pairs))
+
+    def test_audit_pair_exposes_safety_veto_without_changing_results(self) -> None:
+        case = audit_case(
+            "veto",
+            "动作是否允许",
+            [
+                document("a", "你可以使用标准动作，距离 30 尺。", title="动作"),
+                document("b", "你不能使用标准动作，距离 30 尺。", title="动作"),
+            ],
+            threshold=0.60,
+        )
+
+        self.assertEqual(case.top_ids, ["a", "b"])
+        self.assertEqual(len(case.in_bucket_pairs), 1)
+        self.assertIn("polarity", case.in_bucket_pairs[0].safety_signals)
+        self.assertTrue(case.to_json()["inBucketPairs"][0]["safetyVeto"])
+
+    def test_audit_set_reports_each_threshold_experiment(self) -> None:
+        results = self._results()
+
+        class Repository:
+            def rulesets(self):
+                return ["pathfinder-1e"]
+
+            def all(self, ruleset_id):
+                return results
+
+        class Retriever:
+            def search(self, query, documents, limit):
+                return documents[:limit]
+
+        report = audit_set(
+            Retriever(),
+            Repository(),
+            [{"id": "combat", "query": "借机攻击"}],
+            thresholds=(0.90, 0.95),
+        )
+
+        self.assertEqual([item["threshold"] for item in report["thresholdExperiments"]], [0.9, 0.95])
+        self.assertEqual(report["thresholdExperiments"][0]["nearDuplicatePairsInBucket"], 3)
 
 
 if __name__ == "__main__":

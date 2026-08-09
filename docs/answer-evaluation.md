@@ -63,6 +63,17 @@ PYTHONPATH=services/app-python/src:services/retrieval-python/src \
 npm run eval:answer:pf:judge
 ```
 
+如需同时采集 V2.2 聚合指标，设置 `TRPG_TURN_METRICS_PATH`；文件只包含隐私安全数值和查询摘要哈希：
+
+```bash
+TRPG_TURN_METRICS_PATH=data/pathfinder-1e/generated/turn-metrics.jsonl \
+  npm run eval:answer:pf
+npm run report:observability:pf
+```
+
+字段与回归比较方法见 [V2.2 可观测性指标与基线报告](observability.md)。这会把评测题目和读取证据发送给配置的
+外部模型，必须先确认数据与模型服务授权。
+
 ### 运行基线的环境前提
 
 真实模型基线需要以下三者齐备，**本仓库与当前开发环境默认不具备**，运行前须先准备：

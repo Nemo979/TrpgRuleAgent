@@ -313,10 +313,13 @@ return reranked[:limit]  # 搜索 limit 不变；Agent 侧再自行取前 8 作�
 
 > **Phase0 审计结果（20260809，候选 `20260809T004148Z`）**：85 题 Top-50 扫描，
 > 阈值 0.90，Top-8 重复占位共 16（平均 0.19/题、15/85 题）、独立规则点平均 7.69/8、
-> 桶内近重复 22 对、跨桶 22 对。近重复温和，未发现 Top-8 被近重复挤占的显著案例，
-> 进入 Phase1 需另据收益评估（不构成当前阻塞）。审计工具与报告：
+> 桶内近重复 22 对、跨桶 22 对。补充安全信号后，44 个高相似候选对中 35 对触发
+> `dedupSafetyVeto`（35 对含数字差异、其中 18 对含距离差异）。近重复温和，未发现 Top-8
+> 被近重复挤占的显著案例，且自动合并风险偏高，因此数据评审决定当前不进入 Phase1。
+> 0.95 对照档仍有桶内 22 对、跨桶 6 对和安全否决 19 对，结论不因提高阈值而改变。
+> 审计工具与报告：
 > `services/retrieval-python/src/trpg_retrieval/diversity_audit.py`、
-> 新候选 `audit/phase0-near-duplicate.json`。
+> 新候选 `audit/phase0-near-duplicate-safety.json`（旧的单阈值报告保留未覆盖）。
 
 1. `ruleLibraryId + semantic_key` 的分层是否覆盖当前所有文档形态？跨桶审计发现的漏检形态需要补哪些规则？
 2. `dup_threshold` **不预设默认值**；Phase0 从 **0.90** 起标定（见 §4.B / 前置条件 4），是否需据误合并 / 漏合并下修？待 Phase0 审计报告确定。

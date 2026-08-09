@@ -1,6 +1,6 @@
 # TrpgRuleAgent 项目现状
 
-更新时间：2026-08-01
+更新时间：2026-08-09
 
 本文档用于记录当前实现状态、架构边界和后续迭代重点。后续开发前应先阅读本文，并同步更新其中的状态。
 
@@ -47,8 +47,10 @@ TrpgRuleAgent 当前是一套面向少量可信用户的多游戏系统 Web 规�
 - 85 题长期混合检索回归为 Hit@5 90.6%、MRR 0.7351；30 题结构化专项集为
   Hit@5 83.3%、MRR 0.6750（此前 8/5 候选在 ID 未重映射下不可比；本轮相关 ID
   100% 覆盖后可计算）。答案级评测 MiMo 6/6 轮通过、事实正确率 100%、幻觉率 0%。
-- V2.2 Stage 1 近重复 Phase0 只读审计与 Context/Token/Latency 聚合指标已落地，
-  见 `near-duplicate-retrieval.md` §9 与 `services/app-python/src/trpg_app/observability.py`。
+- V2.2 Stage 1 近重复 Phase0 只读审计、安全否决信号与 Context/Token/Evidence/Latency
+  指标/报告工具已落地；数据评审决定当前不进入 Phase1，见 `near-duplicate-retrieval.md` §9、
+  `observability.md` 与 `v2.2-stage1-review.md`。MiMo 6 轮真实指标基线已完成，usage 覆盖率 100%；
+  总延迟 mean/p95 为 57.35/75.24 秒，累计 prompt token mean/p95 为 78,332/147,689。
 - MiMo 已完成 4 组、6 轮 PF1E 真实问答验收；事实、来源和多轮追问均通过。按本轮决定未重复验收 Agnes 与 SenseNova。
 - 《夕妖晚谣》1.2 中文规则库已发布 154 个父文档、488 个检索子块。
 - 当前发布版本为 `20260801T105530Z`，包含 `GSS` 与 `Golden Sky Stories` 显式别名。
@@ -59,9 +61,9 @@ TrpgRuleAgent 当前是一套面向少量可信用户的多游戏系统 Web 规�
 
 ### V1 稳定性验收
 
-- TypeScript/Vitest：27 个测试文件、261 项测试通过。
-- Python 应用服务：69 项测试通过。
-- Python 检索服务：35 项测试通过。
+- TypeScript/Vitest：27 个测试文件、263 项测试通过。
+- Python 应用服务：95 项测试通过。
+- Python 检索服务：64 项测试通过。
 - 全仓 TypeScript 类型检查和 Web 生产构建通过。
 - 三个真实模型均完成 PF1E 和《夕妖晚谣》检索、回答、来源和结束事件验收。
 - Agnes、MiMo、DeepSeek 已用同一无明确归属问题完成工具收敛回归：无证据结果安全结束，已读取结果只引用真实来源。
@@ -159,7 +161,8 @@ npx vitest run <test-file> --pool=forks --maxWorkers=1
 > [V2.2 可行性与执行方案](v2.2-feasibility-plan.md)。
 
 1. 管理员规则上传与发布页面；目前只有命令行工作流。
-2. 上下文摘要、Token 计量和比简单滑动窗口更完整的上下文管理。
+2. Context/Token 已完成只读计量和真实 MiMo 基线。下一步按数据优先控制同轮工具结果/决策消息的累计
+   prompt；上下文摘要仍未实现，且当前历史 p95 仅 83 token，不得固定增加一次模型调用。
 3. 动态检索预算；当前搜索、读取和证据字符上限仍是固定安全值。
 4. 答案级评测（已落地，见 `services/app-python/src/trpg_app/answer_evaluation.py` 与 `docs/answer-evaluation.md`）：事实点(`requiredAny`)、引用支持度(`source_match`)、工具预算(`toolCalls`/`withinBudget`)、无依据结论率(`unsupportedRate`)、**LLM-judge 事实正确性/幻觉(`factualCorrect`/`hallucinationFree`, 经 `--judge-model`)** 五项指标 + 多轮/错误/超时/judge 容错 + 单测。PF1E 已有 v2.0/v2.1 真实金标题集。前端仍保留 Agnes/SenseNova 可选，并将 MiMo 设为新对话默认模型；**Agnes / SenseNova 明确不在本轮评测范围**。待补：GSS 的真实金标题集。
 5. 检索质量：结构化切块、重排器和剩余漏召回题优化。V2.2 Stage 0 已修复锚点章节切分（CRB 战斗规则 10 子章节恢复）与 table 策略页正文丢失（overview 兜底），候选重建为 7140 文档、质量门通过；85/30 题相关 ID 100% 覆盖，检索基线待确认。
