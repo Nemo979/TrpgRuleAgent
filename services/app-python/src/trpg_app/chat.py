@@ -12,6 +12,7 @@ from typing import Any, AsyncIterator, Callable, Protocol
 from openai import AsyncOpenAI
 
 from .config import ModelConfig
+from .context_budget import ContextBudget
 from .conversation_state import ConversationState
 from .libraries import Library
 from .observability import (
@@ -62,6 +63,8 @@ SYSTEM_PROMPT = """你是一个基于证据的 TRPG 规则助手。
 10. 每次响应最多调用一个工具，禁止并行调用多个 search_rules 或 read_rules。
 11. search_rules 返回候选后，应优先 read_rules 核对候选；连续两次搜索仍没有可读
     证据时必须停止，不得继续换词穷举。
+12. 检索计划含多个候选词时，先使用最短的规则条目名检索，并优先读取标题与条目名
+    精确匹配的候选；只有该候选不足以覆盖问题字段时，才使用完整自然语言问题补查。
 
 规则库边界：
 1. 当前对话只绑定下方列出的一个规则库；id、name、system、edition、revision
@@ -271,9 +274,11 @@ class EvidenceBudget:
     max_searches: int = 6
     max_documents: int = 24
     max_evidence_characters: int = 80_000
+    max_evidence_tokens: int = 40_000
     searches: int = 0
     documents: int = 0
     evidence_characters: int = 0
+    evidence_tokens: int = 0
     skipped_documents: int = 0
     last_skipped_reasons: list[str] = field(default_factory=list)
 
@@ -296,15 +301,24 @@ class EvidenceBudget:
                 self.last_skipped_reasons.append("document_limit")
                 continue
             characters = len(str(document.get("content", "")))
+            tokens = estimate_tokens(str(document.get("content", "")))
             if self.evidence_characters + sum(
                 len(str(item.get("content", ""))) for item in accepted
             ) + characters > self.max_evidence_characters:
                 self.last_skipped_reasons.append("evidence_budget")
                 continue
+            if self.evidence_tokens + sum(
+                estimate_tokens(str(item.get("content", ""))) for item in accepted
+            ) + tokens > self.max_evidence_tokens:
+                self.last_skipped_reasons.append("evidence_token_budget")
+                continue
             accepted.append(document)
         self.documents += len(accepted)
         self.evidence_characters += sum(
             len(str(item.get("content", ""))) for item in accepted
+        )
+        self.evidence_tokens += sum(
+            estimate_tokens(str(item.get("content", ""))) for item in accepted
         )
         self.skipped_documents += len(documents) - len(accepted)
         return accepted
@@ -425,22 +439,29 @@ async def run_rule_turn(
     )
     system_prompt = _system_prompt(library, state, latest_user_message)
     state_context = state.prompt_context()
+    system_total_tokens = estimate_tokens(system_prompt)
+    state_tokens = estimate_tokens(state_context)
+    system_tokens = max(0, system_total_tokens - state_tokens)
+    context_budget = ContextBudget.allocate(
+        context_window_tokens=model.context_window,
+        output_reserve_tokens=model.max_output_tokens,
+        system_tokens=system_tokens,
+        state_tokens=state_tokens,
+    )
     conversation: list[dict[str, Any]] = [
         {
             "role": "system",
             "content": system_prompt,
         }
     ]
-    trimmed, dropped_count = _trim_messages(messages, model.context_window)
+    trimmed, dropped_count = context_budget.trim_recent_messages(messages)
     conversation.extend(trimmed)
-    budget = EvidenceBudget()
+    budget = EvidenceBudget(max_evidence_tokens=context_budget.evidence_tokens)
     citations = CitationRegistry()
     controller = ToolLoopController(
         conversation_state=state,
         latest_user_message=latest_user_message,
     )
-    state_tokens = estimate_tokens(state_context)
-    system_tokens = max(0, estimate_tokens(system_prompt) - state_tokens)
     history = summarize_messages(trimmed)
     original_history = summarize_messages(messages)
     final_answer_tokens: list[int] = [0]
@@ -456,6 +477,7 @@ async def run_rule_turn(
                 "originalHistoryTokens": original_history["tokens"],
                 "systemTokens": system_tokens,
                 "stateTokens": state_tokens,
+                **context_budget.metrics(),
             },
             budget=budget,
             citations=citations,
@@ -471,9 +493,10 @@ async def run_rule_turn(
         yield {"type": "context_truncated", "droppedMessages": dropped_count}
     yield {"type": "status", "status": "thinking"}
     for decision_index in range(1, 11):
-        decision_prompt_tokens = estimate_message_tokens(conversation)
+        decision_conversation = context_budget.prepare_decision_messages(conversation)
+        decision_prompt_tokens = estimate_message_tokens(decision_conversation)
         decision_started = time.monotonic()
-        decision = await gateway.decide(conversation, TOOLS)
+        decision = await gateway.decide(decision_conversation, TOOLS)
         timer.decision_seconds += time.monotonic() - decision_started
         timer.usage.add(
             prompt_tokens=decision.usage.prompt_tokens if decision.usage else None,
@@ -1193,7 +1216,7 @@ def _log_turn_metrics(
         search_count=budget.searches,
         read_documents=budget.documents,
         evidence_characters=budget.evidence_characters,
-        evidence_tokens=evidence_tokens,
+        evidence_tokens=budget.evidence_tokens or evidence_tokens,
         stop_reason=stop_reason,
         dropped_messages=dropped_messages,
         intent=intent,
@@ -1232,24 +1255,6 @@ def _log_tool_step(
         stop_reason or "-",
         query_hash or "-",
     )
-
-
-def _trim_messages(
-    messages: list[dict[str, str]],
-    context_window: int,
-) -> tuple[list[dict[str, str]], int]:
-    # A transparent conservative approximation; the API reports truncation separately.
-    character_budget = max(8_000, int(context_window * 2.2))
-    kept: list[dict[str, str]] = []
-    used = 0
-    for message in reversed(messages):
-        content = message.get("content", "")
-        if used + len(content) > character_budget:
-            break
-        kept.append({"role": message["role"], "content": content})
-        used += len(content)
-    values = list(reversed(kept))
-    return values, len(messages) - len(values)
 
 
 def _missing_citation_suffix(content: str, labels: list[str]) -> str:

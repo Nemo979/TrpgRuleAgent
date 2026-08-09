@@ -24,6 +24,33 @@ class QueryIntentTest(unittest.TestCase):
         self.assertTrue(all("战士1" in query for query in plan.queries))
         self.assertTrue(all("生存" in query for query in plan.queries))
 
+    def test_rule_fact_plan_leads_with_compact_entry_name(self) -> None:
+        plan = build_query_plan(
+            "混血术士选择两种血统后，在可知法术和意志豁免上有什么缺陷？"
+        )
+
+        self.assertEqual(plan.intent, QueryIntent.RULE_FACT)
+        self.assertEqual(plan.queries[0], "混血术士")
+        self.assertEqual(
+            plan.queries[1],
+            "混血术士选择两种血统后，在可知法术和意志豁免上有什么缺陷？",
+        )
+
+    def test_rule_fact_focus_handles_common_leading_conditions(self) -> None:
+        self.assertEqual(
+            build_query_plan("有双武器格斗专长且副手是轻型武器时，减值多少？").queries[0],
+            "双武器格斗",
+        )
+        self.assertEqual(
+            build_query_plan("操纸师把卷轴作为卷轴刃时，硬度如何计算？").queries[0],
+            "操纸师",
+        )
+
+    def test_attribute_table_question_keeps_the_full_query(self) -> None:
+        query = "两寸厚铁门的硬度、生命值和破坏DC分别是多少？"
+
+        self.assertEqual(build_query_plan(query).queries, (query,))
+
 
 if __name__ == "__main__":
     unittest.main()

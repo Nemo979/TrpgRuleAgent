@@ -58,3 +58,11 @@ PYTHONPATH=services/app-python/src .venv312/bin/python \
 2026-08-09 经明确授权完成 MiMo 6 轮基线，usage 覆盖率 100%。总延迟 mean/p95 为
 57.35/75.24 秒，累计 prompt token mean/p95 为 78,332/147,689；完整数据和决策见
 [V2.2 Stage 1 数据评审](v2.2-stage1-review.md)。
+
+## ContextBudget 发布门
+
+Stage 3 第一阶段在相同 PF1E 构建和 MiMo 6 轮题集上达到 6/6，provider usage 覆盖率 100%。
+累计 prompt token mean/p95 为 11,528/17,571，较 Stage 1 基线分别下降 66,804/130,118；
+总延迟 mean 为 57.26 秒，基本持平。新增指标记录同轮工具内容压缩前后峰值、压缩消息数以及
+History、Evidence、Output Reserve 的分配值。完整结论见
+[V2.2 ContextBudget 数据评审](v2.2-context-budget-review.md)。

@@ -27,6 +27,16 @@ class EvidenceBudgetTest(unittest.TestCase):
         self.assertEqual(budget.skipped_documents, 1)
         self.assertIn("evidence_budget", budget.last_skipped_reasons)
 
+    def test_enforces_evidence_token_budget_without_registering_oversized_document(self) -> None:
+        budget = EvidenceBudget(max_documents=10, max_evidence_characters=1_000, max_evidence_tokens=2)
+
+        accepted = budget.consume_documents([{"content": "规则正文" * 10}])
+
+        self.assertEqual(accepted, [])
+        self.assertEqual(budget.documents, 0)
+        self.assertEqual(budget.evidence_tokens, 0)
+        self.assertIn("evidence_token_budget", budget.last_skipped_reasons)
+
     def test_strips_provider_thinking_before_visible_answer(self) -> None:
         content = "内部分析内容\n</think>\n\n最终回答。[S1]"
         self.assertEqual(_visible_content(content, True), "最终回答。[S1]")
@@ -123,12 +133,15 @@ class StrictFakeLibrary(FakeLibrary):
 
 class FakeGateway:
     first_system_prompt = ""
+    decision_messages = []
 
     def __init__(self, _model):
         self.step = 0
+        type(self).decision_messages = []
 
     async def decide(self, messages, tools):
         self.step += 1
+        type(self).decision_messages.append(messages)
         if self.step == 1:
             type(self).first_system_prompt = messages[0]["content"]
         if self.step == 1:
@@ -658,6 +671,12 @@ class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"edition": "1E"', prompt)
         self.assertIn('"revision": "test-revision"', prompt)
         self.assertIn("search_rules → read_rules → finish_answer", prompt)
+        third_decision_tools = [
+            message for message in FakeGateway.decision_messages[2] if message["role"] == "tool"
+        ]
+        self.assertEqual(len(third_decision_tools), 2)
+        self.assertIn("compacted_search_results", third_decision_tools[0]["content"])
+        self.assertIn("离开受威胁方格", third_decision_tools[1]["content"])
 
     async def test_recovers_when_model_skips_tools_on_first_decision(self) -> None:
         model = ModelConfig(

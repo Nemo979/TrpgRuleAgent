@@ -190,7 +190,7 @@ PYTHONPATH=services/retrieval-python/src python3 -m unittest discover -s service
 
 总体改造顺序以 [V2.2 可行性与执行方案](docs/v2.2-feasibility-plan.md) 为准：
 
-1. 收拢并保存可复现、可回滚的 release 基线。
-2. 运行近重复 Phase0 与 Context/Token/Evidence/Latency 只读测量。
-3. 根据数据决定优先实施检索多样性、动态证据预算或上下文管理。
+1. 已完成可复现的 Stage 1 基线、近重复 Phase0 与 Context/Token/Evidence/Latency 测量。
+2. 已完成 Stage 3 第一阶段的同轮 ContextBudget 和工具上下文压缩，并通过 MiMo 6/6 发布门。
+3. 下一步补充长会话样本，再决定是否进入滚动摘要；动态证据预算仍需独立标定和验收。
 4. 质量稳定后再增加受限复杂任务规划；Memory、Multi-Agent 和微服务拆分暂缓。

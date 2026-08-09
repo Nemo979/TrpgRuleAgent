@@ -51,6 +51,11 @@ TrpgRuleAgent 当前是一套面向少量可信用户的多游戏系统 Web 规�
   指标/报告工具已落地；数据评审决定当前不进入 Phase1，见 `near-duplicate-retrieval.md` §9、
   `observability.md` 与 `v2.2-stage1-review.md`。MiMo 6 轮真实指标基线已完成，usage 覆盖率 100%；
   总延迟 mean/p95 为 57.35/75.24 秒，累计 prompt token mean/p95 为 78,332/147,689。
+- V2.2 Stage 3 第一阶段的同轮 ContextBudget 已完成：工具结果完整展示一次，后续决策只保留
+  ID/引用回执；搜索候选剔除结构化全文等检索内部字段；History 与 Evidence 改为 token 预算。
+  同一 PF1E/MiMo 6 轮发布门为 6/6，usage 覆盖率 100%；累计 prompt token mean/p95 降至
+  11,528/17,571，总延迟 mean 为 57.26 秒。滚动摘要仍暂缓，见
+  `v2.2-context-budget-review.md`。
 - MiMo 已完成 4 组、6 轮 PF1E 真实问答验收；事实、来源和多轮追问均通过。按本轮决定未重复验收 Agnes 与 SenseNova。
 - 《夕妖晚谣》1.2 中文规则库已发布 154 个父文档、488 个检索子块。
 - 当前发布版本为 `20260801T105530Z`，包含 `GSS` 与 `Golden Sky Stories` 显式别名。
@@ -62,7 +67,7 @@ TrpgRuleAgent 当前是一套面向少量可信用户的多游戏系统 Web 规�
 ### V1 稳定性验收
 
 - TypeScript/Vitest：27 个测试文件、263 项测试通过。
-- Python 应用服务：95 项测试通过。
+- Python 应用服务：105 项测试通过。
 - Python 检索服务：64 项测试通过。
 - 全仓 TypeScript 类型检查和 Web 生产构建通过。
 - 三个真实模型均完成 PF1E 和《夕妖晚谣》检索、回答、来源和结束事件验收。
@@ -161,8 +166,8 @@ npx vitest run <test-file> --pool=forks --maxWorkers=1
 > [V2.2 可行性与执行方案](v2.2-feasibility-plan.md)。
 
 1. 管理员规则上传与发布页面；目前只有命令行工作流。
-2. Context/Token 已完成只读计量和真实 MiMo 基线。下一步按数据优先控制同轮工具结果/决策消息的累计
-   prompt；上下文摘要仍未实现，且当前历史 p95 仅 83 token，不得固定增加一次模型调用。
+2. 同轮 ContextBudget 与工具结果压缩已完成。下一步先补长会话样本并验证 revision 失效边界；
+   上下文摘要仍未实现，且当前历史 p95 仅 89 token，不得固定增加一次模型调用。
 3. 动态检索预算；当前搜索、读取和证据字符上限仍是固定安全值。
 4. 答案级评测（已落地，见 `services/app-python/src/trpg_app/answer_evaluation.py` 与 `docs/answer-evaluation.md`）：事实点(`requiredAny`)、引用支持度(`source_match`)、工具预算(`toolCalls`/`withinBudget`)、无依据结论率(`unsupportedRate`)、**LLM-judge 事实正确性/幻觉(`factualCorrect`/`hallucinationFree`, 经 `--judge-model`)** 五项指标 + 多轮/错误/超时/judge 容错 + 单测。PF1E 已有 v2.0/v2.1 真实金标题集。前端仍保留 Agnes/SenseNova 可选，并将 MiMo 设为新对话默认模型；**Agnes / SenseNova 明确不在本轮评测范围**。待补：GSS 的真实金标题集。
 5. 检索质量：结构化切块、重排器和剩余漏召回题优化。V2.2 Stage 0 已修复锚点章节切分（CRB 战斗规则 10 子章节恢复）与 table 策略页正文丢失（overview 兜底），候选重建为 7140 文档、质量门通过；85/30 题相关 ID 100% 覆盖，检索基线待确认。

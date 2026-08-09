@@ -10,6 +10,24 @@ from trpg_retrieval.retriever import InMemoryRetriever
 from trpg_retrieval.service import RetrievalService
 
 
+_SEARCH_METADATA_FIELDS = (
+    "entryType",
+    "entryNameZh",
+    "entryNameEn",
+    "headingPath",
+    "page",
+    "pages",
+    "sourceKind",
+    "officialStatus",
+    "publicationDate",
+    "printing",
+    "supersedes",
+    "errataFor",
+    "clarifies",
+    "legacyParentId",
+)
+
+
 @dataclass(frozen=True)
 class LibraryManifest:
     id: str
@@ -54,7 +72,7 @@ class Library:
             self.service.repository.all(self.manifest.id),
             min(max(limit, 1), 20),
         )
-        return [hit.to_json() for hit in hits]
+        return [_search_hit_for_model(hit.to_json()) for hit in hits]
 
     def read(self, ids: list[str]) -> list[dict[str, Any]]:
         return [
@@ -124,3 +142,45 @@ def _read_manifest(path: Path) -> LibraryManifest:
         index_dir=(base / str(index_value)).resolve() if index_value else None,
         aliases=tuple(alias.strip() for alias in aliases_value),
     )
+
+
+def _search_hit_for_model(hit: dict[str, Any]) -> dict[str, Any]:
+    """Project retrieval internals to the small model-facing search contract."""
+    result = {
+        key: hit[key]
+        for key in (
+            "id",
+            "sourceId",
+            "sourceTitle",
+            "title",
+            "fullPath",
+            "version",
+            "excerpt",
+            "chunkId",
+            "chunkIndex",
+            "matchScore",
+            "score",
+            "parentScore",
+        )
+        if key in hit
+    }
+    metadata = hit.get("metadata")
+    if isinstance(metadata, dict):
+        projected = {
+            key: _bounded_metadata_value(metadata[key])
+            for key in _SEARCH_METADATA_FIELDS
+            if key in metadata
+        }
+        if projected:
+            result["metadata"] = projected
+    return result
+
+
+def _bounded_metadata_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return value[:500]
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    if isinstance(value, list):
+        return [_bounded_metadata_value(item) for item in value[:20] if not isinstance(item, dict)]
+    return str(value)[:500]
