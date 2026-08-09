@@ -49,13 +49,12 @@ TrpgRuleAgent 当前是一套面向少量可信用户的多游戏系统 Web 规�
   100% 覆盖后可计算）。答案级评测 MiMo 6/6 轮通过、事实正确率 100%、幻觉率 0%。
 - V2.2 Stage 1 近重复 Phase0 只读审计、安全否决信号与 Context/Token/Evidence/Latency
   指标/报告工具已落地；数据评审决定当前不进入 Phase1，见 `near-duplicate-retrieval.md` §9、
-  `observability.md` 与 `v2.2-stage1-review.md`。MiMo 6 轮真实指标基线已完成，usage 覆盖率 100%；
+  `observability.md`。MiMo 6 轮真实指标基线已完成，usage 覆盖率 100%；
   总延迟 mean/p95 为 57.35/75.24 秒，累计 prompt token mean/p95 为 78,332/147,689。
 - V2.2 Stage 3 第一阶段的同轮 ContextBudget 已完成：工具结果完整展示一次，后续决策只保留
   ID/引用回执；搜索候选剔除结构化全文等检索内部字段；History 与 Evidence 改为 token 预算。
   同一 PF1E/MiMo 6 轮发布门为 6/6，usage 覆盖率 100%；累计 prompt token mean/p95 降至
-  11,528/17,571，总延迟 mean 为 57.26 秒。滚动摘要仍暂缓，见
-  `v2.2-context-budget-review.md`。
+  11,528/17,571，总延迟 mean 为 57.26 秒。滚动摘要仍暂缓。
 - MiMo 已完成 4 组、6 轮 PF1E 真实问答验收；事实、来源和多轮追问均通过。按本轮决定未重复验收 Agnes 与 SenseNova。
 - 《夕妖晚谣》1.2 中文规则库已发布 154 个父文档、488 个检索子块。
 - 当前发布版本为 `20260801T105530Z`，包含 `GSS` 与 `Golden Sky Stories` 显式别名。

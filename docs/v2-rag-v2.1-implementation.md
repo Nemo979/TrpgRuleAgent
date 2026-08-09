@@ -83,7 +83,7 @@ Word 导出的 CHM 页面用 `<A name="章节名">` 锚点标记章节标题，a
   System/State/History/Evidence/Output Reserve、工具次数和阶段耗时，不记录正文。支持生成基线报告并与旧报告比较。
 - **真实 MiMo 指标基线**：6/6 轮通过、26 次调用 usage 覆盖率 100%；总延迟 mean/p95
   57.35/75.24 秒，累计 prompt token mean/p95 78,332/147,689。浏览器历史 p95 仅 83 token，
-  因此下一阶段优先控制同轮工具/决策上下文，不先做滚动摘要。完整评审见 `docs/v2.2-stage1-review.md`。
+  因此下一阶段优先控制同轮工具/决策上下文，不先做滚动摘要。当前结果见 `docs/observability.md`。
 
 ## release 环境核对
 
