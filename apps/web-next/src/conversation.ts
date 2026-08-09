@@ -79,7 +79,7 @@ export function isSameSourceRequest(
 
 export function hasLibraryRevisionMismatch(
   conversation: Pick<Conversation, "libraryId" | "libraryRevision">,
-  library: Pick<LibraryOption, "id" | "revision"> | null,
+  library: Pick<LibraryOption, "id" | "revision"> | null | undefined,
 ): boolean {
   return Boolean(
     library
