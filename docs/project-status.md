@@ -161,8 +161,8 @@ npx vitest run <test-file> --pool=forks --maxWorkers=1
 
 ## 尚未完成的重点
 
-> 本节是 backlog，不代表实施顺序。V2.2 的唯一总体优先级、阶段门和验收标准见
-> [V2.2 可行性与执行方案](v2.2-feasibility-plan.md)。
+> 本节是 backlog，不代表实施顺序。当前唯一总体优先级、阶段门和验收标准见
+> [V2.3 后续迭代执行方案](v2.3-iteration-plan.md)。
 
 1. 管理员规则上传与发布页面；目前只有命令行工作流。
 2. 同轮 ContextBudget 与工具结果压缩已完成。下一步先补长会话样本并验证 revision 失效边界；
