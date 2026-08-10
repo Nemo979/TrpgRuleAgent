@@ -1,10 +1,12 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from trpg_app.chat import (
     EvidenceBudget,
     ModelDecision,
     OpenAIModelGateway,
+    ToolLoopController,
     ToolInvocation,
     _answer_quality_issue,
     _missing_citation_suffix,
@@ -62,6 +64,51 @@ class EvidenceBudgetTest(unittest.TestCase):
         budget.consume_search()
         with self.assertRaisesRegex(ValueError, "安全上限"):
             budget.consume_search()
+
+    def test_topic_budget_reserves_capacity_for_unread_topics(self) -> None:
+        budget = EvidenceBudget(
+            max_documents=8,
+            max_evidence_characters=10_000,
+            max_evidence_tokens=1_000,
+            topic_allocations={"a": 0.45, "b": 0.45, "shared": 0.10},
+        )
+        documents = [
+            {"id": f"a-{index}", "content": "短证据"}
+            for index in range(8)
+        ]
+        topics = {document["id"]: "a" for document in documents}
+
+        accepted = budget.consume_documents(documents, topics)
+
+        self.assertEqual(len(accepted), 6)
+        self.assertIn("topic_document_limit", budget.last_skipped_reasons)
+        self.assertEqual(budget.topic_documents, {"a": 6})
+
+        follow_up = [
+            {"id": "b-1", "content": "另一侧证据"},
+            {"id": "shared-1", "content": "共同证据"},
+        ]
+        accepted = budget.consume_documents(
+            follow_up,
+            {"b-1": "b", "shared-1": "shared"},
+        )
+        self.assertEqual(len(accepted), 2)
+        self.assertEqual(budget.documents, 8)
+
+    def test_unread_candidates_round_robin_across_search_batches(self) -> None:
+        controller = ToolLoopController()
+        controller.result_batches = [
+            ["class-1", "class-2"],
+            ["feat-1", "feat-2"],
+            ["multiclass-1", "multiclass-2"],
+        ]
+
+        candidates = controller.unread_candidates({"feat-1"})
+
+        self.assertEqual(
+            candidates,
+            ["class-1", "multiclass-1", "class-2", "feat-2", "multiclass-2"],
+        )
 
     def test_appends_registered_citations_when_model_omits_them(self) -> None:
         self.assertEqual(
@@ -227,6 +274,88 @@ def tool_decision(*calls: ToolInvocation) -> ModelDecision:
             ],
         },
     )
+
+
+class CompareLibrary(FakeLibrary):
+    def search(self, query: str, limit: int):
+        self.search_queries.append(query)
+        if "防御式战斗" in query:
+            return [
+                {
+                    "id": "pf1e:defensive-fighting",
+                    "title": "防御式战斗",
+                    "excerpt": "攻击-4，AC+2",
+                }
+            ]
+        return [
+            {
+                "id": "pf1e:total-defense",
+                "title": "全防御",
+                "excerpt": "AC+4",
+            }
+        ]
+
+    def read(self, ids):
+        self.read_ids.append(list(ids))
+        documents = {
+            "pf1e:total-defense": {
+                "id": "pf1e:total-defense",
+                "title": "全防御",
+                "fullPath": "核心规则 > 战斗 > 全防御",
+                "content": "以标准动作令AC获得+4闪避加值。",
+                "metadata": {},
+            },
+            "pf1e:defensive-fighting": {
+                "id": "pf1e:defensive-fighting",
+                "title": "防御式战斗",
+                "fullPath": "核心规则 > 战斗 > 攻击",
+                "content": "攻击检定-4，AC获得+2闪避加值。",
+                "metadata": {},
+            },
+        }
+        return [documents[document_id] for document_id in ids if document_id in documents]
+
+
+class CompareCoverageGateway:
+    def __init__(self, _model):
+        self.step = 0
+
+    async def decide(self, messages, tools):
+        self.step += 1
+        calls = {
+            1: ToolInvocation("search-left", "search_rules", '{"query":"全防御"}'),
+            2: ToolInvocation(
+                "read-left", "read_rules", '{"ids":["pf1e:total-defense"]}'
+            ),
+            3: ToolInvocation("finish-early", "finish_answer", "{}"),
+            4: ToolInvocation(
+                "search-right", "search_rules", '{"query":"防御式战斗"}'
+            ),
+            5: ToolInvocation(
+                "read-right",
+                "read_rules",
+                '{"ids":["pf1e:defensive-fighting"]}',
+            ),
+        }
+        call = calls.get(
+            self.step,
+            ToolInvocation("finish-complete", "finish_answer", "{}"),
+        )
+        return tool_decision(call)
+
+    async def stream_answer(self, messages):
+        yield "全防御AC+4；防御式战斗攻击-4、AC+2。[S1][S2]"
+
+
+class ImmediateFinishGateway:
+    def __init__(self, _model):
+        pass
+
+    async def decide(self, messages, tools):
+        return tool_decision(ToolInvocation("finish-now", "finish_answer", "{}"))
+
+    async def stream_answer(self, messages):
+        yield "追问答案基于服务端恢复的规则证据。[S1]"
 
 
 class RepeatedSearchGateway:
@@ -567,6 +696,97 @@ class AlwaysRefusesGateway(FakeGateway):
 
 
 class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
+    async def test_dynamic_follow_up_recovers_evidence_before_immediate_finish(self) -> None:
+        library = FakeLibrary()
+        events = [
+            event
+            async for event in run_rule_turn(
+                model=self.model(),
+                library=library,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": "有双武器格斗专长且副手是轻型武器时，主手和副手各受多少减值？",
+                    },
+                    {"role": "assistant", "content": "有专长时主副手都是-2。"},
+                    {"role": "user", "content": "如果没有这个专长呢？"},
+                ],
+                gateway_factory=ImmediateFinishGateway,
+                enable_dynamic_evidence_budget=True,
+            )
+        ]
+
+        sources = next(event["sources"] for event in events if event["type"] == "sources")
+        self.assertEqual(len(sources), 1)
+        self.assertEqual(library.search_queries[0], "双武器格斗")
+        self.assertTrue(library.read_ids)
+
+    async def test_dynamic_follow_up_uses_intermediate_profile(self) -> None:
+        with patch("trpg_app.chat._log_turn_metrics") as log_metrics:
+            events = [
+                event
+                async for event in run_rule_turn(
+                    model=self.model(),
+                    library=FakeLibrary(),
+                    messages=[
+                        {"role": "user", "content": "双武器格斗的减值是多少？"},
+                        {"role": "assistant", "content": "有专长时主副手都是-2。"},
+                        {"role": "user", "content": "如果没有这个专长呢？"},
+                    ],
+                    gateway_factory=FakeGateway,
+                    enable_dynamic_evidence_budget=True,
+                )
+            ]
+
+        context = log_metrics.call_args.kwargs["context"]
+        self.assertEqual(context["evidencePolicyMaxSearches"], 5)
+        self.assertEqual(context["evidencePolicyMaxAnswerDocuments"], 6)
+        self.assertEqual(events[-1]["type"], "done")
+
+    async def test_dynamic_compare_defers_finish_until_both_sides_are_read(self) -> None:
+        library = CompareLibrary()
+        events = [
+            event
+            async for event in run_rule_turn(
+                model=self.model(),
+                library=library,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": "全防御和以标准动作进行防御式战斗有什么区别？",
+                    }
+                ],
+                gateway_factory=CompareCoverageGateway,
+                enable_dynamic_evidence_budget=True,
+            )
+        ]
+
+        self.assertEqual(library.search_queries, ["全防御", "防御式战斗"])
+        sources = next(event["sources"] for event in events if event["type"] == "sources")
+        self.assertEqual(len(sources), 2)
+        self.assertEqual(events[-1]["type"], "done")
+
+    async def test_dynamic_evidence_profile_is_applied_and_observable(self) -> None:
+        with patch("trpg_app.chat._log_turn_metrics") as log_metrics:
+            events = [
+                event
+                async for event in run_rule_turn(
+                    model=self.model(),
+                    library=FakeLibrary(),
+                    messages=[{"role": "user", "content": "借机攻击是什么"}],
+                    gateway_factory=FakeGateway,
+                    enable_dynamic_evidence_budget=True,
+                )
+            ]
+
+        context = log_metrics.call_args.kwargs["context"]
+        self.assertTrue(context["dynamicEvidenceBudgetEnabled"])
+        self.assertEqual(context["evidencePolicyVersion"], 2)
+        self.assertEqual(context["evidencePolicyMaxSearches"], 3)
+        self.assertEqual(context["evidencePolicyMaxAnswerDocuments"], 4)
+        self.assertEqual(context["evidencePolicyMaxTokens"], 12_000)
+        self.assertEqual(events[-1]["type"], "done")
+
     async def test_state_enriches_follow_up_search_and_final_prompt(self) -> None:
         library = FakeLibrary()
         events = [

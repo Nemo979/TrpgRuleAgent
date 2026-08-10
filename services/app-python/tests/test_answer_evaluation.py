@@ -27,9 +27,19 @@ class _ScriptedRunner:
         self.event_batches = list(event_batches)
         self.calls = 0
         self.messages = []
+        self.dynamic_flags = []
 
-    async def __call__(self, *, model, library, messages, request_id=None):
+    async def __call__(
+        self,
+        *,
+        model,
+        library,
+        messages,
+        request_id=None,
+        enable_dynamic_evidence_budget=False,
+    ):
         self.messages.append([dict(message) for message in messages])
+        self.dynamic_flags.append(enable_dynamic_evidence_budget)
         batch = self.event_batches[self.calls]
         self.calls += 1
         for event in batch:
@@ -58,6 +68,7 @@ class AnswerEvaluationTest(unittest.TestCase):
                                 "query": "减值是多少？",
                                 "relevantIds": ["parent"],
                                 "requiredAny": [["-2", "减2"]],
+                                "requiredSourceGroups": [["parent"], ["second"]],
                             }
                         ],
                     },
@@ -70,6 +81,10 @@ class AnswerEvaluationTest(unittest.TestCase):
             cases = load_cases(path)
 
         self.assertEqual(cases[0].turns[0].required_any, (("-2", "减2"),))
+        self.assertEqual(
+            cases[0].turns[0].required_source_groups,
+            (("parent",), ("second",)),
+        )
 
     def test_expands_compact_history_template(self) -> None:
         history = expand_history(
@@ -121,6 +136,38 @@ class AnswerEvaluationTest(unittest.TestCase):
         self.assertEqual(grade["missingRequiredAny"], [["60"]])
         self.assertFalse(grade["sourceMatch"])
 
+    def test_requires_each_source_group_for_multi_topic_cases(self) -> None:
+        turn = AnswerTurn(
+            "比较",
+            ("left", "right"),
+            (("区别",),),
+            (("left",), ("right", "right-parent")),
+        )
+
+        incomplete = grade_turn(
+            "区别如下。",
+            [{"documentId": "left", "metadata": {}}],
+            turn,
+        )
+        complete = grade_turn(
+            "区别如下。",
+            [
+                {"documentId": "left", "metadata": {}},
+                {
+                    "documentId": "right:section",
+                    "metadata": {"legacyParentId": "right-parent"},
+                },
+            ],
+            turn,
+        )
+
+        self.assertFalse(incomplete["passed"])
+        self.assertEqual(
+            incomplete["missingSourceGroups"],
+            [["right", "right-parent"]],
+        )
+        self.assertTrue(complete["passed"])
+
     def test_normalizes_fact_matching_across_dash_variants(self) -> None:
         turn = AnswerTurn("问题", ("parent",), (("-2", "减2"),))
         grade = grade_turn(
@@ -170,6 +217,30 @@ class AnswerEvaluationTest(unittest.TestCase):
         self.assertEqual(turn["toolCalls"], 2)
         self.assertTrue(turn["withinBudget"])
         self.assertEqual(report["toolCallTotal"], 2)
+
+    def test_evaluate_forwards_dynamic_evidence_flag(self) -> None:
+        cases = [AnswerCase("c1", (AnswerTurn("q", ("p",), (("x",),)),))]
+        runner = _ScriptedRunner(
+            [
+                [
+                    {"type": "text_delta", "delta": "x"},
+                    {"type": "sources", "sources": [{"documentId": "p"}]},
+                    {"type": "done"},
+                ]
+            ]
+        )
+        with patch("trpg_app.answer_evaluation.run_rule_turn", new=runner):
+            report = asyncio.run(
+                evaluate_model(
+                    _FakeModel(),
+                    _FakeLibrary(),
+                    cases,
+                    enable_dynamic_evidence_budget=True,
+                )
+            )
+
+        self.assertEqual(runner.dynamic_flags, [True])
+        self.assertTrue(report["dynamicEvidenceBudget"])
 
     def test_evaluate_flags_budget_overrun(self) -> None:
         cases = [AnswerCase("c1", (AnswerTurn("q", ("p",), (("x",),)),))]
