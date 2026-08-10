@@ -4,6 +4,7 @@ library_root: data/libraries
 cookie_secure: false
 session_ttl_seconds: 86400
 max_concurrent_turns: 2
+enable_dynamic_evidence_budget: false
 
 models:
   - id: local-mock

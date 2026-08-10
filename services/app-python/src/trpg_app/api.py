@@ -157,6 +157,9 @@ def create_app(
                         messages=[item.model_dump() for item in payload.messages],
                         gateway_factory=gateway_factory,
                         request_id=request_id,
+                        enable_dynamic_evidence_budget=(
+                            config.enable_dynamic_evidence_budget
+                        ),
                     ):
                         yield _sse(event)
                 except Exception as error:

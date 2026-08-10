@@ -165,6 +165,7 @@ class AnswerTurn:
     query: str
     relevant_ids: tuple[str, ...]
     required_any: tuple[tuple[str, ...], ...]
+    required_source_groups: tuple[tuple[str, ...], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -236,15 +237,22 @@ def load_cases(path: Path) -> list[AnswerCase]:
                 raise ValueError(f"invalid answer case at line {line_number}")
             turns: list[AnswerTurn] = []
             for turn in turns_value:
+                if not isinstance(turn, dict):
+                    raise ValueError(f"invalid answer turn at line {line_number}")
                 required = turn.get("requiredAny", [])
                 relevant = turn.get("relevantIds", [])
+                source_groups = turn.get("requiredSourceGroups", [])
                 if (
-                    not isinstance(turn, dict)
-                    or not turn.get("query")
+                    not turn.get("query")
                     or not isinstance(required, list)
                     or not required
                     or not isinstance(relevant, list)
                     or not relevant
+                    or not isinstance(source_groups, list)
+                    or any(
+                        not isinstance(group, list) or not group
+                        for group in source_groups
+                    )
                 ):
                     raise ValueError(f"invalid answer turn at line {line_number}")
                 turns.append(
@@ -255,6 +263,10 @@ def load_cases(path: Path) -> list[AnswerCase]:
                             tuple(str(option) for option in group)
                             for group in required
                             if isinstance(group, list) and group
+                        ),
+                        required_source_groups=tuple(
+                            tuple(str(document_id) for document_id in group)
+                            for group in source_groups
                         ),
                     )
                 )
@@ -284,17 +296,32 @@ def grade_turn(
         for group in turn.required_any
         if not any(_normalize(option) in normalized_answer for option in group)
     ]
-    relevant = set(turn.relevant_ids)
-    source_match = any(
-        str(source.get("documentId", "")) in relevant
-        or str(source.get("metadata", {}).get("legacyParentId", "")) in relevant
+    source_ids = {
+        source_id
         for source in sources
         if isinstance(source, dict)
+        for source_id in (
+            str(source.get("documentId", "")),
+            str(source.get("metadata", {}).get("legacyParentId", "")),
+        )
+        if source_id
+    }
+    relevant = set(turn.relevant_ids)
+    missing_source_groups = [
+        list(group)
+        for group in turn.required_source_groups
+        if not source_ids.intersection(group)
+    ]
+    source_match = (
+        not missing_source_groups
+        if turn.required_source_groups
+        else bool(source_ids.intersection(relevant))
     )
     passed = error is None and bool(answer.strip()) and not missing and source_match
     return {
         "passed": passed,
         "missingRequiredAny": missing,
+        "missingSourceGroups": missing_source_groups,
         "sourceMatch": source_match,
         "error": error,
     }
@@ -306,6 +333,7 @@ async def evaluate_model(
     cases: Sequence[AnswerCase],
     judge: AnswerJudge | None = None,
     reference_map: dict[str, str] | None = None,
+    enable_dynamic_evidence_budget: bool = False,
 ) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     passed_turns = 0
@@ -322,13 +350,16 @@ async def evaluate_model(
             statuses: list[str] = []
             tool_calls = 0
             try:
+                turn_options: dict[str, Any] = {
+                    "model": model,
+                    "library": library,
+                    "messages": messages,
+                    "request_id": f"eval-{model.id}-{case.id}-{turn_index}",
+                }
+                if enable_dynamic_evidence_budget:
+                    turn_options["enable_dynamic_evidence_budget"] = True
                 async with asyncio.timeout(model.request_timeout_seconds):
-                    async for event in run_rule_turn(
-                        model=model,
-                        library=library,
-                        messages=messages,
-                        request_id=f"eval-{model.id}-{case.id}-{turn_index}",
-                    ):
+                    async for event in run_rule_turn(**turn_options):
                         event_type = event.get("type")
                         if event_type == "text_delta":
                             answer_parts.append(str(event.get("delta", "")))
@@ -421,6 +452,7 @@ async def evaluate_model(
     hallucinated = sum(1 for row in judged_rows if row.get("hallucinationFree") is False)
     return {
         "modelId": model.id,
+        "dynamicEvidenceBudget": enable_dynamic_evidence_budget,
         "caseCount": len(cases),
         "turnCount": turn_count,
         "passedTurns": passed_turns,
@@ -458,6 +490,11 @@ def parse_args() -> argparse.Namespace:
         help="Configured model ID to use as an LLM judge (optional; factual/consistency check)",
     )
     parser.add_argument("--report", type=Path, required=True)
+    parser.add_argument(
+        "--dynamic-evidence-budget",
+        action="store_true",
+        help="Enable the deterministic Stage 1 evidence policy for this run",
+    )
     return parser.parse_args()
 
 
@@ -492,7 +529,12 @@ async def async_main() -> None:
     for model in models:
         print(f"Evaluating {model.id}...", flush=True)
         report = await evaluate_model(
-            model, library, cases, judge=judge, reference_map=reference_map
+            model,
+            library,
+            cases,
+            judge=judge,
+            reference_map=reference_map,
+            enable_dynamic_evidence_budget=args.dynamic_evidence_budget,
         )
         reports.append(report)
         print(

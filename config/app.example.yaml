@@ -4,6 +4,7 @@ library_root: data/libraries
 cookie_secure: true
 session_ttl_seconds: 604800
 max_concurrent_turns: 5
+enable_dynamic_evidence_budget: false
 
 models:
   - id: deepseek-v4-flash

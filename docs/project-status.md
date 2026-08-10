@@ -1,6 +1,6 @@
 # TrpgRuleAgent 项目现状
 
-更新时间：2026-08-09
+更新时间：2026-08-10
 
 本文档用于记录当前实现状态、架构边界和后续迭代重点。后续开发前应先阅读本文，并同步更新其中的状态。
 
@@ -60,6 +60,11 @@ TrpgRuleAgent 当前是一套面向少量可信用户的多游戏系统 Web 规�
   48 轮合成历史在确定性预算探针中为 726 token。经明确授权，真实 MiMo 长历史答案基线也已
   完成：3/3 轮通过、来源命中 3/3、无依据率 0%，工具调用总数 7、单轮最多 3；真实 Context
   记录的 History 为 222/391/737 token，三轮均未裁剪。Stage 0 发布门已满足，数据不支持启动 Summary。
+- V2.3 Stage 1 已完成：动态 Evidence Policy、默认关闭的 Feature Flag、Compare/Build 多主题
+  配额保护、指代追问恢复、`requiredSourceGroups` 专项评分和安全指标已落地。PF1E 85/30 题与
+  GSS 22 题检索保持原基线；经明确授权，MiMo 固定/动态专项均为 5/5，动态 PF1E 回归为
+  6/6、来源 100%、无依据率 0%。动态 6 轮 prompt token mean 10,924.5、总延迟 mean
+  40.12 秒，未超过固定基线 11,528/57.26 秒。Feature Flag 继续默认关闭，等待发布流程决策。
 - MiMo 已完成 4 组、6 轮 PF1E 真实问答验收；事实、来源和多轮追问均通过。按本轮决定未重复验收 Agnes 与 SenseNova。
 - 《夕妖晚谣》1.2 中文规则库已发布 154 个父文档、488 个检索子块。
 - 当前发布版本为 `20260801T105530Z`，包含 `GSS` 与 `Golden Sky Stories` 显式别名。
@@ -71,7 +76,7 @@ TrpgRuleAgent 当前是一套面向少量可信用户的多游戏系统 Web 规�
 ### V1 稳定性验收
 
 - TypeScript/Vitest：27 个测试文件、264 项测试通过。
-- Python 应用服务：111 项测试通过。
+- Python 应用服务：130 项测试通过。
 - Python 检索服务：64 项测试通过。
 - 全仓 TypeScript 类型检查和 Web 生产构建通过。
 - 三个真实模型均完成 PF1E 和《夕妖晚谣》检索、回答、来源和结束事件验收。
@@ -173,7 +178,8 @@ npx vitest run <test-file> --pool=forks --maxWorkers=1
 2. 同轮 ContextBudget 与工具结果压缩已完成；长会话/revision 确定性评测和真实 MiMo 长历史
    答案基线均已通过。上下文摘要仍未实现；当前最长 48 轮样本仅 737 History token 且未裁剪，
    不满足 Summary 启动条件。
-3. 动态检索预算；当前搜索、读取和证据字符上限仍是固定安全值。
+3. 动态 Evidence Budget Stage 1 已完成并通过真实 MiMo A/B 与发布门；Feature Flag 仍默认关闭，
+   下一步按 Stage 2 进入受限多问题拆解与路由，不在本阶段直接启用通用 Planner。
 4. 答案级评测（已落地，见 `services/app-python/src/trpg_app/answer_evaluation.py` 与 `docs/answer-evaluation.md`）：事实点(`requiredAny`)、引用支持度(`source_match`)、工具预算(`toolCalls`/`withinBudget`)、无依据结论率(`unsupportedRate`)、**LLM-judge 事实正确性/幻觉(`factualCorrect`/`hallucinationFree`, 经 `--judge-model`)** 五项指标 + 多轮/错误/超时/judge 容错 + 单测。PF1E 已有 v2.0/v2.1 真实金标题集。前端仍保留 Agnes/SenseNova 可选，并将 MiMo 设为新对话默认模型；**Agnes / SenseNova 明确不在本轮评测范围**。待补：GSS 的真实金标题集。
 5. 检索质量：结构化切块、重排器和剩余漏召回题优化。V2.2 Stage 0 已修复锚点章节切分（CRB 战斗规则 10 子章节恢复）与 table 策略页正文丢失（overview 兜底），候选重建为 7140 文档、质量门通过；85/30 题相关 ID 100% 覆盖，检索基线待确认。
 6. PDF/CHM 图片、扫描件 OCR 和复杂表格理解。
