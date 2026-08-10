@@ -165,12 +165,64 @@ class AnswerTurn:
     query: str
     relevant_ids: tuple[str, ...]
     required_any: tuple[tuple[str, ...], ...]
+    required_source_groups: tuple[tuple[str, ...], ...] = ()
 
 
 @dataclass(frozen=True)
 class AnswerCase:
     id: str
     turns: tuple[AnswerTurn, ...]
+    history: tuple[dict[str, str], ...] = ()
+
+
+def expand_history(value: Any, line_number: int = 0) -> tuple[dict[str, str], ...]:
+    """Expand explicit messages or a compact synthetic turn template."""
+    if value is None:
+        return ()
+    if isinstance(value, list):
+        messages = value
+    elif isinstance(value, dict):
+        turn_count = value.get("turnCount")
+        filler_user = value.get("fillerUser")
+        filler_assistant = value.get("fillerAssistant")
+        events_value = value.get("events", [])
+        if (
+            not isinstance(turn_count, int)
+            or not 1 <= turn_count <= 128
+            or not isinstance(filler_user, str)
+            or not isinstance(filler_assistant, str)
+            or not isinstance(events_value, list)
+        ):
+            raise ValueError(f"invalid history template at line {line_number}")
+        events: dict[int, dict[str, Any]] = {}
+        for event in events_value:
+            if not isinstance(event, dict) or not isinstance(event.get("turn"), int):
+                raise ValueError(f"invalid history event at line {line_number}")
+            turn = int(event["turn"])
+            if not 1 <= turn <= turn_count or turn in events:
+                raise ValueError(f"invalid history event turn at line {line_number}")
+            events[turn] = event
+        messages = []
+        for turn in range(1, turn_count + 1):
+            event = events.get(turn, {})
+            messages.extend(
+                [
+                    {"role": "user", "content": event.get("user", filler_user)},
+                    {"role": "assistant", "content": event.get("assistant", filler_assistant)},
+                ]
+            )
+    else:
+        raise ValueError(f"invalid answer history at line {line_number}")
+    normalized: list[dict[str, str]] = []
+    for message in messages:
+        if (
+            not isinstance(message, dict)
+            or message.get("role") not in {"user", "assistant"}
+            or not isinstance(message.get("content"), str)
+        ):
+            raise ValueError(f"invalid answer history message at line {line_number}")
+        normalized.append({"role": str(message["role"]), "content": str(message["content"])})
+    return tuple(normalized)
 
 
 def load_cases(path: Path) -> list[AnswerCase]:
@@ -185,15 +237,22 @@ def load_cases(path: Path) -> list[AnswerCase]:
                 raise ValueError(f"invalid answer case at line {line_number}")
             turns: list[AnswerTurn] = []
             for turn in turns_value:
+                if not isinstance(turn, dict):
+                    raise ValueError(f"invalid answer turn at line {line_number}")
                 required = turn.get("requiredAny", [])
                 relevant = turn.get("relevantIds", [])
+                source_groups = turn.get("requiredSourceGroups", [])
                 if (
-                    not isinstance(turn, dict)
-                    or not turn.get("query")
+                    not turn.get("query")
                     or not isinstance(required, list)
                     or not required
                     or not isinstance(relevant, list)
                     or not relevant
+                    or not isinstance(source_groups, list)
+                    or any(
+                        not isinstance(group, list) or not group
+                        for group in source_groups
+                    )
                 ):
                     raise ValueError(f"invalid answer turn at line {line_number}")
                 turns.append(
@@ -205,11 +264,21 @@ def load_cases(path: Path) -> list[AnswerCase]:
                             for group in required
                             if isinstance(group, list) and group
                         ),
+                        required_source_groups=tuple(
+                            tuple(str(document_id) for document_id in group)
+                            for group in source_groups
+                        ),
                     )
                 )
             if any(not turn.required_any for turn in turns):
                 raise ValueError(f"empty requiredAny group at line {line_number}")
-            cases.append(AnswerCase(str(value["id"]), tuple(turns)))
+            cases.append(
+                AnswerCase(
+                    str(value["id"]),
+                    tuple(turns),
+                    expand_history(value.get("history"), line_number),
+                )
+            )
     if not cases:
         raise ValueError("answer evaluation set is empty")
     return cases
@@ -227,17 +296,32 @@ def grade_turn(
         for group in turn.required_any
         if not any(_normalize(option) in normalized_answer for option in group)
     ]
-    relevant = set(turn.relevant_ids)
-    source_match = any(
-        str(source.get("documentId", "")) in relevant
-        or str(source.get("metadata", {}).get("legacyParentId", "")) in relevant
+    source_ids = {
+        source_id
         for source in sources
         if isinstance(source, dict)
+        for source_id in (
+            str(source.get("documentId", "")),
+            str(source.get("metadata", {}).get("legacyParentId", "")),
+        )
+        if source_id
+    }
+    relevant = set(turn.relevant_ids)
+    missing_source_groups = [
+        list(group)
+        for group in turn.required_source_groups
+        if not source_ids.intersection(group)
+    ]
+    source_match = (
+        not missing_source_groups
+        if turn.required_source_groups
+        else bool(source_ids.intersection(relevant))
     )
     passed = error is None and bool(answer.strip()) and not missing and source_match
     return {
         "passed": passed,
         "missingRequiredAny": missing,
+        "missingSourceGroups": missing_source_groups,
         "sourceMatch": source_match,
         "error": error,
     }
@@ -249,12 +333,13 @@ async def evaluate_model(
     cases: Sequence[AnswerCase],
     judge: AnswerJudge | None = None,
     reference_map: dict[str, str] | None = None,
+    enable_dynamic_evidence_budget: bool = False,
 ) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     passed_turns = 0
     turn_count = 0
     for case in cases:
-        messages: list[dict[str, str]] = []
+        messages: list[dict[str, str]] = [dict(message) for message in case.history]
         case_rows: list[dict[str, Any]] = []
         for turn_index, turn in enumerate(case.turns, start=1):
             turn_count += 1
@@ -265,13 +350,16 @@ async def evaluate_model(
             statuses: list[str] = []
             tool_calls = 0
             try:
+                turn_options: dict[str, Any] = {
+                    "model": model,
+                    "library": library,
+                    "messages": messages,
+                    "request_id": f"eval-{model.id}-{case.id}-{turn_index}",
+                }
+                if enable_dynamic_evidence_budget:
+                    turn_options["enable_dynamic_evidence_budget"] = True
                 async with asyncio.timeout(model.request_timeout_seconds):
-                    async for event in run_rule_turn(
-                        model=model,
-                        library=library,
-                        messages=messages,
-                        request_id=f"eval-{model.id}-{case.id}-{turn_index}",
-                    ):
+                    async for event in run_rule_turn(**turn_options):
                         event_type = event.get("type")
                         if event_type == "text_delta":
                             answer_parts.append(str(event.get("delta", "")))
@@ -346,6 +434,7 @@ async def evaluate_model(
         rows.append(
             {
                 "id": case.id,
+                "historyMessages": len(case.history),
                 "passed": len(case_rows) == len(case.turns)
                 and all(row["passed"] for row in case_rows),
                 "turns": case_rows,
@@ -363,6 +452,7 @@ async def evaluate_model(
     hallucinated = sum(1 for row in judged_rows if row.get("hallucinationFree") is False)
     return {
         "modelId": model.id,
+        "dynamicEvidenceBudget": enable_dynamic_evidence_budget,
         "caseCount": len(cases),
         "turnCount": turn_count,
         "passedTurns": passed_turns,
@@ -400,6 +490,11 @@ def parse_args() -> argparse.Namespace:
         help="Configured model ID to use as an LLM judge (optional; factual/consistency check)",
     )
     parser.add_argument("--report", type=Path, required=True)
+    parser.add_argument(
+        "--dynamic-evidence-budget",
+        action="store_true",
+        help="Enable the deterministic Stage 1 evidence policy for this run",
+    )
     return parser.parse_args()
 
 
@@ -434,7 +529,12 @@ async def async_main() -> None:
     for model in models:
         print(f"Evaluating {model.id}...", flush=True)
         report = await evaluate_model(
-            model, library, cases, judge=judge, reference_map=reference_map
+            model,
+            library,
+            cases,
+            judge=judge,
+            reference_map=reference_map,
+            enable_dynamic_evidence_budget=args.dynamic_evidence_budget,
         )
         reports.append(report)
         print(

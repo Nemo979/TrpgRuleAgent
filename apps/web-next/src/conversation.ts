@@ -76,3 +76,14 @@ export function isSameSourceRequest(
     && current.libraryId === request.libraryId
   );
 }
+
+export function hasLibraryRevisionMismatch(
+  conversation: Pick<Conversation, "libraryId" | "libraryRevision">,
+  library: Pick<LibraryOption, "id" | "revision"> | null | undefined,
+): boolean {
+  return Boolean(
+    library
+    && conversation.libraryId === library.id
+    && conversation.libraryRevision !== library.revision
+  );
+}

@@ -13,6 +13,7 @@ from trpg_app.answer_evaluation import (
     _parse_judge_response,
     build_reference,
     evaluate_model,
+    expand_history,
     grade_turn,
     load_cases,
     load_document_texts,
@@ -25,8 +26,20 @@ class _ScriptedRunner:
     def __init__(self, event_batches):
         self.event_batches = list(event_batches)
         self.calls = 0
+        self.messages = []
+        self.dynamic_flags = []
 
-    async def __call__(self, *, model, library, messages, request_id=None):
+    async def __call__(
+        self,
+        *,
+        model,
+        library,
+        messages,
+        request_id=None,
+        enable_dynamic_evidence_budget=False,
+    ):
+        self.messages.append([dict(message) for message in messages])
+        self.dynamic_flags.append(enable_dynamic_evidence_budget)
         batch = self.event_batches[self.calls]
         self.calls += 1
         for event in batch:
@@ -55,6 +68,7 @@ class AnswerEvaluationTest(unittest.TestCase):
                                 "query": "减值是多少？",
                                 "relevantIds": ["parent"],
                                 "requiredAny": [["-2", "减2"]],
+                                "requiredSourceGroups": [["parent"], ["second"]],
                             }
                         ],
                     },
@@ -67,6 +81,35 @@ class AnswerEvaluationTest(unittest.TestCase):
             cases = load_cases(path)
 
         self.assertEqual(cases[0].turns[0].required_any, (("-2", "减2"),))
+        self.assertEqual(
+            cases[0].turns[0].required_source_groups,
+            (("parent",), ("second",)),
+        )
+
+    def test_expands_compact_history_template(self) -> None:
+        history = expand_history(
+            {
+                "turnCount": 3,
+                "fillerUser": "普通问题",
+                "fillerAssistant": "普通回答",
+                "events": [{"turn": 1, "user": "5级法师"}],
+            }
+        )
+
+        self.assertEqual(len(history), 6)
+        self.assertEqual(history[0], {"role": "user", "content": "5级法师"})
+        self.assertEqual(history[-1], {"role": "assistant", "content": "普通回答"})
+
+    def test_rejects_invalid_history_template(self) -> None:
+        with self.assertRaises(ValueError):
+            expand_history(
+                {
+                    "turnCount": 2,
+                    "fillerUser": "u",
+                    "fillerAssistant": "a",
+                    "events": [{"turn": 3, "user": "outside"}],
+                }
+            )
 
     def test_grades_facts_and_legacy_parent_source(self) -> None:
         turn = AnswerTurn("问题", ("parent",), (("-2", "减2"), ("副手",)))
@@ -92,6 +135,38 @@ class AnswerEvaluationTest(unittest.TestCase):
         self.assertFalse(grade["passed"])
         self.assertEqual(grade["missingRequiredAny"], [["60"]])
         self.assertFalse(grade["sourceMatch"])
+
+    def test_requires_each_source_group_for_multi_topic_cases(self) -> None:
+        turn = AnswerTurn(
+            "比较",
+            ("left", "right"),
+            (("区别",),),
+            (("left",), ("right", "right-parent")),
+        )
+
+        incomplete = grade_turn(
+            "区别如下。",
+            [{"documentId": "left", "metadata": {}}],
+            turn,
+        )
+        complete = grade_turn(
+            "区别如下。",
+            [
+                {"documentId": "left", "metadata": {}},
+                {
+                    "documentId": "right:section",
+                    "metadata": {"legacyParentId": "right-parent"},
+                },
+            ],
+            turn,
+        )
+
+        self.assertFalse(incomplete["passed"])
+        self.assertEqual(
+            incomplete["missingSourceGroups"],
+            [["right", "right-parent"]],
+        )
+        self.assertTrue(complete["passed"])
 
     def test_normalizes_fact_matching_across_dash_variants(self) -> None:
         turn = AnswerTurn("问题", ("parent",), (("-2", "减2"),))
@@ -142,6 +217,30 @@ class AnswerEvaluationTest(unittest.TestCase):
         self.assertEqual(turn["toolCalls"], 2)
         self.assertTrue(turn["withinBudget"])
         self.assertEqual(report["toolCallTotal"], 2)
+
+    def test_evaluate_forwards_dynamic_evidence_flag(self) -> None:
+        cases = [AnswerCase("c1", (AnswerTurn("q", ("p",), (("x",),)),))]
+        runner = _ScriptedRunner(
+            [
+                [
+                    {"type": "text_delta", "delta": "x"},
+                    {"type": "sources", "sources": [{"documentId": "p"}]},
+                    {"type": "done"},
+                ]
+            ]
+        )
+        with patch("trpg_app.answer_evaluation.run_rule_turn", new=runner):
+            report = asyncio.run(
+                evaluate_model(
+                    _FakeModel(),
+                    _FakeLibrary(),
+                    cases,
+                    enable_dynamic_evidence_budget=True,
+                )
+            )
+
+        self.assertEqual(runner.dynamic_flags, [True])
+        self.assertTrue(report["dynamicEvidenceBudget"])
 
     def test_evaluate_flags_budget_overrun(self) -> None:
         cases = [AnswerCase("c1", (AnswerTurn("q", ("p",), (("x",),)),))]
@@ -220,6 +319,25 @@ class AnswerEvaluationTest(unittest.TestCase):
 
         self.assertEqual(report["turnCount"], 2)
         self.assertEqual(report["passedTurns"], 2)
+
+    def test_evaluate_prepends_case_history_without_reporting_content(self) -> None:
+        case = AnswerCase(
+            "history-case",
+            (AnswerTurn("现在呢？", ("p",), (("-2",),)),),
+            ({"role": "user", "content": "我选择混血术士作为职业"},),
+        )
+        events = [
+            {"type": "text_delta", "delta": "-2"},
+            {"type": "sources", "sources": [{"documentId": "p"}]},
+            {"type": "done"},
+        ]
+        runner = _ScriptedRunner([events])
+        with patch("trpg_app.answer_evaluation.run_rule_turn", new=runner):
+            report = asyncio.run(evaluate_model(_FakeModel(), _FakeLibrary(), [case]))
+
+        self.assertEqual(runner.messages[0][0]["content"], "我选择混血术士作为职业")
+        self.assertEqual(report["cases"][0]["historyMessages"], 1)
+        self.assertNotIn("我选择混血术士作为职业", json.dumps(report, ensure_ascii=False))
 
     def test_evaluate_skips_judge_when_none(self) -> None:
         cases = [AnswerCase("c1", (AnswerTurn("q", ("p",), (("x",),)),))]

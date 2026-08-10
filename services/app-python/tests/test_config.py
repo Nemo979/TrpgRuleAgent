@@ -38,10 +38,22 @@ class AppConfigTest(unittest.TestCase):
                 return load_config(path)
 
     def test_loads_model_reliability_settings(self) -> None:
-        model = self.load().models[0]
+        config = self.load()
+        model = config.models[0]
 
         self.assertEqual(model.request_timeout_seconds, 45)
         self.assertEqual(model.max_retries, 2)
+        self.assertFalse(config.enable_dynamic_evidence_budget)
+
+    def test_loads_dynamic_evidence_budget_feature_flag(self) -> None:
+        config = self.load(
+            BASE_CONFIG.replace(
+                "library_root: data/libraries",
+                "library_root: data/libraries\nenable_dynamic_evidence_budget: true",
+            )
+        )
+
+        self.assertTrue(config.enable_dynamic_evidence_budget)
 
     def test_rejects_unbounded_retry_count(self) -> None:
         with self.assertRaisesRegex(ValueError, "max_retries"):
@@ -53,6 +65,15 @@ class AppConfigTest(unittest.TestCase):
                 BASE_CONFIG.replace(
                     "request_timeout_seconds: 45",
                     "request_timeout_seconds: 0",
+                )
+            )
+
+    def test_rejects_string_feature_flag(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must be a boolean"):
+            self.load(
+                BASE_CONFIG.replace(
+                    "library_root: data/libraries",
+                    'library_root: data/libraries\nenable_dynamic_evidence_budget: "false"',
                 )
             )
 

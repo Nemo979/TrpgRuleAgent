@@ -23,6 +23,10 @@ def record(total_seconds: float, total_tokens: int, *, intent: str = "rule_fact"
             "systemTokens": 20,
             "outputReserveTokens": 1000,
             "finalAnswerTokens": 40,
+            "evidencePolicyMaxSearches": 3,
+            "evidencePolicyMaxAnswerDocuments": 4,
+            "evidencePolicyMaxTokens": 12000,
+            "evidencePolicyUsedTopics": 2,
         },
         "usage": {
             "promptTokens": total_tokens - 20,
@@ -41,13 +45,20 @@ def record(total_seconds: float, total_tokens: int, *, intent: str = "rule_fact"
 
 class ObservabilityReportTest(unittest.TestCase):
     def test_aggregates_dimensions_percentiles_and_usage_coverage(self) -> None:
-        report = aggregate([record(3.0, 100), record(5.0, 140, intent="procedure")])
+        truncated = record(5.0, 140, intent="procedure")
+        truncated["dropped_messages"] = 2
+        report = aggregate([record(3.0, 100), truncated])
 
         self.assertEqual(report["turnCount"], 2)
         self.assertEqual(report["dimensions"]["intent"], {"procedure": 1, "rule_fact": 1})
         self.assertEqual(report["metrics"]["latency.totalSeconds"]["mean"], 4.0)
         self.assertEqual(report["metrics"]["usage.totalTokens"]["p95"], 140.0)
         self.assertEqual(report["usageCoverage"]["reportedRate"], 1.0)
+        self.assertEqual(report["derivedRates"]["contextTruncationRate"], 0.5)
+        self.assertEqual(report["metrics"]["policy.maxSearches"]["mean"], 3.0)
+        self.assertEqual(
+            report["metrics"]["policy.maxAnswerDocuments"]["mean"], 4.0
+        )
 
     def test_compares_current_report_to_baseline(self) -> None:
         baseline = aggregate([record(3.0, 100)])

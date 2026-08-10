@@ -39,6 +39,7 @@ class AppConfig:
     cookie_secure: bool = True
     session_ttl_seconds: int = 7 * 24 * 60 * 60
     max_concurrent_turns: int = 5
+    enable_dynamic_evidence_budget: bool = False
 
 
 def load_config(path: Path | None = None) -> AppConfig:
@@ -100,6 +101,9 @@ def load_config(path: Path | None = None) -> AppConfig:
         cookie_secure=bool(raw.get("cookie_secure", True)),
         session_ttl_seconds=int(raw.get("session_ttl_seconds", 7 * 24 * 60 * 60)),
         max_concurrent_turns=int(raw.get("max_concurrent_turns", 5)),
+        enable_dynamic_evidence_budget=_optional_bool(
+            raw, "enable_dynamic_evidence_budget", False
+        ),
     )
 
 
@@ -108,6 +112,13 @@ def _required_env(name: str) -> str:
     if not value:
         raise ValueError(f"required environment variable is missing: {name}")
     return value
+
+
+def _optional_bool(value: dict[str, Any], key: str, default: bool) -> bool:
+    result = value.get(key, default)
+    if not isinstance(result, bool):
+        raise ValueError(f"{key} must be a boolean")
+    return result
 
 
 def _required_string(value: dict[str, Any], key: str, index: int) -> str:

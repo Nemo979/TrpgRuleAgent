@@ -14,6 +14,7 @@ from openai import AsyncOpenAI
 from .config import ModelConfig
 from .context_budget import ContextBudget
 from .conversation_state import ConversationState
+from .evidence_policy import EvidenceBudgetPolicy, EvidenceBudgetProfile
 from .libraries import Library
 from .observability import (
     TurnPhaseTimer,
@@ -23,7 +24,7 @@ from .observability import (
     log_turn_metrics,
     summarize_messages,
 )
-from .query_intent import QueryIntent, build_query_plan, classify_intent
+from .query_intent import QueryIntent, QueryPlan, build_query_plan, classify_intent
 
 
 logger = logging.getLogger("uvicorn.error")
@@ -281,13 +282,20 @@ class EvidenceBudget:
     evidence_tokens: int = 0
     skipped_documents: int = 0
     last_skipped_reasons: list[str] = field(default_factory=list)
+    topic_allocations: dict[str, float] = field(default_factory=dict)
+    topic_documents: dict[str, int] = field(default_factory=dict)
+    topic_tokens: dict[str, int] = field(default_factory=dict)
 
     def consume_search(self) -> None:
         if self.searches >= self.max_searches:
             raise ValueError("检索已达到本轮安全上限")
         self.searches += 1
 
-    def consume_documents(self, documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def consume_documents(
+        self,
+        documents: list[dict[str, Any]],
+        document_topics: dict[str, str] | None = None,
+    ) -> list[dict[str, Any]]:
         """Admit readable evidence one document at a time.
 
         A single oversized document must not discard smaller documents in the
@@ -295,6 +303,8 @@ class EvidenceBudget:
         decide whether an entirely rejected batch should stop the loop.
         """
         accepted: list[dict[str, Any]] = []
+        accepted_topics: dict[str, int] = {}
+        accepted_topic_tokens: dict[str, int] = {}
         self.last_skipped_reasons = []
         for document in documents:
             if self.documents + len(accepted) >= self.max_documents:
@@ -302,6 +312,45 @@ class EvidenceBudget:
                 continue
             characters = len(str(document.get("content", "")))
             tokens = estimate_tokens(str(document.get("content", "")))
+            topic = (document_topics or {}).get(str(document.get("id", "")), "")
+            if topic in self.topic_allocations:
+                other_unfilled = sum(
+                    1
+                    for other in self.topic_allocations
+                    if other != topic
+                    and self.topic_documents.get(other, 0)
+                    + accepted_topics.get(other, 0)
+                    == 0
+                )
+                topic_document_limit = max(1, self.max_documents - other_unfilled)
+                if (
+                    self.topic_documents.get(topic, 0)
+                    + accepted_topics.get(topic, 0)
+                    >= topic_document_limit
+                ):
+                    self.last_skipped_reasons.append("topic_document_limit")
+                    continue
+                recyclable_tokens = sum(
+                    int(self.max_evidence_tokens * share)
+                    for other, share in self.topic_allocations.items()
+                    if other != topic
+                    and self.topic_documents.get(other, 0)
+                    + accepted_topics.get(other, 0)
+                    > 0
+                )
+                topic_token_limit = max(
+                    1,
+                    int(self.max_evidence_tokens * self.topic_allocations[topic])
+                    + recyclable_tokens,
+                )
+                if (
+                    self.topic_tokens.get(topic, 0)
+                    + accepted_topic_tokens.get(topic, 0)
+                    + tokens
+                    > topic_token_limit
+                ):
+                    self.last_skipped_reasons.append("topic_token_budget")
+                    continue
             if self.evidence_characters + sum(
                 len(str(item.get("content", ""))) for item in accepted
             ) + characters > self.max_evidence_characters:
@@ -313,6 +362,11 @@ class EvidenceBudget:
                 self.last_skipped_reasons.append("evidence_token_budget")
                 continue
             accepted.append(document)
+            if topic in self.topic_allocations:
+                accepted_topics[topic] = accepted_topics.get(topic, 0) + 1
+                accepted_topic_tokens[topic] = (
+                    accepted_topic_tokens.get(topic, 0) + tokens
+                )
         self.documents += len(accepted)
         self.evidence_characters += sum(
             len(str(item.get("content", ""))) for item in accepted
@@ -321,6 +375,10 @@ class EvidenceBudget:
             estimate_tokens(str(item.get("content", ""))) for item in accepted
         )
         self.skipped_documents += len(documents) - len(accepted)
+        for topic, count in accepted_topics.items():
+            self.topic_documents[topic] = self.topic_documents.get(topic, 0) + count
+        for topic, tokens in accepted_topic_tokens.items():
+            self.topic_tokens[topic] = self.topic_tokens.get(topic, 0) + tokens
         return accepted
 
 
@@ -334,8 +392,15 @@ class ToolLoopController:
     searches_without_read: int = 0
     invalid_tool_calls: int = 0
     latest_result_ids: list[str] = field(default_factory=list)
+    result_batches: list[list[str]] = field(default_factory=list)
     conversation_state: ConversationState = field(default_factory=ConversationState)
     latest_user_message: str = ""
+    intent: QueryIntent = QueryIntent.RULE_FACT
+    evidence_profile: EvidenceBudgetProfile | None = None
+    document_topics: dict[str, str] = field(default_factory=dict)
+    deferred_finishes: int = 0
+    planned_queries: tuple[str, ...] = ()
+    is_follow_up: bool = False
 
     def before_search(self, query: str) -> str | None:
         normalized = _normalize_query(query)
@@ -354,12 +419,25 @@ class ToolLoopController:
             self.latest_user_message,
         )
 
-    def after_search(self, hits: list[dict[str, Any]]) -> str | None:
+    def after_search(self, query: str, hits: list[dict[str, Any]]) -> str | None:
         self.invalid_tool_calls = 0
         self.searches_without_read += 1
         self.latest_result_ids = [
             str(hit["id"]) for hit in hits if hit.get("id")
         ]
+        if self.latest_result_ids:
+            self.result_batches.append(list(self.latest_result_ids))
+        if self.evidence_profile is not None:
+            for hit in hits:
+                document_id = str(hit.get("id", ""))
+                if document_id:
+                    self.document_topics[document_id] = EvidenceBudgetPolicy.classify_topic(
+                        self.intent,
+                        self.latest_user_message,
+                        query,
+                        hit,
+                        self.evidence_profile,
+                    )
         result_ids = {str(hit.get("id", "")) for hit in hits if hit.get("id")}
         if not result_ids:
             return "no_results"
@@ -368,6 +446,22 @@ class ToolLoopController:
         if not new_ids:
             return "repeated_results"
         return None
+
+    def unread_candidates(self, registered_ids: set[str]) -> list[str]:
+        """Return unseen candidates round-robin across all search batches."""
+        ordered: list[str] = []
+        seen = set(registered_ids)
+        depth = max((len(batch) for batch in self.result_batches), default=0)
+        for index in range(depth):
+            for batch in self.result_batches:
+                if index >= len(batch):
+                    continue
+                document_id = batch[index]
+                if document_id in seen:
+                    continue
+                seen.add(document_id)
+                ordered.append(document_id)
+        return ordered
 
     def after_read(self) -> None:
         self.searches_without_read = 0
@@ -425,6 +519,7 @@ async def run_rule_turn(
     messages: list[dict[str, str]],
     gateway_factory: Callable[[ModelConfig], ModelGateway] = OpenAIModelGateway,
     request_id: str | None = None,
+    enable_dynamic_evidence_budget: bool = False,
 ) -> AsyncIterator[dict[str, Any]]:
     gateway = gateway_factory(model)
     state = ConversationState.from_messages(messages)
@@ -456,11 +551,74 @@ async def run_rule_turn(
     ]
     trimmed, dropped_count = context_budget.trim_recent_messages(messages)
     conversation.extend(trimmed)
-    budget = EvidenceBudget(max_evidence_tokens=context_budget.evidence_tokens)
+    intent = classify_intent(latest_user_message)
+    query_plan = build_query_plan(latest_user_message, state)
+    previous_user_message = next(
+        (
+            str(message.get("content", ""))
+            for message in reversed(messages[:-1])
+            if message.get("role") == "user"
+        ),
+        "",
+    )
+    is_follow_up = bool(previous_user_message) and EvidenceBudgetPolicy.is_follow_up(
+        latest_user_message
+    )
+    if is_follow_up:
+        previous_plan = build_query_plan(previous_user_message, state)
+        query_plan = QueryPlan(
+            query_plan.intent,
+            tuple(
+                dict.fromkeys(
+                    (
+                        *previous_plan.queries,
+                        f"{previous_user_message} {latest_user_message}",
+                        *query_plan.queries,
+                    )
+                )
+            ),
+        )
+    evidence_profile = (
+        EvidenceBudgetPolicy.allocate(intent, context_budget, query_plan, state)
+        if enable_dynamic_evidence_budget
+        else EvidenceBudgetPolicy.fixed(context_budget)
+    )
+    budget = EvidenceBudget(
+        max_searches=(evidence_profile.max_searches if enable_dynamic_evidence_budget else 6),
+        max_documents=(
+            evidence_profile.max_answer_documents
+            if enable_dynamic_evidence_budget
+            else 24
+        ),
+        max_evidence_tokens=evidence_profile.max_evidence_tokens,
+        topic_allocations=(
+            dict(evidence_profile.topic_allocations)
+            if enable_dynamic_evidence_budget
+            else {}
+        ),
+    )
     citations = CitationRegistry()
     controller = ToolLoopController(
+        max_searches_with_evidence=(
+            max(
+                1,
+                evidence_profile.max_searches
+                - (
+                    1
+                    if len(evidence_profile.topic_allocations) > 1 or is_follow_up
+                    else 0
+                ),
+            )
+            if enable_dynamic_evidence_budget
+            else 3
+        ),
+        max_answer_documents=evidence_profile.max_answer_documents,
         conversation_state=state,
         latest_user_message=latest_user_message,
+        intent=intent,
+        evidence_profile=evidence_profile,
+        planned_queries=query_plan.queries,
+        is_follow_up=is_follow_up,
     )
     history = summarize_messages(trimmed)
     original_history = summarize_messages(messages)
@@ -477,6 +635,15 @@ async def run_rule_turn(
                 "originalHistoryTokens": original_history["tokens"],
                 "systemTokens": system_tokens,
                 "stateTokens": state_tokens,
+                "stateFieldCount": state.field_count(),
+                "dynamicEvidenceBudgetEnabled": enable_dynamic_evidence_budget,
+                "evidencePolicyVersion": evidence_profile.policy_version,
+                "evidencePolicyMaxSearches": evidence_profile.max_searches,
+                "evidencePolicyMaxAnswerDocuments": (
+                    evidence_profile.max_answer_documents
+                ),
+                "evidencePolicyMaxTokens": evidence_profile.max_evidence_tokens,
+                "evidencePolicyUsedTopics": len(budget.topic_documents),
                 **context_budget.metrics(),
             },
             budget=budget,
@@ -484,7 +651,7 @@ async def run_rule_turn(
             stop_reason=stop_reason,
             dropped_messages=dropped_count,
             final_answer_tokens=final_tokens,
-            intent=classify_intent(latest_user_message).value,
+            intent=intent.value,
             query_hashes=[_query_hash(query) for query in controller.seen_queries],
             usage=timer.usage,
         )
@@ -584,6 +751,101 @@ async def run_rule_turn(
         requested_calls = list(decision.tool_calls)
         should_finish = any(call.name == "finish_answer" for call in requested_calls)
         if should_finish:
+            if (
+                enable_dynamic_evidence_budget
+                and controller.is_follow_up
+                and not citations.by_document_id
+                and controller.planned_queries
+                and budget.searches < budget.max_searches
+            ):
+                controller.searches_without_read = 0
+                follow_up_search = _execute_tool(
+                    name="search_rules",
+                    arguments=json.dumps(
+                        {"query": controller.planned_queries[0], "limit": 10},
+                        ensure_ascii=False,
+                    ),
+                    library=library,
+                    budget=budget,
+                    citations=citations,
+                    controller=controller,
+                )
+                yield {"type": "status", "status": follow_up_search.status}
+                _log_tool_step(
+                    request_id=request_id,
+                    model=model,
+                    library=library,
+                    decision_index=decision_index,
+                    requested_calls=len(requested_calls),
+                    executed_tool="search_rules_followup_fallback",
+                    budget=budget,
+                    stop_reason=follow_up_search.stop_reason,
+                    query_hash=follow_up_search.query_hash,
+                )
+                remaining_documents = max(
+                    0,
+                    controller.max_answer_documents - budget.documents,
+                )
+                if controller.latest_result_ids and remaining_documents:
+                    follow_up_read = _execute_tool(
+                        name="read_rules",
+                        arguments=json.dumps(
+                            {
+                                "ids": controller.latest_result_ids[
+                                    : min(4, remaining_documents)
+                                ]
+                            },
+                            ensure_ascii=False,
+                        ),
+                        library=library,
+                        budget=budget,
+                        citations=citations,
+                        controller=controller,
+                    )
+                    yield {"type": "status", "status": follow_up_read.status}
+                    _log_tool_step(
+                        request_id=request_id,
+                        model=model,
+                        library=library,
+                        decision_index=decision_index,
+                        requested_calls=0,
+                        executed_tool="read_rules_followup_fallback",
+                        budget=budget,
+                        stop_reason=follow_up_read.stop_reason,
+                        new_documents=follow_up_read.new_documents,
+                    )
+            missing_topic_prompt = (
+                EvidenceBudgetPolicy.missing_topic_prompt(
+                    intent,
+                    latest_user_message,
+                    set(budget.topic_documents),
+                )
+                if enable_dynamic_evidence_budget
+                and budget.searches < budget.max_searches
+                and controller.deferred_finishes < 2
+                else None
+            )
+            if missing_topic_prompt:
+                controller.deferred_finishes += 1
+                for tool_call in requested_calls:
+                    conversation.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": missing_topic_prompt,
+                        }
+                    )
+                _log_tool_step(
+                    request_id=request_id,
+                    model=model,
+                    library=library,
+                    decision_index=decision_index,
+                    requested_calls=len(requested_calls),
+                    executed_tool="finish_answer_deferred",
+                    budget=budget,
+                    stop_reason=None,
+                )
+                continue
             for tool_call in requested_calls:
                 conversation.append(
                     {
@@ -791,6 +1053,7 @@ async def _finish_after_controller_stop(
     request_id: str | None,
     decision_index: int,
 ) -> AsyncIterator[dict[str, Any]]:
+    priority_candidate_ids: list[str] = []
     if (
         not citations.by_document_id
         and stop_reason
@@ -822,11 +1085,97 @@ async def _finish_after_controller_stop(
             stop_reason=fallback_search.stop_reason,
             query_hash=fallback_search.query_hash,
         )
-    unread_candidate_ids = [
-        document_id
-        for document_id in controller.latest_result_ids
-        if document_id not in citations.by_document_id
-    ]
+    missing_topic_queries = (
+        EvidenceBudgetPolicy.missing_topic_queries(
+            controller.intent,
+            controller.latest_user_message,
+            set(budget.topic_documents),
+        )
+        if controller.evidence_profile is not None
+        and controller.evidence_profile.policy_version > 0
+        else ()
+    )
+    recovery_query = (
+        missing_topic_queries[0]
+        if missing_topic_queries
+        else (
+            controller.planned_queries[0]
+            if (
+                controller.intent == QueryIntent.BUILD_ADVICE
+                or controller.is_follow_up
+            )
+            and stop_reason
+            in {
+                "searches_without_read",
+                "repeated_documents",
+                "repeated_results",
+                "evidence_saturation",
+            }
+            and controller.planned_queries
+            else None
+        )
+    )
+    if recovery_query and budget.searches < budget.max_searches:
+        controller.searches_without_read = 0
+        topic_search = _execute_tool(
+            name="search_rules",
+            arguments=json.dumps(
+                {"query": recovery_query, "limit": 10},
+                ensure_ascii=False,
+            ),
+            library=library,
+            budget=budget,
+            citations=citations,
+            controller=controller,
+        )
+        yield {"type": "status", "status": topic_search.status}
+        _log_tool_step(
+            request_id=request_id,
+            model=model,
+            library=library,
+            decision_index=decision_index,
+            requested_calls=0,
+            executed_tool="search_rules_topic_fallback",
+            budget=budget,
+            stop_reason=topic_search.stop_reason,
+            query_hash=topic_search.query_hash,
+        )
+        priority_candidate_ids = list(controller.latest_result_ids)
+    dynamic_multi_topic_recovery = (
+        controller.evidence_profile is not None
+        and controller.evidence_profile.policy_version > 0
+        and (
+            len(controller.evidence_profile.topic_allocations) > 1
+            or controller.is_follow_up
+        )
+        and stop_reason
+        in {
+            "searches_without_read",
+            "repeated_documents",
+            "repeated_results",
+            "evidence_saturation",
+        }
+    )
+    unread_candidate_ids = (
+        controller.unread_candidates(set(citations.by_document_id))
+        if dynamic_multi_topic_recovery
+        else [
+            document_id
+            for document_id in controller.latest_result_ids
+            if document_id not in citations.by_document_id
+        ]
+    )
+    if priority_candidate_ids:
+        unread_candidate_ids = list(
+            dict.fromkeys(
+                [
+                    document_id
+                    for document_id in priority_candidate_ids
+                    if document_id not in citations.by_document_id
+                ]
+                + unread_candidate_ids
+            )
+        )
     should_read_candidates = unread_candidate_ids and (
         (
             not citations.by_document_id
@@ -840,6 +1189,7 @@ async def _finish_after_controller_stop(
             }
         )
         or stop_reason in {"evidence_saturation", "repeated_documents"}
+        or dynamic_multi_topic_recovery
     )
     remaining_documents = max(
         0,
@@ -1068,7 +1418,7 @@ def _execute_tool(
                 query_hash=query_hash,
             )
         hits = library.search(query, limit)
-        stop_reason = controller.after_search(hits)
+        stop_reason = controller.after_search(query, hits)
         if (
             stop_reason is None
             and citations.by_document_id
@@ -1120,7 +1470,10 @@ def _execute_tool(
                 status="reading",
                 stop_reason="repeated_documents",
             )
-        admitted_documents = budget.consume_documents(new_documents)
+        admitted_documents = budget.consume_documents(
+            new_documents,
+            controller.document_topics,
+        )
         if not admitted_documents:
             reason = "evidence_budget" if budget.last_skipped_reasons else "read_failed"
             return ToolExecution(

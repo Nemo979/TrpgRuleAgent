@@ -12,6 +12,7 @@
 | --- | --- | --- |
 | 事实覆盖 | `missingRequiredAny` / `passed` | 答案归一化后须包含每个 `requiredAny` 分组中至少一个候选表述；任一组缺失即判失败。 |
 | 引用支持度 | `sourceMatch` | 模型最终附带的来源中，至少有一个 `documentId` 或 `legacyParentId` 落在题面 `relevantIds` 内。 |
+| 多主题来源 | `missingSourceGroups` | 配置 `requiredSourceGroups` 时，每组必须至少命中一个 gold 来源；适用于 Compare/Build 双侧证据。 |
 | 工具预算 | `toolCalls` / `withinBudget` | 统计 SSE 中 `searching`/`reading` 状态事件数作为工具调用近似计数；超过软阈值 `TOOL_CALL_BUDGET`（默认 12）标记超预算。 |
 | 无依据结论率 | `unsupportedTurns` / `unsupportedRate` | 已给出非空答案、但未命中相关来源、且无错误的轮次占比；衡量"答了却没依据"的比例。 |
 | LLM 事实正确性 | `factualCorrect` / `factualPassRate` | 由 `--judge-model` 指定的裁判模型对"答案是否准确陈述 gold 事实且未自相矛盾"给布尔判定；整轮 `factualPassRate` 为通过占比（仅当有裁判时输出）。 |
@@ -23,7 +24,7 @@
 
 ## 题集格式
 
-每行一个 JSON。`rulepacks/pathfinder-1e/evals/answer-cases.jsonl`（v2.0，5 个多轮 case）与 `v2.1-answer-cases.jsonl`（v2.1，4 轮对话）已是带真实 gold 来源 ID 与事实点的题集，可直接作为复现输入，也是格式参照：
+每行一个 JSON。`rulepacks/pathfinder-1e/evals/answer-cases.jsonl`（v2.0，4 个 case / 6 轮）与 `v2.1-answer-cases.jsonl`（v2.1，4 轮对话）已是带真实 gold 来源 ID 与事实点的题集，可直接作为复现输入，也是格式参照：
 
 ```json
 {"id":"example.flanking","turns":[
@@ -38,6 +39,22 @@
 - `query`：用户问题。
 - `relevantIds`：该题期望被引用的来源 ID（支持 `legacyParentId` 兼容，如 `pf1e-xxxx:entry:yyyy`）。
 - `requiredAny`：每组为"任一命中即可"的事实表述候选列表；全部组命中才算事实正确。
+- `requiredSourceGroups`（可选）：每组为可替代来源 ID；全部组命中才算来源完整，避免多主题题只读一侧仍通过。
+
+可选 `history` 用于在目标轮之前注入预置历史。它可以是显式消息数组，也可以是只用于评测的紧凑模板：
+
+```json
+{"history":{
+  "turnCount":12,
+  "fillerUser":"本轮不修改角色设定。",
+  "fillerAssistant":"收到。",
+  "events":[{"turn":1,"user":"我选择混血术士作为职业"}]
+}}
+```
+
+模板在内存中展开成 user/assistant 消息；报告只记录 `historyMessages` 数量，不复制历史正文。
+12/24/48 轮正式夹具和确定性状态契约见
+[长会话与 revision 评测](long-conversation-evaluation.md)。
 
 ## 复现
 
@@ -56,6 +73,14 @@ PYTHONPATH=services/app-python/src:services/retrieval-python/src \
 ```
 
 `--judge-model` 为可选项：指定一个**已配置**的模型作为 LLM 裁判。启用后，每个非空且无错误的答案都会被发给裁判，附带"问题 + 扁平化 gold 事实 + 命中来源的正文（来自 `--documents`）"，由裁判返回 `factual_correct` / `hallucination_free` / `reason` 的结构化判定。裁判调用失败会被容错为 `judgeError`，不会中断整轮评测。
+
+`--dynamic-evidence-budget` 为可选 Feature Flag，只用于 V2.3 Stage 1 A/B。未指定时保持固定预算；
+指定时启用纯代码 Evidence Policy。两种运行使用相同问题、规则库、模型与评分逻辑。
+
+2026-08-10 经明确授权完成 Stage 1 真实 MiMo 验收：连续 5 轮 Build/Compare 的固定与动态预算
+均为 5/5；现有 PF1E 6 轮题集的动态回归为 6/6，来源命中 100%、无依据率 0%。修正后的
+Compare 与两个指代追问使用同一合成历史做定向复验，并替换对应失败轮后聚合；原始问题、回答
+和规则正文只保存在本地临时报告，仓库仅记录聚合结论。
 
 或通过 npm（含裁判）：
 

@@ -19,9 +19,14 @@ _METRICS = {
     "context.originalHistoryTokens": ("context", "originalHistoryTokens"),
     "context.systemTokens": ("context", "systemTokens"),
     "context.stateTokens": ("context", "stateTokens"),
+    "context.stateFieldCount": ("context", "stateFieldCount"),
     "context.recentHistoryBudgetTokens": ("context", "recentHistoryBudgetTokens"),
     "context.decisionToolBudgetTokens": ("context", "decisionToolBudgetTokens"),
     "context.evidenceBudgetTokens": ("context", "evidenceBudgetTokens"),
+    "policy.maxSearches": ("context", "evidencePolicyMaxSearches"),
+    "policy.maxAnswerDocuments": ("context", "evidencePolicyMaxAnswerDocuments"),
+    "policy.maxEvidenceTokens": ("context", "evidencePolicyMaxTokens"),
+    "policy.usedTopics": ("context", "evidencePolicyUsedTopics"),
     "context.compactedToolMessages": ("context", "compactedToolMessages"),
     "context.decisionToolTokensBeforeMax": ("context", "decisionToolTokensBeforeMax"),
     "context.decisionToolTokensAfterMax": ("context", "decisionToolTokensAfterMax"),
@@ -80,6 +85,9 @@ def aggregate(records: list[dict[str, Any]]) -> dict[str, Any]:
         dimensions[field] = dict(sorted(counts.items()))
     reported_calls = sum(int(record.get("usage", {}).get("reportedCalls", 0)) for record in records)
     estimated_calls = sum(int(record.get("usage", {}).get("estimatedCalls", 0)) for record in records)
+    truncated_turns = sum(
+        1 for record in records if int(record.get("dropped_messages", 0)) > 0
+    )
     return {
         "schemaVersion": 1,
         "turnCount": len(records),
@@ -88,6 +96,9 @@ def aggregate(records: list[dict[str, Any]]) -> dict[str, Any]:
             "reportedCalls": reported_calls,
             "estimatedCalls": estimated_calls,
             "reportedRate": round(reported_calls / max(reported_calls + estimated_calls, 1), 4),
+        },
+        "derivedRates": {
+            "contextTruncationRate": round(truncated_turns / max(len(records), 1), 4),
         },
         "metrics": {
             name: _summary(

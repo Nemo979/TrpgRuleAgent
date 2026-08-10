@@ -176,6 +176,13 @@ class ConversationStateTest(unittest.TestCase):
         self.assertEqual(state.feats, [])
         self.assertEqual(state.spells, [])
 
+    def test_counts_populated_state_fields_without_exposing_values(self) -> None:
+        state = ConversationState.from_messages(
+            [{"role": "user", "content": "5级法师，种族为精灵，专长为警觉"}]
+        )
+
+        self.assertEqual(state.field_count(), 6)
+
 
 if __name__ == "__main__":
     unittest.main()

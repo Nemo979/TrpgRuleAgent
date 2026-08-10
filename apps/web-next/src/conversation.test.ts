@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   createConversationForLibrary,
   createSourceSelection,
+  hasLibraryRevisionMismatch,
   isSameSourceRequest,
 } from "./conversation";
 import type {
@@ -109,5 +110,34 @@ describe("conversation-bound source requests", () => {
       ),
     ).toBe(false);
     expect(isSameSourceRequest(null, request)).toBe(false);
+  });
+});
+
+describe("library revision contract", () => {
+  const conversation: Pick<Conversation, "libraryId" | "libraryRevision"> = {
+    libraryId: "pathfinder-1e",
+    libraryRevision: "revision-1",
+  };
+
+  it("detects a revision change only within the bound library", () => {
+    expect(
+      hasLibraryRevisionMismatch(conversation, {
+        id: "pathfinder-1e",
+        revision: "revision-2",
+      }),
+    ).toBe(true);
+    expect(
+      hasLibraryRevisionMismatch(conversation, {
+        id: "pathfinder-1e",
+        revision: "revision-1",
+      }),
+    ).toBe(false);
+    expect(
+      hasLibraryRevisionMismatch(conversation, {
+        id: "golden-sky-stories-zh-1-2",
+        revision: "revision-2",
+      }),
+    ).toBe(false);
+    expect(hasLibraryRevisionMismatch(conversation, null)).toBe(false);
   });
 });
