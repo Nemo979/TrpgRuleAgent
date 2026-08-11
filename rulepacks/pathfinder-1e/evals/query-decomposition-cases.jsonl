@@ -1,0 +1,12 @@
+{"id":"simple-rule-fact","query":"借机攻击在什么情况下触发？","expectedComplexity":"simple","expectedDomains":["rule"],"expectedQuestionCount":0}
+{"id":"simple-rule-table","query":"两寸厚铁门的硬度、生命值和破坏DC分别是多少？","expectedComplexity":"simple","expectedDomains":["rule"],"expectedQuestionCount":0}
+{"id":"compound-three-facts","query":"借机攻击何时触发？准备动作如何使用？油腻术允许哪些豁免？","expectedComplexity":"compound","expectedDomains":["rule"],"expectedQuestionCount":3}
+{"id":"compound-build-compare","query":"请为5级法师推荐两个专长和三环法术，并比较继续法师与兼职战士的收益。","expectedComplexity":"compound","expectedDomains":["class","feat","spell"],"expectedQuestionCount":3}
+{"id":"complex-progression-build","query":"我想构筑1到10级的近战法师，必须保持施法能力，请规划职业、专长和法术，并兼顾前期生存。","expectedComplexity":"complex","expectedDomains":["class","feat","spell","progression"],"expectedQuestionCount":4}
+{"id":"simple-comparison","query":"法师和术士的施法方式有什么区别？","expectedComplexity":"simple","expectedDomains":["class","spell"],"expectedQuestionCount":0}
+{"id":"simple-procedure","query":"如何创建一个PF1E角色？","expectedComplexity":"simple","expectedDomains":["rule"],"expectedQuestionCount":0}
+{"id":"simple-build","query":"5级法师怎么BD？","expectedComplexity":"simple","expectedDomains":["class"],"expectedQuestionCount":0}
+{"id":"compound-semicolon","query":"说明冲锋的动作要求；说明撤退如何避免借机攻击。","expectedComplexity":"compound","expectedDomains":["rule"],"expectedQuestionCount":2}
+{"id":"compound-class-and-spell","query":"法师的生命骰是多少？法师护甲提供多少AC？","expectedComplexity":"compound","expectedDomains":["class","spell"],"expectedQuestionCount":2}
+{"id":"compound-feat-and-equipment","query":"双武器格斗专长如何降低减值？轻型副手武器还会产生什么影响？","expectedComplexity":"compound","expectedDomains":["feat","equipment"],"expectedQuestionCount":2}
+{"id":"complex-ranged-progression","query":"我想规划1到12级的远程战士，必须控制装备预算，请覆盖职业、专长和武器，并兼顾前中期命中。","expectedComplexity":"complex","expectedDomains":["class","feat","equipment","progression"],"expectedQuestionCount":4}

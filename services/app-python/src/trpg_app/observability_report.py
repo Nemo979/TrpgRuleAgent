@@ -11,6 +11,7 @@ from typing import Any, Iterable
 
 _METRICS = {
     "latency.totalSeconds": ("phases_seconds", "total"),
+    "latency.routingSeconds": ("phases_seconds", "routing"),
     "latency.decisionSeconds": ("phases_seconds", "decision"),
     "latency.retrievalSeconds": ("phases_seconds", "retrieval"),
     "latency.readSeconds": ("phases_seconds", "read"),
@@ -27,6 +28,10 @@ _METRICS = {
     "policy.maxAnswerDocuments": ("context", "evidencePolicyMaxAnswerDocuments"),
     "policy.maxEvidenceTokens": ("context", "evidencePolicyMaxTokens"),
     "policy.usedTopics": ("context", "evidencePolicyUsedTopics"),
+    "routing.domainCount": ("context", "routeDomainCount"),
+    "routing.questionCount": ("context", "decompositionQuestionCount"),
+    "routing.coveredQuestionCount": ("context", "decompositionCoveredQuestionCount"),
+    "routing.sourcedQuestionCount": ("context", "decompositionSourcedQuestionCount"),
     "context.compactedToolMessages": ("context", "compactedToolMessages"),
     "context.decisionToolTokensBeforeMax": ("context", "decisionToolTokensBeforeMax"),
     "context.decisionToolTokensAfterMax": ("context", "decisionToolTokensAfterMax"),
@@ -83,6 +88,16 @@ def aggregate(records: list[dict[str, Any]]) -> dict[str, Any]:
             key = str(record.get(field, "-"))
             counts[key] = counts.get(key, 0) + 1
         dimensions[field] = dict(sorted(counts.items()))
+    for name, context_field in (
+        ("routeComplexity", "routeComplexity"),
+        ("routeReasonCode", "routeReasonCode"),
+    ):
+        counts: dict[str, int] = {}
+        for record in records:
+            context = record.get("context", {})
+            key = str(context.get(context_field, "-")) if isinstance(context, dict) else "-"
+            counts[key] = counts.get(key, 0) + 1
+        dimensions[name] = dict(sorted(counts.items()))
     reported_calls = sum(int(record.get("usage", {}).get("reportedCalls", 0)) for record in records)
     estimated_calls = sum(int(record.get("usage", {}).get("estimatedCalls", 0)) for record in records)
     truncated_turns = sum(

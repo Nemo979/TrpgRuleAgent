@@ -40,6 +40,7 @@ class AppConfig:
     session_ttl_seconds: int = 7 * 24 * 60 * 60
     max_concurrent_turns: int = 5
     enable_dynamic_evidence_budget: bool = False
+    enable_query_decomposition: bool = False
 
 
 def load_config(path: Path | None = None) -> AppConfig:
@@ -103,6 +104,9 @@ def load_config(path: Path | None = None) -> AppConfig:
         max_concurrent_turns=int(raw.get("max_concurrent_turns", 5)),
         enable_dynamic_evidence_budget=_optional_bool(
             raw, "enable_dynamic_evidence_budget", False
+        ),
+        enable_query_decomposition=_optional_bool(
+            raw, "enable_query_decomposition", False
         ),
     )
 

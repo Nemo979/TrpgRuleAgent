@@ -77,10 +77,24 @@ PYTHONPATH=services/app-python/src:services/retrieval-python/src \
 `--dynamic-evidence-budget` 为可选 Feature Flag，只用于 V2.3 Stage 1 A/B。未指定时保持固定预算；
 指定时启用纯代码 Evidence Policy。两种运行使用相同问题、规则库、模型与评分逻辑。
 
+`--query-decomposition` 为 V2.3 Stage 2 A/B 开关。指定后启用纯代码 Route Decision 和最多 4 个
+子问题的串行拆解；不调用 LLM Router 或 Planner。专项题集为
+`rulepacks/pathfinder-1e/evals/query-decomposition-answer-cases.jsonl`，可通过
+`npm run eval:answer:pf:decomposition` 运行。该命令会把合成问题及检索证据发送到配置模型，仍需
+在运行前获得明确授权。
+
+复杂多问题可使用 `--timeout-seconds 300` 覆盖评测进程的单轮超时；该参数只替换本次评测中的
+`ModelConfig.request_timeout_seconds`，不修改生产配置。固定组与拆解组必须使用相同覆盖值。
+
 2026-08-10 经明确授权完成 Stage 1 真实 MiMo 验收：连续 5 轮 Build/Compare 的固定与动态预算
 均为 5/5；现有 PF1E 6 轮题集的动态回归为 6/6，来源命中 100%、无依据率 0%。修正后的
 Compare 与两个指代追问使用同一合成历史做定向复验，并替换对应失败轮后聚合；原始问题、回答
 和规则正文只保存在本地临时报告，仓库仅记录聚合结论。
+
+2026-08-10 经明确授权完成 Stage 2 真实 MiMo 验收：3 个纯合成 Compound/Complex 问题固定路径
+2/3、受限拆解 3/3；无依据率从 33.33% 降至 0%，最大工具调用从 7 增至 8，仍在 12 次评测预算内。
+拆解开关开启后的既有 PF1E 6 轮回归为 6/6、来源命中 100%、无依据率 0%。本轮所有原始报告只
+保存在 `/private/tmp`，未提交仓库。
 
 或通过 npm（含裁判）：
 

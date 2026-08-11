@@ -12,6 +12,7 @@ def record(total_seconds: float, total_tokens: int, *, intent: str = "rule_fact"
         "intent": intent,
         "stop_reason": "model_finish",
         "phases_seconds": {
+            "routing": 0.01,
             "decision": 1.0,
             "retrieval": 0.1,
             "read": 0.1,
@@ -27,6 +28,12 @@ def record(total_seconds: float, total_tokens: int, *, intent: str = "rule_fact"
             "evidencePolicyMaxAnswerDocuments": 4,
             "evidencePolicyMaxTokens": 12000,
             "evidencePolicyUsedTopics": 2,
+            "routeComplexity": "compound",
+            "routeReasonCode": "explicit_multi_goal",
+            "routeDomainCount": 2,
+            "decompositionQuestionCount": 2,
+            "decompositionCoveredQuestionCount": 2,
+            "decompositionSourcedQuestionCount": 2,
         },
         "usage": {
             "promptTokens": total_tokens - 20,
@@ -56,6 +63,9 @@ class ObservabilityReportTest(unittest.TestCase):
         self.assertEqual(report["usageCoverage"]["reportedRate"], 1.0)
         self.assertEqual(report["derivedRates"]["contextTruncationRate"], 0.5)
         self.assertEqual(report["metrics"]["policy.maxSearches"]["mean"], 3.0)
+        self.assertEqual(report["metrics"]["latency.routingSeconds"]["mean"], 0.01)
+        self.assertEqual(report["metrics"]["routing.questionCount"]["mean"], 2.0)
+        self.assertEqual(report["dimensions"]["routeComplexity"], {"compound": 2})
         self.assertEqual(
             report["metrics"]["policy.maxAnswerDocuments"]["mean"], 4.0
         )

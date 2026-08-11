@@ -9,6 +9,7 @@ import {
   isSameSourceRequest,
 } from "./conversation";
 import type { SourceSelection } from "./conversation";
+import { shouldSubmitComposerOnKeyDown } from "./composer";
 import {
   exportConversation,
   loadConversations,
@@ -31,6 +32,7 @@ export function App() {
   const [libraryPickerOpen, setLibraryPickerOpen] = useState(false);
   const [selectedSource, setSelectedSource] = useState<SourceSelection | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const composingRef = useRef(false);
 
   const active = conversations.find((item) => item.id === activeId) ?? null;
   const activeLibrary = libraries.find((item) => item.id === active?.libraryId);
@@ -371,8 +373,19 @@ export function App() {
                 rows={2}
                 placeholder={`询问 ${activeLibrary?.name ?? "当前规则库"}……`}
                 onChange={(event) => setInput(event.target.value)}
+                onCompositionStart={() => {
+                  composingRef.current = true;
+                }}
+                onCompositionEnd={() => {
+                  composingRef.current = false;
+                }}
                 onKeyDown={(event) => {
-                  if (event.key === "Enter" && !event.shiftKey) {
+                  if (shouldSubmitComposerOnKeyDown({
+                    key: event.key,
+                    shiftKey: event.shiftKey,
+                    isComposing: composingRef.current || event.nativeEvent.isComposing,
+                    keyCode: event.nativeEvent.keyCode,
+                  })) {
                     event.preventDefault();
                     event.currentTarget.form?.requestSubmit();
                   }

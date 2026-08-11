@@ -70,6 +70,7 @@ class UsageTotalsTest(unittest.TestCase):
 class TurnPhaseTimerTest(unittest.TestCase):
     def test_accumulates_phases(self) -> None:
         timer = TurnPhaseTimer()
+        timer.routing_seconds += 0.01
         timer.decision_seconds += 0.5
         timer.retrieval_seconds += 0.2
         timer.read_seconds += 0.1
@@ -77,6 +78,7 @@ class TurnPhaseTimerTest(unittest.TestCase):
 
         rounded = timer.round_all()
 
+        self.assertEqual(rounded["routing"], 0.01)
         self.assertEqual(rounded["decision"], 0.5)
         self.assertEqual(rounded["retrieval"], 0.2)
         self.assertEqual(rounded["read"], 0.1)
