@@ -160,6 +160,10 @@ def create_app(
                         enable_dynamic_evidence_budget=(
                             config.enable_dynamic_evidence_budget
                         ),
+                        enable_query_decomposition=(
+                            config.enable_query_decomposition
+                        ),
+                        enable_complex_planner=config.enable_complex_planner,
                     ):
                         yield _sse(event)
                 except Exception as error:
@@ -189,7 +193,11 @@ def create_app(
         return StreamingResponse(
             events(),
             media_type="text/event-stream",
-            headers={"X-Request-ID": request_id},
+            headers={
+                "X-Request-ID": request_id,
+                "Cache-Control": "no-cache, no-transform",
+                "X-Accel-Buffering": "no",
+            },
         )
 
     @app.get(

@@ -65,6 +65,43 @@ TrpgRuleAgent 当前是一套面向少量可信用户的多游戏系统 Web 规�
   GSS 22 题检索保持原基线；经明确授权，MiMo 固定/动态专项均为 5/5，动态 PF1E 回归为
   6/6、来源 100%、无依据率 0%。动态 6 轮 prompt token mean 10,924.5、总延迟 mean
   40.12 秒，未超过固定基线 11,528/57.26 秒。Feature Flag 继续默认关闭，等待发布流程决策。
+- V2.3 Stage 2 已完成并通过发布门：纯代码 `RouteDecision`、最多 4 个子问题的受限拆解、默认关闭的
+  `enable_query_decomposition`、串行取证恢复、子问题独立 Evidence 配额/来源集合和全局硬上限均已
+  接入正式 Python 链路。12 题确定性专项集为 12/12，单问题误拆率 0%、目标域覆盖率 100%，
+  Python App 156 项测试通过；经明确授权，真实 MiMo 3 题固定/拆解 A/B 为 2/3 → 3/3，
+  无依据率 33.33% → 0%，最大工具调用 7 → 8（预算 12）；拆解开关 PF1E 6 轮回归为 6/6。
+  原始报告仅保存在 `/private/tmp`，未提交仓库。
+- V2.3 Stage 2.5 已修复最终回答一次性出现的问题：后端仅保留 96 字符安全前导，通过后在供应商
+  流结束前持续发送 `text_delta`；SSE 明确禁用缓存转换和反向代理缓冲。首段拒答重试与无虚假
+  来源保护保持不变。输入框同时补齐 IME 组合态保护：选字 Enter 与 WebKit process key 不发送，
+  Shift+Enter 换行、普通 Enter 发送。服务已重启加载该实现。
+- V2.3 Stage 3 启动条件复核已完成：10 个纯合成 Complex 结构案例 10/10，识别出 4 个
+  Stage 2 足够案例与 6 个依赖/条件 Planner 候选。真实基线后的金集审计发现专长链来源误指向
+  相邻矮人专长表；修正后 8 个证据探针 Hit@5 为 7/8、MRR 0.8125，Stage 2 有效来源组覆盖为
+  5/6，原 12 题路由回归保持 12/12。经明确授权完成 6 题真实 MiMo Stage 2 基线：旧金集确定性
+  门 4/6、报告来源命中 6/6、无依据率 0%，工具调用总计 46、单题最大 8/12。严格任务完成复核
+  为 0/6；除专长链检索缺口外，其余失败仍覆盖条件判断、依赖传播和完整目标，因此受限 Planner
+  启动条件成立。现已修复专长链查询，8 个证据探针恢复 8/8、MRR 0.875；Planner v1 Schema、
+  Validator、串行 Executor、任务结果和最终合成输入已接入，六题本地生产路径来源组 6/6、全部
+  计划任务完成。经再次明确授权，修正后的同六题真实 MiMo Stage 2/Planner A/B 自动门均为 5/6，
+  严格任务完成率仍为 0/6 → 0/6；Planner 32/32 任务完成、0 fallback，但工具调用 46 → 52、平均
+  端到端时延 93.89s → 119.12s、总模型 token 243,239 → 280,942。发布门未通过，Feature Flag
+  继续默认关闭。下一阶段已加入确定性合成契约，覆盖条件分支、等级算术、专长资格、法术成长、
+  装备数值与未决输入；升级后的结构评测保持 10/10，6 个 Planner 候选契约全部有效，下一动作
+  为本地合成回归。该结果尚不代表真实答案质量改善，重新执行 MiMo A/B 仍需单独授权。
+  经明确授权完成合成契约版同六题真实 A/B：契约 6/6 启用、26 项检查有 Evidence、1 个未决输入
+  被识别，32/32 任务完成、0 fallback，但自动门仍为 5/6 → 5/6、严格完成率仍为 0/6 → 0/6；
+  工具调用 46 → 52、平均时延 87.81s → 111.51s、模型总 token 244,592 → 290,132。发布门再次
+  失败，下一步转向服务器控制的类型化 Fact Ledger 和流式输出前验证，不继续增加提示文本。
+  Stage 3.2 第一版 Fact Ledger 已接入默认关闭的 Planner 路径：从已注册 Evidence 解析法师法术表、
+  奖励专长范围、进阶要求、专长和装备数值，并在候选文本流出前验证。上一轮六个真实 MiMo 错误
+  答案负样本回放 6/6 被拒绝；错误首稿不会泄露，第二稿通过后按最多 24 字符增量输出，连续两次
+  失败则不附来源。当时的本地下一门为真实 Fact Ledger A/B，Feature Flag 保持关闭。
+  经明确授权完成真实复测：同日合成契约 Planner 对照自动门 5/6、严格 0/6；规范 Fact Ledger
+  实验组自动门 3/6、严格仍为 0/6，3 题安全拒答。平均时延 111.51s → 153.75s、模型总 token
+  290,132 → 437,424，工具调用保持 52；PF1E 动态预算 6 轮回归仍为 6/6。发布门失败，下一步为
+  §8.7 Stage 3 发布门整改：通用 Fact Ledger 核心与 PF1E Adapter 等价迁移、PF1E 覆盖扩展和
+  结构化修补。Feature Flag 继续关闭；完成本地正负样本门前不再运行外部 A/B。
 - MiMo 已完成 4 组、6 轮 PF1E 真实问答验收；事实、来源和多轮追问均通过。按本轮决定未重复验收 Agnes 与 SenseNova。
 - 《夕妖晚谣》1.2 中文规则库已发布 154 个父文档、488 个检索子块。
 - 当前发布版本为 `20260801T105530Z`，包含 `GSS` 与 `Golden Sky Stories` 显式别名。
@@ -75,8 +112,8 @@ TrpgRuleAgent 当前是一套面向少量可信用户的多游戏系统 Web 规�
 
 ### V1 稳定性验收
 
-- TypeScript/Vitest：27 个测试文件、264 项测试通过。
-- Python 应用服务：130 项测试通过。
+- TypeScript/Vitest：28 个测试文件、268 项测试通过。
+- Python 应用服务：174 项测试及 23 个子测试通过。
 - Python 检索服务：64 项测试通过。
 - 全仓 TypeScript 类型检查和 Web 生产构建通过。
 - 三个真实模型均完成 PF1E 和《夕妖晚谣》检索、回答、来源和结束事件验收。
@@ -178,8 +215,9 @@ npx vitest run <test-file> --pool=forks --maxWorkers=1
 2. 同轮 ContextBudget 与工具结果压缩已完成；长会话/revision 确定性评测和真实 MiMo 长历史
    答案基线均已通过。上下文摘要仍未实现；当前最长 48 轮样本仅 737 History token 且未裁剪，
    不满足 Summary 启动条件。
-3. 动态 Evidence Budget Stage 1 已完成并通过真实 MiMo A/B 与发布门；Feature Flag 仍默认关闭，
-   下一步按 Stage 2 进入受限多问题拆解与路由，不在本阶段直接启用通用 Planner。
+3. 动态 Evidence Budget Stage 1 与受限多问题拆解 Stage 2 均已完成真实 MiMo A/B、回归和发布门。
+   Stage 3 受限 Planner 已满足启动条件但连续真实质量门失败，Feature Flag 保持关闭；下一步执行
+   §8.7 通用 Fact Ledger 核心与 PF1E Adapter 整改，不进入 Summary 或并行。
 4. 答案级评测（已落地，见 `services/app-python/src/trpg_app/answer_evaluation.py` 与 `docs/answer-evaluation.md`）：事实点(`requiredAny`)、引用支持度(`source_match`)、工具预算(`toolCalls`/`withinBudget`)、无依据结论率(`unsupportedRate`)、**LLM-judge 事实正确性/幻觉(`factualCorrect`/`hallucinationFree`, 经 `--judge-model`)** 五项指标 + 多轮/错误/超时/judge 容错 + 单测。PF1E 已有 v2.0/v2.1 真实金标题集。前端仍保留 Agnes/SenseNova 可选，并将 MiMo 设为新对话默认模型；**Agnes / SenseNova 明确不在本轮评测范围**。待补：GSS 的真实金标题集。
 5. 检索质量：结构化切块、重排器和剩余漏召回题优化。V2.2 Stage 0 已修复锚点章节切分（CRB 战斗规则 10 子章节恢复）与 table 策略页正文丢失（overview 兜底），候选重建为 7140 文档、质量门通过；85/30 题相关 ID 100% 覆盖，检索基线待确认。
 6. PDF/CHM 图片、扫描件 OCR 和复杂表格理解。

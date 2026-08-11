@@ -98,6 +98,7 @@ class TurnPhaseTimer:
     """Elapsed seconds for each observable phase of a turn."""
 
     started_at: float = field(default_factory=time.monotonic)
+    routing_seconds: float = 0.0
     decision_seconds: float = 0.0
     retrieval_seconds: float = 0.0
     read_seconds: float = 0.0
@@ -110,6 +111,7 @@ class TurnPhaseTimer:
 
     def round_all(self) -> dict[str, float]:
         return {
+            "routing": round(self.routing_seconds, 4),
             "decision": round(self.decision_seconds, 4),
             "retrieval": round(self.retrieval_seconds, 4),
             "read": round(self.read_seconds, 4),

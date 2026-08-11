@@ -269,6 +269,64 @@ class AppApiTest(unittest.TestCase):
         self.assertTrue(metrics["context"]["dynamicEvidenceBudgetEnabled"])
         self.assertEqual(metrics["context"]["evidencePolicyVersion"], 2)
 
+    def test_query_decomposition_flag_reaches_chat_metrics(self) -> None:
+        metrics_path = Path(self.temporary.name) / "route-metrics.jsonl"
+        config = replace(self.config, enable_query_decomposition=True)
+        with patch.dict(
+            "os.environ",
+            {"TRPG_TURN_METRICS_PATH": str(metrics_path)},
+            clear=False,
+        ):
+            with TestClient(
+                create_app(config, gateway_factory=ApiFakeGateway)
+            ) as client:
+                client.post("/api/auth/login", json={"password": "shared"})
+                response = client.post(
+                    "/api/chat",
+                    json={
+                        "model_id": "test",
+                        "library_id": "pathfinder-1e",
+                        "messages": [
+                            {"role": "user", "content": "借机攻击是什么"}
+                        ],
+                    },
+                )
+
+        self.assertEqual(response.status_code, 200)
+        metrics = json.loads(metrics_path.read_text(encoding="utf-8").splitlines()[-1])
+        self.assertTrue(metrics["context"]["queryDecompositionEnabled"])
+        self.assertEqual(metrics["context"]["routerVersion"], 1)
+        self.assertEqual(metrics["context"]["routeComplexity"], "simple")
+
+    def test_complex_planner_flag_reaches_chat_metrics(self) -> None:
+        metrics_path = Path(self.temporary.name) / "planner-metrics.jsonl"
+        config = replace(self.config, enable_complex_planner=True)
+        with patch.dict(
+            "os.environ",
+            {"TRPG_TURN_METRICS_PATH": str(metrics_path)},
+            clear=False,
+        ):
+            with TestClient(
+                create_app(config, gateway_factory=ApiFakeGateway)
+            ) as client:
+                client.post("/api/auth/login", json={"password": "shared"})
+                response = client.post(
+                    "/api/chat",
+                    json={
+                        "model_id": "test",
+                        "library_id": "pathfinder-1e",
+                        "messages": [
+                            {"role": "user", "content": "借机攻击是什么"}
+                        ],
+                    },
+                )
+
+        self.assertEqual(response.status_code, 200)
+        metrics = json.loads(metrics_path.read_text(encoding="utf-8").splitlines()[-1])
+        self.assertTrue(metrics["context"]["complexPlannerEnabled"])
+        self.assertFalse(metrics["context"]["complexPlannerUsed"])
+        self.assertEqual(metrics["context"]["plannerTaskCount"], 0)
+
     def test_source_is_scoped_to_selected_library(self) -> None:
         self.client.post("/api/auth/login", json={"password": "shared"})
         pf_source = self.client.get(
@@ -316,6 +374,11 @@ class AppApiTest(unittest.TestCase):
 
         self.assertEqual(pf_response.status_code, 200)
         self.assertEqual(len(pf_response.headers["x-request-id"]), 32)
+        self.assertEqual(pf_response.headers["x-accel-buffering"], "no")
+        self.assertEqual(
+            pf_response.headers["cache-control"],
+            "no-cache, no-transform",
+        )
         self.assertIn('"type": "text_delta"', pf_response.text)
         self.assertIn("pf1e:combat", pf_response.text)
         self.assertNotIn("golden-sky-stories-zh-1-2:basic", pf_response.text)

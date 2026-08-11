@@ -40,6 +40,11 @@ npm run report:observability:pf
 ```
 
 报告提供每项指标的样本数、mean、p50、p95、max，以及 model/library/intent/stop reason 分布。
+Stage 3 同时聚合 Planner 是否使用、任务总数/完成数/失败数、Planner/Executor 耗时，以及合成
+契约版本、检查数、未决输入数和缺证据检查数；这些字段仍然只包含布尔值和数值，不包含计划查询、
+任务摘要、问题或规则正文。
+Stage 3.2 继续记录 Fact Ledger 版本、事实记录数和候选答案校验问题数。Ledger 内容、失败句子和
+重试提示不会写入 turn metrics。
 与已有报告比较时直接调用聚合器：
 
 ```bash

@@ -1,8 +1,10 @@
+import asyncio
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from trpg_app.chat import (
+    CitationRegistry,
     EvidenceBudget,
     ModelDecision,
     OpenAIModelGateway,
@@ -10,10 +12,12 @@ from trpg_app.chat import (
     ToolInvocation,
     _answer_quality_issue,
     _missing_citation_suffix,
+    _stream_final_answer,
     _visible_content,
     run_rule_turn,
 )
 from trpg_app.config import ModelConfig
+from trpg_app.query_decomposition import decompose_query, route_query
 
 
 class EvidenceBudgetTest(unittest.TestCase):
@@ -95,6 +99,27 @@ class EvidenceBudgetTest(unittest.TestCase):
         self.assertEqual(len(accepted), 2)
         self.assertEqual(budget.documents, 8)
 
+    def test_strict_subquestion_allocations_do_not_recycle_capacity(self) -> None:
+        budget = EvidenceBudget(
+            max_documents=4,
+            max_evidence_characters=10_000,
+            max_evidence_tokens=100,
+            topic_allocations={"q1": 0.5, "q2": 0.5},
+            strict_topic_allocations=True,
+        )
+        documents = [
+            {"id": f"q1-{index}", "content": "短证据"}
+            for index in range(3)
+        ]
+
+        accepted = budget.consume_documents(
+            documents,
+            {document["id"]: "q1" for document in documents},
+        )
+
+        self.assertEqual(len(accepted), 2)
+        self.assertIn("topic_document_limit", budget.last_skipped_reasons)
+
     def test_unread_candidates_round_robin_across_search_batches(self) -> None:
         controller = ToolLoopController()
         controller.result_batches = [
@@ -109,6 +134,17 @@ class EvidenceBudgetTest(unittest.TestCase):
             candidates,
             ["class-1", "multiclass-1", "class-2", "feat-2", "multiclass-2"],
         )
+
+    def test_decomposition_does_not_credit_an_unrelated_search(self) -> None:
+        decision = route_query("借机攻击何时触发？准备动作如何使用？")
+        controller = ToolLoopController(
+            decomposition=decompose_query(
+                "借机攻击何时触发？准备动作如何使用？",
+                decision,
+            )
+        )
+
+        self.assertEqual(controller._subquestion_for_query("完全无关的规则"), "")
 
     def test_appends_registered_citations_when_model_omits_them(self) -> None:
         self.assertEqual(
@@ -345,6 +381,138 @@ class CompareCoverageGateway:
 
     async def stream_answer(self, messages):
         yield "全防御AC+4；防御式战斗攻击-4、AC+2。[S1][S2]"
+
+
+class DecompositionLibrary(FakeLibrary):
+    def search(self, query: str, limit: int):
+        self.search_queries.append(query)
+        if "准备动作" in query:
+            return [{"id": "pf1e:ready", "title": "准备", "excerpt": "准备动作"}]
+        return [{"id": "pf1e:aoo", "title": "借机攻击", "excerpt": "触发条件"}]
+
+    def read(self, ids):
+        self.read_ids.append(list(ids))
+        documents = {
+            "pf1e:aoo": {
+                "id": "pf1e:aoo",
+                "title": "借机攻击",
+                "fullPath": "核心规则 > 战斗 > 借机攻击",
+                "content": "离开受威胁方格可能触发借机攻击。",
+                "metadata": {},
+            },
+            "pf1e:ready": {
+                "id": "pf1e:ready",
+                "title": "准备",
+                "fullPath": "核心规则 > 战斗 > 特殊先攻动作 > 准备",
+                "content": "准备允许声明触发条件和将要执行的动作。",
+                "metadata": {},
+            },
+        }
+        return [documents[document_id] for document_id in ids if document_id in documents]
+
+
+class PlannerLibrary(FakeLibrary):
+    def search(self, query: str, limit: int):
+        self.search_queries.append(query)
+        document_id = f"pf1e:planner-{len(self.search_queries)}"
+        return [{"id": document_id, "title": query, "excerpt": "规则摘要"}]
+
+    def read(self, ids):
+        self.read_ids.append(list(ids))
+        return [
+            {
+                "id": document_id,
+                "title": f"规则 {document_id}",
+                "fullPath": "PF1E > 规则",
+                "content": "这是当前任务已读取的规则正文。",
+                "metadata": {},
+            }
+            for document_id in ids
+        ]
+
+
+class PlannerGateway:
+    final_messages = []
+
+    def __init__(self, _model):
+        type(self).final_messages = []
+
+    async def decide(self, messages, tools):
+        raise AssertionError("bounded planner executor must not delegate tools to the model")
+
+    async def stream_answer(self, messages):
+        type(self).final_messages = messages
+        yield "按依赖顺序完成规则核对与条件分支。[S1]"
+
+
+class FactRetryPlannerGateway(PlannerGateway):
+    attempts = 0
+
+    def __init__(self, _model):
+        super().__init__(_model)
+        type(self).attempts = 0
+
+    async def stream_answer(self, messages):
+        type(self).attempts += 1
+        type(self).final_messages = messages
+        if type(self).attempts == 1:
+            yield "角色达到12级时，可采用法师5/战士4。[S1]"
+            return
+        yield "角色达到12级时，可采用法师9/战士3。[S1]"
+
+
+class AlwaysInvalidFactPlannerGateway(PlannerGateway):
+    attempts = 0
+
+    def __init__(self, _model):
+        super().__init__(_model)
+        type(self).attempts = 0
+
+    async def stream_answer(self, messages):
+        type(self).attempts += 1
+        type(self).final_messages = messages
+        yield "角色达到12级时，可采用法师5/战士4。[S1]"
+
+
+class DecompositionCoverageGateway:
+    def __init__(self, _model):
+        self.step = 0
+
+    async def decide(self, messages, tools):
+        self.step += 1
+        calls = {
+            1: ToolInvocation("search-q1", "search_rules", '{"query":"借机攻击何时触发？"}'),
+            2: ToolInvocation("read-q1", "read_rules", '{"ids":["pf1e:aoo"]}'),
+            3: ToolInvocation("finish-early", "finish_answer", "{}"),
+            4: ToolInvocation("search-q2", "search_rules", '{"query":"准备动作如何使用？"}'),
+            5: ToolInvocation("read-q2", "read_rules", '{"ids":["pf1e:ready"]}'),
+        }
+        return tool_decision(
+            calls.get(
+                self.step,
+                ToolInvocation("finish-complete", "finish_answer", "{}"),
+            )
+        )
+
+    async def stream_answer(self, messages):
+        yield "借机攻击与准备动作分别依据对应规则处理。[S1][S2]"
+
+
+class DecompositionSkipsSecondReadGateway(DecompositionCoverageGateway):
+    async def decide(self, messages, tools):
+        self.step += 1
+        calls = {
+            1: ToolInvocation("search-q1", "search_rules", '{"query":"借机攻击何时触发？"}'),
+            2: ToolInvocation("read-q1", "read_rules", '{"ids":["pf1e:aoo"]}'),
+            3: ToolInvocation("finish-early", "finish_answer", "{}"),
+            4: ToolInvocation("search-q2", "search_rules", '{"query":"准备动作如何使用？"}'),
+        }
+        return tool_decision(
+            calls.get(
+                self.step,
+                ToolInvocation("finish-without-second-read", "finish_answer", "{}"),
+            )
+        )
 
 
 class ImmediateFinishGateway:
@@ -695,7 +863,206 @@ class AlwaysRefusesGateway(FakeGateway):
         yield "The request was rejected because it was considered high risk"
 
 
+class PausedStreamingGateway:
+    def __init__(self) -> None:
+        self.resume = asyncio.Event()
+
+    async def stream_answer(self, _messages):
+        yield "这是已经通过首段安全检查的规则回答内容。" * 8
+        await self.resume.wait()
+        yield "这是后续增量内容。[S1]"
+
+
 class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
+    async def test_complex_planner_executes_topologically_and_reports_metrics(self) -> None:
+        library = PlannerLibrary()
+        query = (
+            "我想规划6到12级法师兼职战士，必须保持指定法术环级；"
+            "先核对兼职造成的施法进度变化，再根据是否满足环级决定兼职等级，"
+            "并比较战士专长与装备收益。"
+        )
+        with patch("trpg_app.chat._log_turn_metrics") as log_metrics:
+            events = [
+                event
+                async for event in run_rule_turn(
+                    model=self.model(),
+                    library=library,
+                    messages=[{"role": "user", "content": query}],
+                    gateway_factory=PlannerGateway,
+                    enable_complex_planner=True,
+                )
+            ]
+
+        context = log_metrics.call_args.kwargs["context"]
+        self.assertTrue(context["complexPlannerUsed"])
+        self.assertGreaterEqual(context["plannerTaskCount"], 2)
+        self.assertEqual(
+            context["plannerCompletedTaskCount"],
+            context["plannerTaskCount"],
+        )
+        self.assertEqual(context["plannerFailedTaskCount"], 0)
+        self.assertEqual(len(library.search_queries), context["plannerTaskCount"] - 1)
+        final_prompt = PlannerGateway.final_messages[-1]["content"]
+        self.assertIn("受限任务执行结果", final_prompt)
+        self.assertIn('"depends_on"', final_prompt)
+        self.assertIn('"synthesis_contract"', final_prompt)
+        self.assertIn('"fact_ledger"', final_prompt)
+        self.assertIn('"missing_input"', final_prompt)
+        self.assertIn("不得擅自假设一个环级", final_prompt)
+        self.assertEqual(context["synthesisContractVersion"], 1)
+        self.assertGreaterEqual(context["synthesisCheckCount"], 4)
+        self.assertEqual(context["synthesisUnresolvedFieldCount"], 1)
+        self.assertEqual(context["synthesisMissingEvidenceCheckCount"], 0)
+        self.assertEqual(context["factLedgerVersion"], 1)
+        self.assertEqual(context["factValidationIssueCount"], 0)
+        self.assertEqual(events[-1]["type"], "done")
+
+    async def test_fact_ledger_retries_before_exposing_invalid_planner_answer(self) -> None:
+        query = (
+            "我想规划6到12级法师兼职战士，必须保持指定法术环级；"
+            "先核对兼职造成的施法进度变化，再决定兼职等级。"
+        )
+        with patch("trpg_app.chat._log_turn_metrics") as log_metrics:
+            events = [
+                event
+                async for event in run_rule_turn(
+                    model=self.model(),
+                    library=PlannerLibrary(),
+                    messages=[{"role": "user", "content": query}],
+                    gateway_factory=FactRetryPlannerGateway,
+                    enable_complex_planner=True,
+                )
+            ]
+
+        output = "".join(event.get("delta", "") for event in events)
+        self.assertEqual(FactRetryPlannerGateway.attempts, 2)
+        self.assertNotIn("法师5/战士4", output)
+        self.assertIn("法师9/战士3", output)
+        self.assertLessEqual(
+            max(len(event.get("delta", "")) for event in events),
+            24,
+        )
+        self.assertTrue(any(event["type"] == "sources" and event["sources"] for event in events))
+        context = log_metrics.call_args.kwargs["context"]
+        self.assertEqual(context["factValidationIssueCount"], 1)
+
+    async def test_fact_ledger_rejects_repeated_invalid_answer_without_sources(self) -> None:
+        query = (
+            "我想规划6到12级法师兼职战士，必须保持指定法术环级；"
+            "先核对兼职造成的施法进度变化，再决定兼职等级。"
+        )
+        events = [
+            event
+            async for event in run_rule_turn(
+                model=self.model(),
+                library=PlannerLibrary(),
+                messages=[{"role": "user", "content": query}],
+                gateway_factory=AlwaysInvalidFactPlannerGateway,
+                enable_complex_planner=True,
+            )
+        ]
+
+        output = "".join(event.get("delta", "") for event in events)
+        self.assertEqual(AlwaysInvalidFactPlannerGateway.attempts, 2)
+        self.assertNotIn("法师5/战士4", output)
+        self.assertIn("连续未通过服务器事实校验", output)
+        self.assertIn({"type": "sources", "sources": []}, events)
+
+    async def test_final_answer_forwards_safe_deltas_before_provider_finishes(self) -> None:
+        gateway = PausedStreamingGateway()
+        stream = _stream_final_answer(
+            gateway,
+            [{"role": "user", "content": "规则问题"}],
+            CitationRegistry(),
+        )
+
+        self.assertEqual(await anext(stream), {"type": "status", "status": "answering"})
+        first_delta = await asyncio.wait_for(anext(stream), timeout=0.2)
+        self.assertEqual(first_delta["type"], "text_delta")
+        self.assertIn("规则回答内容", first_delta["delta"])
+
+        gateway.resume.set()
+        remaining = [event async for event in stream]
+        self.assertIn(
+            "这是后续增量内容。[S1]",
+            "".join(event.get("delta", "") for event in remaining),
+        )
+        self.assertEqual(remaining[-1]["type"], "done")
+
+    async def test_query_decomposition_defers_finish_until_each_question_has_sources(self) -> None:
+        library = DecompositionLibrary()
+        with patch("trpg_app.chat._log_turn_metrics") as log_metrics:
+            events = [
+                event
+                async for event in run_rule_turn(
+                    model=self.model(),
+                    library=library,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": "借机攻击何时触发？准备动作如何使用？",
+                        }
+                    ],
+                    gateway_factory=DecompositionCoverageGateway,
+                    enable_query_decomposition=True,
+                )
+            ]
+
+        context = log_metrics.call_args.kwargs["context"]
+        self.assertEqual(library.search_queries, ["借机攻击何时触发？", "准备动作如何使用？"])
+        self.assertEqual(context["routeComplexity"], "compound")
+        self.assertEqual(context["decompositionQuestionCount"], 2)
+        self.assertEqual(context["decompositionCoveredQuestionCount"], 2)
+        self.assertEqual(context["decompositionSourcedQuestionCount"], 2)
+        sources = next(event["sources"] for event in events if event["type"] == "sources")
+        self.assertEqual(len(sources), 2)
+        self.assertEqual(events[-1]["type"], "done")
+
+    async def test_query_decomposition_keeps_simple_question_on_existing_loop(self) -> None:
+        with patch("trpg_app.chat._log_turn_metrics") as log_metrics:
+            events = [
+                event
+                async for event in run_rule_turn(
+                    model=self.model(),
+                    library=FakeLibrary(),
+                    messages=[{"role": "user", "content": "借机攻击是什么？"}],
+                    gateway_factory=FakeGateway,
+                    enable_query_decomposition=True,
+                )
+            ]
+
+        context = log_metrics.call_args.kwargs["context"]
+        self.assertEqual(context["routeComplexity"], "simple")
+        self.assertEqual(context["decompositionQuestionCount"], 0)
+        self.assertFalse(context["routeNeedDecomposition"])
+        self.assertNotIn("受限路由与多问题拆解", FakeGateway.first_system_prompt)
+        self.assertEqual(events[-1]["type"], "done")
+
+    async def test_query_decomposition_reads_unread_subquestion_before_finish(self) -> None:
+        library = DecompositionLibrary()
+        with patch("trpg_app.chat._log_turn_metrics") as log_metrics:
+            events = [
+                event
+                async for event in run_rule_turn(
+                    model=self.model(),
+                    library=library,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": "借机攻击何时触发？准备动作如何使用？",
+                        }
+                    ],
+                    gateway_factory=DecompositionSkipsSecondReadGateway,
+                    enable_query_decomposition=True,
+                )
+            ]
+
+        context = log_metrics.call_args.kwargs["context"]
+        self.assertEqual(context["decompositionSourcedQuestionCount"], 2)
+        self.assertIn(["pf1e:ready"], library.read_ids)
+        sources = next(event["sources"] for event in events if event["type"] == "sources")
+        self.assertEqual(len(sources), 2)
+
     async def test_dynamic_follow_up_recovers_evidence_before_immediate_finish(self) -> None:
         library = FakeLibrary()
         events = [

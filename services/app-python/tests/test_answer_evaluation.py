@@ -28,6 +28,8 @@ class _ScriptedRunner:
         self.calls = 0
         self.messages = []
         self.dynamic_flags = []
+        self.query_decomposition_flags = []
+        self.complex_planner_flags = []
 
     async def __call__(
         self,
@@ -37,9 +39,13 @@ class _ScriptedRunner:
         messages,
         request_id=None,
         enable_dynamic_evidence_budget=False,
+        enable_query_decomposition=False,
+        enable_complex_planner=False,
     ):
         self.messages.append([dict(message) for message in messages])
         self.dynamic_flags.append(enable_dynamic_evidence_budget)
+        self.query_decomposition_flags.append(enable_query_decomposition)
+        self.complex_planner_flags.append(enable_complex_planner)
         batch = self.event_batches[self.calls]
         self.calls += 1
         for event in batch:
@@ -241,6 +247,54 @@ class AnswerEvaluationTest(unittest.TestCase):
 
         self.assertEqual(runner.dynamic_flags, [True])
         self.assertTrue(report["dynamicEvidenceBudget"])
+
+    def test_evaluate_forwards_query_decomposition_flag(self) -> None:
+        cases = [AnswerCase("c1", (AnswerTurn("q", ("p",), (("x",),)),))]
+        runner = _ScriptedRunner(
+            [
+                [
+                    {"type": "text_delta", "delta": "x"},
+                    {"type": "sources", "sources": [{"documentId": "p"}]},
+                    {"type": "done"},
+                ]
+            ]
+        )
+        with patch("trpg_app.answer_evaluation.run_rule_turn", new=runner):
+            report = asyncio.run(
+                evaluate_model(
+                    _FakeModel(),
+                    _FakeLibrary(),
+                    cases,
+                    enable_query_decomposition=True,
+                )
+            )
+
+        self.assertEqual(runner.query_decomposition_flags, [True])
+        self.assertTrue(report["queryDecomposition"])
+
+    def test_evaluate_forwards_complex_planner_flag(self) -> None:
+        cases = [AnswerCase("c1", (AnswerTurn("q", ("p",), (("x",),)),))]
+        runner = _ScriptedRunner(
+            [
+                [
+                    {"type": "text_delta", "delta": "x"},
+                    {"type": "sources", "sources": [{"documentId": "p"}]},
+                    {"type": "done"},
+                ]
+            ]
+        )
+        with patch("trpg_app.answer_evaluation.run_rule_turn", new=runner):
+            report = asyncio.run(
+                evaluate_model(
+                    _FakeModel(),
+                    _FakeLibrary(),
+                    cases,
+                    enable_complex_planner=True,
+                )
+            )
+
+        self.assertEqual(runner.complex_planner_flags, [True])
+        self.assertTrue(report["complexPlanner"])
 
     def test_evaluate_flags_budget_overrun(self) -> None:
         cases = [AnswerCase("c1", (AnswerTurn("q", ("p",), (("x",),)),))]

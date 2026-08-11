@@ -44,6 +44,8 @@ class AppConfigTest(unittest.TestCase):
         self.assertEqual(model.request_timeout_seconds, 45)
         self.assertEqual(model.max_retries, 2)
         self.assertFalse(config.enable_dynamic_evidence_budget)
+        self.assertFalse(config.enable_query_decomposition)
+        self.assertFalse(config.enable_complex_planner)
 
     def test_loads_dynamic_evidence_budget_feature_flag(self) -> None:
         config = self.load(
@@ -54,6 +56,26 @@ class AppConfigTest(unittest.TestCase):
         )
 
         self.assertTrue(config.enable_dynamic_evidence_budget)
+
+    def test_loads_query_decomposition_feature_flag(self) -> None:
+        config = self.load(
+            BASE_CONFIG.replace(
+                "library_root: data/libraries",
+                "library_root: data/libraries\nenable_query_decomposition: true",
+            )
+        )
+
+        self.assertTrue(config.enable_query_decomposition)
+
+    def test_loads_complex_planner_feature_flag(self) -> None:
+        config = self.load(
+            BASE_CONFIG.replace(
+                "library_root: data/libraries",
+                "library_root: data/libraries\nenable_complex_planner: true",
+            )
+        )
+
+        self.assertTrue(config.enable_complex_planner)
 
     def test_rejects_unbounded_retry_count(self) -> None:
         with self.assertRaisesRegex(ValueError, "max_retries"):
@@ -74,6 +96,22 @@ class AppConfigTest(unittest.TestCase):
                 BASE_CONFIG.replace(
                     "library_root: data/libraries",
                     'library_root: data/libraries\nenable_dynamic_evidence_budget: "false"',
+                )
+            )
+
+        with self.assertRaisesRegex(ValueError, "must be a boolean"):
+            self.load(
+                BASE_CONFIG.replace(
+                    "library_root: data/libraries",
+                    'library_root: data/libraries\nenable_query_decomposition: "false"',
+                )
+            )
+
+        with self.assertRaisesRegex(ValueError, "must be a boolean"):
+            self.load(
+                BASE_CONFIG.replace(
+                    "library_root: data/libraries",
+                    'library_root: data/libraries\nenable_complex_planner: "false"',
                 )
             )
 
