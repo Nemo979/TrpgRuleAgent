@@ -65,6 +65,18 @@ TrpgRuleAgent 当前是一套面向少量可信用户的多游戏系统 Web 规�
   GSS 22 题检索保持原基线；经明确授权，MiMo 固定/动态专项均为 5/5，动态 PF1E 回归为
   6/6、来源 100%、无依据率 0%。动态 6 轮 prompt token mean 10,924.5、总延迟 mean
   40.12 秒，未超过固定基线 11,528/57.26 秒。Feature Flag 继续默认关闭，等待发布流程决策。
+- V2.3 Stage 2 已完成并通过发布门：纯代码 `RouteDecision`、最多 4 个子问题的受限拆解、默认关闭的
+  `enable_query_decomposition`、串行取证恢复、子问题独立 Evidence 配额/来源集合和全局硬上限均已
+  接入正式 Python 链路。12 题确定性专项集为 12/12，单问题误拆率 0%、目标域覆盖率 100%，
+  Python App 156 项测试通过；经明确授权，真实 MiMo 3 题固定/拆解 A/B 为 2/3 → 3/3，
+  无依据率 33.33% → 0%，最大工具调用 7 → 8（预算 12）；拆解开关 PF1E 6 轮回归为 6/6。
+  原始报告仅保存在 `/private/tmp`，未提交仓库。
+- V2.3 Stage 2.5 已修复最终回答一次性出现的问题：后端仅保留 96 字符安全前导，通过后在供应商
+  流结束前持续发送 `text_delta`；SSE 明确禁用缓存转换和反向代理缓冲。首段拒答重试与无虚假
+  来源保护保持不变。输入框同时补齐 IME 组合态保护：选字 Enter 与 WebKit process key 不发送，
+  Shift+Enter 换行、普通 Enter 发送。服务已重启加载该实现。
+- Stage 3 Planner 与 Fact Ledger 实验已转入独立整改分支，未进入当前发布内容。真实质量门尚未
+  通过；下一阶段按 V2.3 §8.7 完成通用 Fact Ledger 核心与 PF1E Adapter 整改后再申请发布。
 - MiMo 已完成 4 组、6 轮 PF1E 真实问答验收；事实、来源和多轮追问均通过。按本轮决定未重复验收 Agnes 与 SenseNova。
 - 《夕妖晚谣》1.2 中文规则库已发布 154 个父文档、488 个检索子块。
 - 当前发布版本为 `20260801T105530Z`，包含 `GSS` 与 `Golden Sky Stories` 显式别名。
@@ -75,8 +87,8 @@ TrpgRuleAgent 当前是一套面向少量可信用户的多游戏系统 Web 规�
 
 ### V1 稳定性验收
 
-- TypeScript/Vitest：27 个测试文件、264 项测试通过。
-- Python 应用服务：130 项测试通过。
+- TypeScript/Vitest：28 个测试文件、268 项测试通过。
+- Python 应用服务：154 项测试及 23 个子测试通过。
 - Python 检索服务：64 项测试通过。
 - 全仓 TypeScript 类型检查和 Web 生产构建通过。
 - 三个真实模型均完成 PF1E 和《夕妖晚谣》检索、回答、来源和结束事件验收。
@@ -178,8 +190,9 @@ npx vitest run <test-file> --pool=forks --maxWorkers=1
 2. 同轮 ContextBudget 与工具结果压缩已完成；长会话/revision 确定性评测和真实 MiMo 长历史
    答案基线均已通过。上下文摘要仍未实现；当前最长 48 轮样本仅 737 History token 且未裁剪，
    不满足 Summary 启动条件。
-3. 动态 Evidence Budget Stage 1 已完成并通过真实 MiMo A/B 与发布门；Feature Flag 仍默认关闭，
-   下一步按 Stage 2 进入受限多问题拆解与路由，不在本阶段直接启用通用 Planner。
+3. 动态 Evidence Budget Stage 1 与受限多问题拆解 Stage 2 均已完成真实 MiMo A/B、回归和发布门。
+   Stage 3 受限 Planner 已满足启动条件但连续真实质量门失败，Feature Flag 保持关闭；下一步执行
+   §8.7 通用 Fact Ledger 核心与 PF1E Adapter 整改，不进入 Summary 或并行。
 4. 答案级评测（已落地，见 `services/app-python/src/trpg_app/answer_evaluation.py` 与 `docs/answer-evaluation.md`）：事实点(`requiredAny`)、引用支持度(`source_match`)、工具预算(`toolCalls`/`withinBudget`)、无依据结论率(`unsupportedRate`)、**LLM-judge 事实正确性/幻觉(`factualCorrect`/`hallucinationFree`, 经 `--judge-model`)** 五项指标 + 多轮/错误/超时/judge 容错 + 单测。PF1E 已有 v2.0/v2.1 真实金标题集。前端仍保留 Agnes/SenseNova 可选，并将 MiMo 设为新对话默认模型；**Agnes / SenseNova 明确不在本轮评测范围**。待补：GSS 的真实金标题集。
 5. 检索质量：结构化切块、重排器和剩余漏召回题优化。V2.2 Stage 0 已修复锚点章节切分（CRB 战斗规则 10 子章节恢复）与 table 策略页正文丢失（overview 兜底），候选重建为 7140 文档、质量门通过；85/30 题相关 ID 100% 覆盖，检索基线待确认。
 6. PDF/CHM 图片、扫描件 OCR 和复杂表格理解。

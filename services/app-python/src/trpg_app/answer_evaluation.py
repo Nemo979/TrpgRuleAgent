@@ -5,7 +5,7 @@ import asyncio
 import json
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from openai import AsyncOpenAI
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Sequence
@@ -334,6 +334,7 @@ async def evaluate_model(
     judge: AnswerJudge | None = None,
     reference_map: dict[str, str] | None = None,
     enable_dynamic_evidence_budget: bool = False,
+    enable_query_decomposition: bool = False,
 ) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     passed_turns = 0
@@ -358,6 +359,8 @@ async def evaluate_model(
                 }
                 if enable_dynamic_evidence_budget:
                     turn_options["enable_dynamic_evidence_budget"] = True
+                if enable_query_decomposition:
+                    turn_options["enable_query_decomposition"] = True
                 async with asyncio.timeout(model.request_timeout_seconds):
                     async for event in run_rule_turn(**turn_options):
                         event_type = event.get("type")
@@ -453,6 +456,7 @@ async def evaluate_model(
     return {
         "modelId": model.id,
         "dynamicEvidenceBudget": enable_dynamic_evidence_budget,
+        "queryDecomposition": enable_query_decomposition,
         "caseCount": len(cases),
         "turnCount": turn_count,
         "passedTurns": passed_turns,
@@ -495,14 +499,32 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Enable the deterministic Stage 1 evidence policy for this run",
     )
+    parser.add_argument(
+        "--query-decomposition",
+        action="store_true",
+        help="Enable deterministic Stage 2 routing and bounded decomposition",
+    )
+    parser.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=None,
+        help="Evaluation-only per-turn timeout override; production config is unchanged",
+    )
     return parser.parse_args()
 
 
 async def async_main() -> None:
     args = parse_args()
+    if args.timeout_seconds is not None and args.timeout_seconds <= 0:
+        raise ValueError("timeout-seconds must be positive")
     config = load_config(args.config)
     requested = {value.strip() for value in args.models.split(",") if value.strip()}
     models = [model for model in config.models if model.id in requested]
+    if args.timeout_seconds is not None:
+        models = [
+            replace(model, request_timeout_seconds=args.timeout_seconds)
+            for model in models
+        ]
     if {model.id for model in models} != requested:
         missing = sorted(requested - {model.id for model in models})
         raise ValueError(f"unknown configured models: {', '.join(missing)}")
@@ -535,6 +557,7 @@ async def async_main() -> None:
             judge=judge,
             reference_map=reference_map,
             enable_dynamic_evidence_budget=args.dynamic_evidence_budget,
+            enable_query_decomposition=args.query_decomposition,
         )
         reports.append(report)
         print(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import re
 import time
 import unicodedata
@@ -25,9 +26,23 @@ from .observability import (
     summarize_messages,
 )
 from .query_intent import QueryIntent, QueryPlan, build_query_plan, classify_intent
+from .query_decomposition import (
+    QueryDecomposition,
+    RouteDecision,
+    decomposition_search_query,
+    decompose_query,
+    detect_domains,
+    route_query,
+)
 
 
 logger = logging.getLogger("uvicorn.error")
+
+
+# Hold only the provider preamble long enough to catch the known refusal and
+# transient-service envelopes. Once the preamble is safe, later provider
+# deltas are forwarded immediately instead of waiting for the full answer.
+_ANSWER_STREAM_GUARD_CHARACTERS = 96
 
 
 _PROVIDER_REFUSAL_PATTERNS = (
@@ -285,6 +300,7 @@ class EvidenceBudget:
     topic_allocations: dict[str, float] = field(default_factory=dict)
     topic_documents: dict[str, int] = field(default_factory=dict)
     topic_tokens: dict[str, int] = field(default_factory=dict)
+    strict_topic_allocations: bool = False
 
     def consume_search(self) -> None:
         if self.searches >= self.max_searches:
@@ -313,44 +329,72 @@ class EvidenceBudget:
             characters = len(str(document.get("content", "")))
             tokens = estimate_tokens(str(document.get("content", "")))
             topic = (document_topics or {}).get(str(document.get("id", "")), "")
+            if self.strict_topic_allocations and topic not in self.topic_allocations:
+                self.last_skipped_reasons.append("unassigned_topic")
+                continue
             if topic in self.topic_allocations:
-                other_unfilled = sum(
-                    1
-                    for other in self.topic_allocations
-                    if other != topic
-                    and self.topic_documents.get(other, 0)
-                    + accepted_topics.get(other, 0)
-                    == 0
-                )
-                topic_document_limit = max(1, self.max_documents - other_unfilled)
-                if (
-                    self.topic_documents.get(topic, 0)
-                    + accepted_topics.get(topic, 0)
-                    >= topic_document_limit
-                ):
-                    self.last_skipped_reasons.append("topic_document_limit")
-                    continue
-                recyclable_tokens = sum(
-                    int(self.max_evidence_tokens * share)
-                    for other, share in self.topic_allocations.items()
-                    if other != topic
-                    and self.topic_documents.get(other, 0)
-                    + accepted_topics.get(other, 0)
-                    > 0
-                )
-                topic_token_limit = max(
-                    1,
-                    int(self.max_evidence_tokens * self.topic_allocations[topic])
-                    + recyclable_tokens,
-                )
-                if (
-                    self.topic_tokens.get(topic, 0)
-                    + accepted_topic_tokens.get(topic, 0)
-                    + tokens
-                    > topic_token_limit
-                ):
-                    self.last_skipped_reasons.append("topic_token_budget")
-                    continue
+                if self.strict_topic_allocations:
+                    topic_document_limit = max(
+                        1,
+                        math.ceil(self.max_documents * self.topic_allocations[topic]),
+                    )
+                    topic_token_limit = max(
+                        1,
+                        int(self.max_evidence_tokens * self.topic_allocations[topic]),
+                    )
+                    if (
+                        self.topic_documents.get(topic, 0)
+                        + accepted_topics.get(topic, 0)
+                        >= topic_document_limit
+                    ):
+                        self.last_skipped_reasons.append("topic_document_limit")
+                        continue
+                    if (
+                        self.topic_tokens.get(topic, 0)
+                        + accepted_topic_tokens.get(topic, 0)
+                        + tokens
+                        > topic_token_limit
+                    ):
+                        self.last_skipped_reasons.append("topic_token_budget")
+                        continue
+                else:
+                    other_unfilled = sum(
+                        1
+                        for other in self.topic_allocations
+                        if other != topic
+                        and self.topic_documents.get(other, 0)
+                        + accepted_topics.get(other, 0)
+                        == 0
+                    )
+                    topic_document_limit = max(1, self.max_documents - other_unfilled)
+                    if (
+                        self.topic_documents.get(topic, 0)
+                        + accepted_topics.get(topic, 0)
+                        >= topic_document_limit
+                    ):
+                        self.last_skipped_reasons.append("topic_document_limit")
+                        continue
+                    recyclable_tokens = sum(
+                        int(self.max_evidence_tokens * share)
+                        for other, share in self.topic_allocations.items()
+                        if other != topic
+                        and self.topic_documents.get(other, 0)
+                        + accepted_topics.get(other, 0)
+                        > 0
+                    )
+                    topic_token_limit = max(
+                        1,
+                        int(self.max_evidence_tokens * self.topic_allocations[topic])
+                        + recyclable_tokens,
+                    )
+                    if (
+                        self.topic_tokens.get(topic, 0)
+                        + accepted_topic_tokens.get(topic, 0)
+                        + tokens
+                        > topic_token_limit
+                    ):
+                        self.last_skipped_reasons.append("topic_token_budget")
+                        continue
             if self.evidence_characters + sum(
                 len(str(item.get("content", ""))) for item in accepted
             ) + characters > self.max_evidence_characters:
@@ -399,8 +443,13 @@ class ToolLoopController:
     evidence_profile: EvidenceBudgetProfile | None = None
     document_topics: dict[str, str] = field(default_factory=dict)
     deferred_finishes: int = 0
+    deferred_decomposition_finishes: int = 0
     planned_queries: tuple[str, ...] = ()
     is_follow_up: bool = False
+    decomposition: QueryDecomposition = field(default_factory=QueryDecomposition)
+    active_subquestion_id: str = ""
+    searched_subquestions: set[str] = field(default_factory=set)
+    subquestion_document_ids: dict[str, set[str]] = field(default_factory=dict)
 
     def before_search(self, query: str) -> str | None:
         normalized = _normalize_query(query)
@@ -411,6 +460,7 @@ class ToolLoopController:
         if self.searches_without_read >= self.max_searches_without_read:
             return "searches_without_read"
         self.seen_queries.add(normalized)
+        self.active_subquestion_id = self._subquestion_for_query(query)
         return None
 
     def enrich_query(self, query: str) -> str:
@@ -427,7 +477,13 @@ class ToolLoopController:
         ]
         if self.latest_result_ids:
             self.result_batches.append(list(self.latest_result_ids))
-        if self.evidence_profile is not None:
+        if self.active_subquestion_id:
+            self.searched_subquestions.add(self.active_subquestion_id)
+            for hit in hits:
+                document_id = str(hit.get("id", ""))
+                if document_id:
+                    self.document_topics[document_id] = self.active_subquestion_id
+        elif self.evidence_profile is not None:
             for hit in hits:
                 document_id = str(hit.get("id", ""))
                 if document_id:
@@ -446,6 +502,72 @@ class ToolLoopController:
         if not new_ids:
             return "repeated_results"
         return None
+
+    def _subquestion_for_query(self, query: str) -> str:
+        if not self.decomposition.questions:
+            return ""
+        normalized = _normalize_query(query)
+        # Prefer an exact containment match across every task before applying
+        # fuzzy matching. Otherwise an earlier task sharing terms such as
+        # “战士专长” can steal evidence from the later exact equipment task.
+        for question in self.decomposition.questions:
+            question_normalized = _normalize_query(question.question)
+            if normalized in question_normalized or question_normalized in normalized:
+                return question.id
+        for question in self.decomposition.questions:
+            question_normalized = _normalize_query(question.question)
+            if _longest_common_substring_length(normalized, question_normalized) >= 4:
+                return question.id
+        query_domains = set(detect_domains(query))
+        domain_matches = [
+            question
+            for question in self.decomposition.questions
+            if question.id not in self.searched_subquestions
+            and question.domain != "rule"
+            and question.domain in query_domains
+        ]
+        return domain_matches[0].id if len(domain_matches) == 1 else ""
+
+    def missing_subquestions(self) -> tuple[Any, ...]:
+        return tuple(
+            question
+            for question in self.decomposition.questions
+            if question.id not in self.searched_subquestions
+        )
+
+    def unsourced_subquestions(self) -> tuple[Any, ...]:
+        return tuple(
+            question
+            for question in self.decomposition.questions
+            if question.id in self.searched_subquestions
+            and not self.subquestion_document_ids.get(question.id)
+        )
+
+    def unread_subquestion_candidates(
+        self,
+        question_id: str,
+        registered_ids: set[str],
+    ) -> list[str]:
+        return [
+            document_id
+            for document_id, topic in self.document_topics.items()
+            if topic == question_id and document_id not in registered_ids
+        ]
+
+    def record_admitted_documents(self, documents: list[dict[str, Any]]) -> None:
+        for document in documents:
+            document_id = str(document.get("id", ""))
+            question_id = self.document_topics.get(document_id, "")
+            if question_id:
+                self.subquestion_document_ids.setdefault(question_id, set()).add(document_id)
+
+    def record_existing_document_ids(self, document_ids: list[str]) -> None:
+        for document_id in document_ids:
+            if not document_id:
+                continue
+            question_id = self.document_topics.get(document_id, "")
+            if question_id:
+                self.subquestion_document_ids.setdefault(question_id, set()).add(document_id)
 
     def unread_candidates(self, registered_ids: set[str]) -> list[str]:
         """Return unseen candidates round-robin across all search batches."""
@@ -520,6 +642,7 @@ async def run_rule_turn(
     gateway_factory: Callable[[ModelConfig], ModelGateway] = OpenAIModelGateway,
     request_id: str | None = None,
     enable_dynamic_evidence_budget: bool = False,
+    enable_query_decomposition: bool = False,
 ) -> AsyncIterator[dict[str, Any]]:
     gateway = gateway_factory(model)
     state = ConversationState.from_messages(messages)
@@ -532,7 +655,22 @@ async def run_rule_turn(
         ),
         "",
     )
-    system_prompt = _system_prompt(library, state, latest_user_message)
+    route_decision: RouteDecision | None = None
+    decomposition = QueryDecomposition()
+    if enable_query_decomposition:
+        route_decision = route_query(latest_user_message, state)
+        decomposition = decompose_query(latest_user_message, route_decision)
+        timer.routing_seconds += route_decision.routing_seconds
+    system_prompt = _system_prompt(
+        library,
+        state,
+        latest_user_message,
+        # Keep the enabled-but-simple path byte-for-byte compatible with the
+        # existing agent prompt. Routing remains observable in metrics, while
+        # only an actual decomposition is exposed to the model.
+        route_decision=route_decision if decomposition.questions else None,
+        decomposition=decomposition,
+    )
     state_context = state.prompt_context()
     system_total_tokens = estimate_tokens(system_prompt)
     state_tokens = estimate_tokens(state_context)
@@ -551,7 +689,7 @@ async def run_rule_turn(
     ]
     trimmed, dropped_count = context_budget.trim_recent_messages(messages)
     conversation.extend(trimmed)
-    intent = classify_intent(latest_user_message)
+    intent = route_decision.intent if route_decision is not None else classify_intent(latest_user_message)
     query_plan = build_query_plan(latest_user_message, state)
     previous_user_message = next(
         (
@@ -583,6 +721,14 @@ async def run_rule_turn(
         if enable_dynamic_evidence_budget
         else EvidenceBudgetPolicy.fixed(context_budget)
     )
+    decomposition_allocations = (
+        {
+            question.id: 1 / len(decomposition.questions)
+            for question in decomposition.questions
+        }
+        if decomposition.questions
+        else {}
+    )
     budget = EvidenceBudget(
         max_searches=(evidence_profile.max_searches if enable_dynamic_evidence_budget else 6),
         max_documents=(
@@ -592,10 +738,21 @@ async def run_rule_turn(
         ),
         max_evidence_tokens=evidence_profile.max_evidence_tokens,
         topic_allocations=(
-            dict(evidence_profile.topic_allocations)
+            decomposition_allocations
+            if decomposition_allocations
+            else dict(evidence_profile.topic_allocations)
             if enable_dynamic_evidence_budget
             else {}
         ),
+        strict_topic_allocations=bool(decomposition_allocations),
+    )
+    planned_queries = tuple(
+        dict.fromkeys(
+            (
+                *(decomposition_search_query(question) for question in decomposition.questions),
+                *query_plan.queries,
+            )
+        )
     )
     citations = CitationRegistry()
     controller = ToolLoopController(
@@ -612,13 +769,24 @@ async def run_rule_turn(
             if enable_dynamic_evidence_budget
             else 3
         ),
-        max_answer_documents=evidence_profile.max_answer_documents,
+        max_answer_documents=(
+            min(
+                budget.max_documents,
+                max(
+                    evidence_profile.max_answer_documents,
+                    len(decomposition.questions) * 4,
+                ),
+            )
+            if decomposition.questions
+            else evidence_profile.max_answer_documents
+        ),
         conversation_state=state,
         latest_user_message=latest_user_message,
         intent=intent,
         evidence_profile=evidence_profile,
-        planned_queries=query_plan.queries,
+        planned_queries=planned_queries,
         is_follow_up=is_follow_up,
+        decomposition=decomposition,
     )
     history = summarize_messages(trimmed)
     original_history = summarize_messages(messages)
@@ -644,6 +812,25 @@ async def run_rule_turn(
                 ),
                 "evidencePolicyMaxTokens": evidence_profile.max_evidence_tokens,
                 "evidencePolicyUsedTopics": len(budget.topic_documents),
+                "queryDecompositionEnabled": enable_query_decomposition,
+                "routerVersion": route_decision.router_version if route_decision else 0,
+                "routeComplexity": (
+                    route_decision.complexity.value if route_decision else "disabled"
+                ),
+                "routeReasonCode": (
+                    route_decision.reason_code if route_decision else "disabled"
+                ),
+                "routeDomainCount": len(route_decision.domains) if route_decision else 0,
+                "routeNeedDecomposition": bool(
+                    route_decision and route_decision.need_decomposition
+                ),
+                "decompositionQuestionCount": len(decomposition.questions),
+                "decompositionCoveredQuestionCount": len(
+                    controller.searched_subquestions
+                ),
+                "decompositionSourcedQuestionCount": len(
+                    controller.subquestion_document_ids
+                ),
                 **context_budget.metrics(),
             },
             budget=budget,
@@ -659,6 +846,86 @@ async def run_rule_turn(
     if dropped_count:
         yield {"type": "context_truncated", "droppedMessages": dropped_count}
     yield {"type": "status", "status": "thinking"}
+    if decomposition.questions:
+        for question_index, question in enumerate(decomposition.questions, start=1):
+            if budget.searches >= budget.max_searches:
+                break
+            controller.searches_without_read = 0
+            search_started = time.monotonic()
+            execution = _execute_tool(
+                name="search_rules",
+                arguments=json.dumps(
+                    {
+                        "query": decomposition_search_query(question),
+                        "limit": 10,
+                    },
+                    ensure_ascii=False,
+                ),
+                library=library,
+                budget=budget,
+                citations=citations,
+                controller=controller,
+            )
+            timer.retrieval_seconds += time.monotonic() - search_started
+            yield {"type": "status", "status": execution.status}
+            _log_tool_step(
+                request_id=request_id,
+                model=model,
+                library=library,
+                decision_index=question_index,
+                requested_calls=0,
+                executed_tool="search_rules_decomposition",
+                budget=budget,
+                stop_reason=execution.stop_reason,
+                query_hash=execution.query_hash,
+            )
+            remaining_documents = max(
+                0,
+                controller.max_answer_documents - budget.documents,
+            )
+            candidate_ids = [
+                document_id
+                for document_id in controller.latest_result_ids
+                if document_id not in citations.by_document_id
+            ]
+            if not candidate_ids or not remaining_documents:
+                continue
+            read_started = time.monotonic()
+            read_execution = _execute_tool(
+                name="read_rules",
+                arguments=json.dumps(
+                    {"ids": candidate_ids[: min(4, remaining_documents)]},
+                    ensure_ascii=False,
+                ),
+                library=library,
+                budget=budget,
+                citations=citations,
+                controller=controller,
+            )
+            timer.read_seconds += time.monotonic() - read_started
+            yield {"type": "status", "status": read_execution.status}
+            _log_tool_step(
+                request_id=request_id,
+                model=model,
+                library=library,
+                decision_index=question_index,
+                requested_calls=0,
+                executed_tool="read_rules_decomposition",
+                budget=budget,
+                stop_reason=read_execution.stop_reason,
+                new_documents=read_execution.new_documents,
+            )
+        if citations.by_document_id:
+            async for event in _stream_final_answer(
+                gateway,
+                conversation,
+                citations,
+                timer,
+                final_answer_tokens,
+            ):
+                yield event
+            _emit_turn_metrics("decomposition_finish", final_answer_tokens[0])
+            return
     for decision_index in range(1, 11):
         decision_conversation = context_budget.prepare_decision_messages(conversation)
         decision_prompt_tokens = estimate_message_tokens(decision_conversation)
@@ -814,6 +1081,74 @@ async def run_rule_turn(
                         stop_reason=follow_up_read.stop_reason,
                         new_documents=follow_up_read.new_documents,
                     )
+            for question in controller.unsourced_subquestions():
+                remaining_documents = max(
+                    0,
+                    controller.max_answer_documents - budget.documents,
+                )
+                candidate_ids = controller.unread_subquestion_candidates(
+                    question.id,
+                    set(citations.by_document_id),
+                )
+                if not candidate_ids or not remaining_documents:
+                    continue
+                decomposition_read = _execute_tool(
+                    name="read_rules",
+                    arguments=json.dumps(
+                        {"ids": candidate_ids[: min(4, remaining_documents)]},
+                        ensure_ascii=False,
+                    ),
+                    library=library,
+                    budget=budget,
+                    citations=citations,
+                    controller=controller,
+                )
+                yield {"type": "status", "status": decomposition_read.status}
+                _log_tool_step(
+                    request_id=request_id,
+                    model=model,
+                    library=library,
+                    decision_index=decision_index,
+                    requested_calls=len(requested_calls),
+                    executed_tool="read_rules_decomposition_source_recovery",
+                    budget=budget,
+                    stop_reason=decomposition_read.stop_reason,
+                    new_documents=decomposition_read.new_documents,
+                )
+            missing_subquestions = controller.missing_subquestions()
+            if (
+                missing_subquestions
+                and budget.searches < budget.max_searches
+                and controller.deferred_decomposition_finishes
+                < len(decomposition.questions)
+            ):
+                next_question = missing_subquestions[0]
+                controller.deferred_decomposition_finishes += 1
+                prompt = (
+                    "多问题证据尚未覆盖完毕。请只针对下一个子问题调用一次 "
+                    f"search_rules：[{next_question.id}] "
+                    f"{decomposition_search_query(next_question)}。"
+                    "不要回答，也不要并行调用工具。"
+                )
+                for tool_call in requested_calls:
+                    conversation.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": prompt,
+                        }
+                    )
+                _log_tool_step(
+                    request_id=request_id,
+                    model=model,
+                    library=library,
+                    decision_index=decision_index,
+                    requested_calls=len(requested_calls),
+                    executed_tool="finish_answer_deferred_for_decomposition",
+                    budget=budget,
+                    stop_reason=None,
+                )
+                continue
             missing_topic_prompt = (
                 EvidenceBudgetPolicy.missing_topic_prompt(
                     intent,
@@ -991,9 +1326,25 @@ async def _stream_final_answer(
     for attempt in range(2):
         answer_prompt_tokens = estimate_message_tokens(answer_conversation)
         answer_started = time.monotonic()
-        answer_parts = [
-            delta async for delta in gateway.stream_answer(answer_conversation)
-        ]
+        answer_parts: list[str] = []
+        guarded_parts: list[str] = []
+        answer_exposed = False
+        detected_issue = ""
+        async for delta in gateway.stream_answer(answer_conversation):
+            answer_parts.append(delta)
+            if answer_exposed:
+                yield {"type": "text_delta", "delta": delta}
+                continue
+            guarded_parts.append(delta)
+            guarded_content = "".join(guarded_parts)
+            detected_issue = _answer_quality_issue(guarded_content) or ""
+            if detected_issue:
+                break
+            if _answer_stream_guard_ready(guarded_content):
+                answer_exposed = True
+                for guarded_delta in guarded_parts:
+                    yield {"type": "text_delta", "delta": guarded_delta}
+                guarded_parts.clear()
         if timer is not None:
             timer.final_generation_seconds += time.monotonic() - answer_started
         content = "".join(answer_parts)
@@ -1007,14 +1358,29 @@ async def _stream_final_answer(
                 estimated_completion_tokens=estimate_tokens(content),
             )
         final_answer_tokens_estimate = max(final_answer_tokens_estimate, estimate_tokens(content))
-        last_issue = _answer_quality_issue(content) or ""
+        last_issue = detected_issue or _answer_quality_issue(content) or ""
         if not last_issue:
-            for delta in answer_parts:
-                yield {"type": "text_delta", "delta": delta}
+            if not answer_exposed:
+                for delta in guarded_parts:
+                    yield {"type": "text_delta", "delta": delta}
             suffix = _missing_citation_suffix(content, citations.labels())
             if suffix:
                 yield {"type": "text_delta", "delta": suffix}
             yield {"type": "sources", "sources": citations.public()}
+            yield {"type": "done", "finalAnswerTokens": final_answer_tokens_estimate}
+            if final_answer_tokens is not None:
+                final_answer_tokens[0] = final_answer_tokens_estimate
+            return
+        if answer_exposed:
+            # A provider envelope detected after the guarded preamble cannot be
+            # retracted from an SSE stream. Do not attach rule sources to it;
+            # end with an explicit safe failure instead of silently retrying.
+            logger.warning("answer_quality_late_issue issue=%s", last_issue)
+            yield {
+                "type": "text_delta",
+                "delta": "\n\n" + _answer_quality_failure(last_issue),
+            }
+            yield {"type": "sources", "sources": []}
             yield {"type": "done", "finalAnswerTokens": final_answer_tokens_estimate}
             if final_answer_tokens is not None:
                 final_answer_tokens[0] = final_answer_tokens_estimate
@@ -1025,11 +1391,12 @@ async def _stream_final_answer(
             attempt + 1,
         )
         if attempt == 0:
+            recovery = _answer_recovery_instruction(last_issue)
             answer_conversation = [
                 *answer_conversation,
                 {
                     "role": "system",
-                    "content": _answer_recovery_instruction(last_issue),
+                    "content": recovery,
                 },
             ]
 
@@ -1038,6 +1405,13 @@ async def _stream_final_answer(
     # attach the evidence registry to it, even if retrieval itself succeeded.
     yield {"type": "sources", "sources": []}
     yield {"type": "done"}
+
+
+def _answer_stream_guard_ready(content: str) -> bool:
+    normalized = content.strip()
+    return len(normalized) >= _ANSWER_STREAM_GUARD_CHARACTERS or (
+        len(normalized) >= 32 and "\n\n" in normalized
+    )
 
 
 async def _finish_after_controller_stop(
@@ -1054,6 +1428,70 @@ async def _finish_after_controller_stop(
     decision_index: int,
 ) -> AsyncIterator[dict[str, Any]]:
     priority_candidate_ids: list[str] = []
+    # A compound route is completed deterministically and serially when the
+    # model stops early.  Each search/read pair stays inside the shared hard
+    # limits and is attributed to its own subquestion allocation.
+    for question in tuple(controller.missing_subquestions()):
+        if budget.searches >= budget.max_searches:
+            break
+        controller.searches_without_read = 0
+        decomposition_search = _execute_tool(
+            name="search_rules",
+            arguments=json.dumps(
+                {"query": decomposition_search_query(question), "limit": 10},
+                ensure_ascii=False,
+            ),
+            library=library,
+            budget=budget,
+            citations=citations,
+            controller=controller,
+        )
+        yield {"type": "status", "status": decomposition_search.status}
+        _log_tool_step(
+            request_id=request_id,
+            model=model,
+            library=library,
+            decision_index=decision_index,
+            requested_calls=0,
+            executed_tool="search_rules_decomposition_recovery",
+            budget=budget,
+            stop_reason=decomposition_search.stop_reason,
+            query_hash=decomposition_search.query_hash,
+        )
+        remaining_documents = max(
+            0,
+            controller.max_answer_documents - budget.documents,
+        )
+        candidate_ids = [
+            document_id
+            for document_id in controller.latest_result_ids
+            if document_id not in citations.by_document_id
+        ]
+        if not candidate_ids or not remaining_documents:
+            continue
+        decomposition_read = _execute_tool(
+            name="read_rules",
+            arguments=json.dumps(
+                {"ids": candidate_ids[: min(4, remaining_documents)]},
+                ensure_ascii=False,
+            ),
+            library=library,
+            budget=budget,
+            citations=citations,
+            controller=controller,
+        )
+        yield {"type": "status", "status": decomposition_read.status}
+        _log_tool_step(
+            request_id=request_id,
+            model=model,
+            library=library,
+            decision_index=decision_index,
+            requested_calls=0,
+            executed_tool="read_rules_decomposition_recovery",
+            budget=budget,
+            stop_reason=decomposition_read.stop_reason,
+            new_documents=decomposition_read.new_documents,
+        )
     if (
         not citations.by_document_id
         and stop_reason
@@ -1142,11 +1580,16 @@ async def _finish_after_controller_stop(
         )
         priority_candidate_ids = list(controller.latest_result_ids)
     dynamic_multi_topic_recovery = (
-        controller.evidence_profile is not None
-        and controller.evidence_profile.policy_version > 0
-        and (
-            len(controller.evidence_profile.topic_allocations) > 1
-            or controller.is_follow_up
+        (
+            bool(controller.decomposition.questions)
+            or (
+                controller.evidence_profile is not None
+                and controller.evidence_profile.policy_version > 0
+                and (
+                    len(controller.evidence_profile.topic_allocations) > 1
+                    or controller.is_follow_up
+                )
+            )
         )
         and stop_reason
         in {
@@ -1307,7 +1750,7 @@ def _final_answer_conversation(
                 "该状态需要用规则证据验证，不能覆盖规则原文；状态字段之间互不构成"
                 "约束，除非证据明确说明。\n"
                 f"本题字段解释：{state.answer_guidance(question) or '无'}\n\n"
-                f"已读取证据：\n{evidence}"
+                + f"已读取证据：\n{evidence}"
             ),
         },
     ]
@@ -1328,6 +1771,8 @@ def _system_prompt(
     library: Library,
     state: ConversationState | None = None,
     latest_user_message: str = "",
+    route_decision: RouteDecision | None = None,
+    decomposition: QueryDecomposition | None = None,
 ) -> str:
     manifest = library.manifest
     identity = {
@@ -1339,7 +1784,7 @@ def _system_prompt(
     }
     state_context = (state or ConversationState()).prompt_context()
     query_plan = build_query_plan(latest_user_message, state)
-    return (
+    prompt = (
         f"{SYSTEM_PROMPT}\n\n"
         "当前绑定规则库（这些字段仅用于标识规则范围）：\n"
         f"{json.dumps(identity, ensure_ascii=False, indent=2)}"
@@ -1358,6 +1803,20 @@ def _system_prompt(
             ensure_ascii=False,
         )
     )
+    if route_decision is not None:
+        prompt += (
+            "\n\n受限路由与多问题拆解（纯代码生成，不是规则证据）：\n"
+            + json.dumps(
+                {
+                    "routeDecision": route_decision.public(),
+                    "decomposition": (decomposition or QueryDecomposition()).public(),
+                },
+                ensure_ascii=False,
+            )
+            + "\n若存在子问题，必须按列表顺序串行检索；每次只处理一个子问题，"
+            "所有规则结论仍须来自 read_rules 返回的证据。"
+        )
+    return prompt
 
 
 def _execute_tool(
@@ -1419,6 +1878,13 @@ def _execute_tool(
             )
         hits = library.search(query, limit)
         stop_reason = controller.after_search(query, hits)
+        controller.record_existing_document_ids(
+            [
+                str(hit.get("id", ""))
+                for hit in hits
+                if str(hit.get("id", "")) in citations.by_document_id
+            ]
+        )
         if (
             stop_reason is None
             and citations.by_document_id
@@ -1452,6 +1918,13 @@ def _execute_tool(
             )
         ids = [str(value) for value in raw_ids[:remaining_documents]]
         documents = library.read(list(dict.fromkeys(ids)))
+        controller.record_existing_document_ids(
+            [
+                document_id
+                for document_id in ids
+                if document_id in citations.by_document_id
+            ]
+        )
         new_documents = [
             document
             for document in documents
@@ -1500,6 +1973,7 @@ def _execute_tool(
                     "content": document["content"],
                 }
             )
+        controller.record_admitted_documents(admitted_documents)
         controller.after_read()
         if budget.last_skipped_reasons:
             result.insert(
@@ -1527,6 +2001,21 @@ def _execute_tool(
 def _normalize_query(value: str) -> str:
     normalized = unicodedata.normalize("NFKC", value).casefold()
     return "".join(character for character in normalized if character.isalnum())
+
+
+def _longest_common_substring_length(left: str, right: str) -> int:
+    if not left or not right:
+        return 0
+    previous = [0] * (len(right) + 1)
+    longest = 0
+    for left_character in left:
+        current = [0]
+        for index, right_character in enumerate(right, start=1):
+            length = previous[index - 1] + 1 if left_character == right_character else 0
+            current.append(length)
+            longest = max(longest, length)
+        previous = current
+    return longest
 
 
 def _query_hash(value: str) -> str:
