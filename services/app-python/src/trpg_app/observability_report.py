@@ -16,6 +16,8 @@ _METRICS = {
     "latency.retrievalSeconds": ("phases_seconds", "retrieval"),
     "latency.readSeconds": ("phases_seconds", "read"),
     "latency.finalGenerationSeconds": ("phases_seconds", "finalGeneration"),
+    "latency.plannerSeconds": ("context", "plannerSeconds"),
+    "latency.executorSeconds": ("context", "executorSeconds"),
     "context.historyTokens": ("context", "historyTokens"),
     "context.originalHistoryTokens": ("context", "originalHistoryTokens"),
     "context.systemTokens": ("context", "systemTokens"),
@@ -32,6 +34,31 @@ _METRICS = {
     "routing.questionCount": ("context", "decompositionQuestionCount"),
     "routing.coveredQuestionCount": ("context", "decompositionCoveredQuestionCount"),
     "routing.sourcedQuestionCount": ("context", "decompositionSourcedQuestionCount"),
+    "planner.taskCount": ("context", "plannerTaskCount"),
+    "planner.completedTaskCount": ("context", "plannerCompletedTaskCount"),
+    "planner.failedTaskCount": ("context", "plannerFailedTaskCount"),
+    "synthesis.checkCount": ("context", "synthesisCheckCount"),
+    "synthesis.unresolvedFieldCount": (
+        "context",
+        "synthesisUnresolvedFieldCount",
+    ),
+    "synthesis.missingEvidenceCheckCount": (
+        "context",
+        "synthesisMissingEvidenceCheckCount",
+    ),
+    "factLedger.recordCount": ("context", "factLedgerRecordCount"),
+    "factLedger.knownCount": ("context", "factLedgerKnownCount"),
+    "factLedger.unknownCount": ("context", "factLedgerUnknownCount"),
+    "factLedger.conflictingCount": ("context", "factLedgerConflictingCount"),
+    "factLedger.validationIssueCount": (
+        "context",
+        "factValidationIssueCount",
+    ),
+    "latency.factLedgerBuildSeconds": ("context", "factLedgerBuildSeconds"),
+    "latency.factLedgerValidationSeconds": (
+        "context",
+        "factLedgerValidationSeconds",
+    ),
     "context.compactedToolMessages": ("context", "compactedToolMessages"),
     "context.decisionToolTokensBeforeMax": ("context", "decisionToolTokensBeforeMax"),
     "context.decisionToolTokensAfterMax": ("context", "decisionToolTokensAfterMax"),
@@ -91,6 +118,12 @@ def aggregate(records: list[dict[str, Any]]) -> dict[str, Any]:
     for name, context_field in (
         ("routeComplexity", "routeComplexity"),
         ("routeReasonCode", "routeReasonCode"),
+        ("complexPlannerUsed", "complexPlannerUsed"),
+        ("synthesisContractVersion", "synthesisContractVersion"),
+        ("factLedgerVersion", "factLedgerVersion"),
+        ("factLedgerStatus", "factLedgerStatus"),
+        ("factLedgerAdapterId", "factLedgerAdapterId"),
+        ("factLedgerAdapterVersion", "factLedgerAdapterVersion"),
     ):
         counts: dict[str, int] = {}
         for record in records:

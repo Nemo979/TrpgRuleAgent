@@ -335,6 +335,8 @@ async def evaluate_model(
     reference_map: dict[str, str] | None = None,
     enable_dynamic_evidence_budget: bool = False,
     enable_query_decomposition: bool = False,
+    enable_complex_planner: bool = False,
+    enable_fact_ledger: bool = False,
 ) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     passed_turns = 0
@@ -361,6 +363,10 @@ async def evaluate_model(
                     turn_options["enable_dynamic_evidence_budget"] = True
                 if enable_query_decomposition:
                     turn_options["enable_query_decomposition"] = True
+                if enable_complex_planner:
+                    turn_options["enable_complex_planner"] = True
+                if enable_fact_ledger:
+                    turn_options["enable_fact_ledger"] = True
                 async with asyncio.timeout(model.request_timeout_seconds):
                     async for event in run_rule_turn(**turn_options):
                         event_type = event.get("type")
@@ -457,6 +463,8 @@ async def evaluate_model(
         "modelId": model.id,
         "dynamicEvidenceBudget": enable_dynamic_evidence_budget,
         "queryDecomposition": enable_query_decomposition,
+        "complexPlanner": enable_complex_planner,
+        "factLedger": enable_fact_ledger,
         "caseCount": len(cases),
         "turnCount": turn_count,
         "passedTurns": passed_turns,
@@ -503,6 +511,16 @@ def parse_args() -> argparse.Namespace:
         "--query-decomposition",
         action="store_true",
         help="Enable deterministic Stage 2 routing and bounded decomposition",
+    )
+    parser.add_argument(
+        "--complex-planner",
+        action="store_true",
+        help="Enable the bounded Stage 3 plan and serial executor",
+    )
+    parser.add_argument(
+        "--fact-ledger",
+        action="store_true",
+        help="Enable a registered Fact Ledger adapter with the complex planner",
     )
     parser.add_argument(
         "--timeout-seconds",
@@ -558,6 +576,8 @@ async def async_main() -> None:
             reference_map=reference_map,
             enable_dynamic_evidence_budget=args.dynamic_evidence_budget,
             enable_query_decomposition=args.query_decomposition,
+            enable_complex_planner=args.complex_planner,
+            enable_fact_ledger=args.fact_ledger,
         )
         reports.append(report)
         print(

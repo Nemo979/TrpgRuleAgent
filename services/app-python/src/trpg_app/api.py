@@ -163,6 +163,8 @@ def create_app(
                         enable_query_decomposition=(
                             config.enable_query_decomposition
                         ),
+                        enable_complex_planner=config.enable_complex_planner,
+                        enable_fact_ledger=config.enable_fact_ledger,
                     ):
                         yield _sse(event)
                 except Exception as error:

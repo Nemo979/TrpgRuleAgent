@@ -41,6 +41,8 @@ class AppConfig:
     max_concurrent_turns: int = 5
     enable_dynamic_evidence_budget: bool = False
     enable_query_decomposition: bool = False
+    enable_complex_planner: bool = False
+    enable_fact_ledger: bool = False
 
 
 def load_config(path: Path | None = None) -> AppConfig:
@@ -108,6 +110,8 @@ def load_config(path: Path | None = None) -> AppConfig:
         enable_query_decomposition=_optional_bool(
             raw, "enable_query_decomposition", False
         ),
+        enable_complex_planner=_optional_bool(raw, "enable_complex_planner", False),
+        enable_fact_ledger=_optional_bool(raw, "enable_fact_ledger", False),
     )
 
 
