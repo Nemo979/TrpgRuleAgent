@@ -13,9 +13,27 @@ from typing import Any, AsyncIterator, Callable, Protocol
 from openai import AsyncOpenAI
 
 from .config import ModelConfig
+from .complex_planner import (
+    PLANNER_VERSION,
+    PLAN_EXECUTOR_DEADLINE_SECONDS,
+    PLAN_TASK_TIMEOUT_SECONDS,
+    ComplexPlan,
+    PlanTaskType,
+    PlanValidationError,
+    TaskResult,
+    build_complex_plan,
+    planner_result_guidance,
+)
 from .context_budget import ContextBudget
 from .conversation_state import ConversationState
 from .evidence_policy import EvidenceBudgetPolicy, EvidenceBudgetProfile
+from .fact_ledger import (
+    FACT_LEDGER_CORE_SCHEMA_VERSION,
+    ValidationIssue,
+    ValidationSeverity,
+)
+from .fact_ledger_adapter import AdapterStatus, FactLedgerRuntime
+from .fact_ledger_defaults import build_default_fact_ledger_runtime
 from .libraries import Library
 from .observability import (
     TurnPhaseTimer,
@@ -33,6 +51,12 @@ from .query_decomposition import (
     decompose_query,
     detect_domains,
     route_query,
+)
+from .synthesis_contract import (
+    SYNTHESIS_CONTRACT_VERSION,
+    SynthesisContract,
+    assess_synthesis_contract,
+    build_synthesis_contract,
 )
 
 
@@ -643,6 +667,8 @@ async def run_rule_turn(
     request_id: str | None = None,
     enable_dynamic_evidence_budget: bool = False,
     enable_query_decomposition: bool = False,
+    enable_complex_planner: bool = False,
+    enable_fact_ledger: bool = False,
 ) -> AsyncIterator[dict[str, Any]]:
     gateway = gateway_factory(model)
     state = ConversationState.from_messages(messages)
@@ -657,10 +683,44 @@ async def run_rule_turn(
     )
     route_decision: RouteDecision | None = None
     decomposition = QueryDecomposition()
-    if enable_query_decomposition:
+    complex_plan: ComplexPlan | None = None
+    synthesis_contract: SynthesisContract | None = None
+    plan_results: list[TaskResult] = []
+    fact_ledger = FactLedgerRuntime(
+        status=(
+            AdapterStatus.DISABLED
+            if not enable_fact_ledger
+            else AdapterStatus.PLANNER_DISABLED
+            if not enable_complex_planner
+            else AdapterStatus.NOT_APPLICABLE
+        )
+    )
+    fact_validation_issue_codes: list[str] = []
+    planner_seconds = 0.0
+    executor_seconds = 0.0
+    planner_fallback = False
+    if enable_query_decomposition or enable_complex_planner:
         route_decision = route_query(latest_user_message, state)
         decomposition = decompose_query(latest_user_message, route_decision)
         timer.routing_seconds += route_decision.routing_seconds
+    if enable_complex_planner and route_decision is not None:
+        planner_started = time.monotonic()
+        try:
+            complex_plan = build_complex_plan(
+                latest_user_message,
+                route_decision,
+                decomposition,
+            )
+            if complex_plan is not None:
+                synthesis_contract = build_synthesis_contract(
+                    latest_user_message,
+                    complex_plan,
+                )
+                decomposition = complex_plan.evidence_decomposition()
+        except (PlanValidationError, ValueError):
+            planner_fallback = True
+            complex_plan = None
+        planner_seconds = time.monotonic() - planner_started
     system_prompt = _system_prompt(
         library,
         state,
@@ -757,17 +817,21 @@ async def run_rule_turn(
     citations = CitationRegistry()
     controller = ToolLoopController(
         max_searches_with_evidence=(
-            max(
-                1,
-                evidence_profile.max_searches
-                - (
-                    1
-                    if len(evidence_profile.topic_allocations) > 1 or is_follow_up
-                    else 0
-                ),
+            len(decomposition.questions)
+            if complex_plan is not None
+            else (
+                max(
+                    1,
+                    evidence_profile.max_searches
+                    - (
+                        1
+                        if len(evidence_profile.topic_allocations) > 1 or is_follow_up
+                        else 0
+                    ),
+                )
+                if enable_dynamic_evidence_budget
+                else 3
             )
-            if enable_dynamic_evidence_budget
-            else 3
         ),
         max_answer_documents=(
             min(
@@ -813,6 +877,82 @@ async def run_rule_turn(
                 "evidencePolicyMaxTokens": evidence_profile.max_evidence_tokens,
                 "evidencePolicyUsedTopics": len(budget.topic_documents),
                 "queryDecompositionEnabled": enable_query_decomposition,
+                "complexPlannerEnabled": enable_complex_planner,
+                "complexPlannerUsed": complex_plan is not None,
+                "complexPlannerFallback": planner_fallback,
+                "plannerVersion": PLANNER_VERSION if complex_plan is not None else 0,
+                "plannerTaskCount": len(complex_plan.tasks) if complex_plan else 0,
+                "plannerCompletedTaskCount": sum(
+                    result.status == "completed" for result in plan_results
+                ),
+                "plannerFailedTaskCount": sum(
+                    result.status != "completed" for result in plan_results
+                ),
+                "synthesisContractVersion": (
+                    SYNTHESIS_CONTRACT_VERSION if synthesis_contract else 0
+                ),
+                "synthesisCheckCount": (
+                    len(synthesis_contract.checks) if synthesis_contract else 0
+                ),
+                "synthesisUnresolvedFieldCount": (
+                    len(synthesis_contract.unresolved_fields)
+                    if synthesis_contract
+                    else 0
+                ),
+                "synthesisMissingEvidenceCheckCount": (
+                    sum(
+                        item.status == "missing_evidence"
+                        for item in assess_synthesis_contract(
+                            synthesis_contract,
+                            complex_plan,
+                            plan_results,
+                        )
+                    )
+                    if synthesis_contract and complex_plan
+                    else 0
+                ),
+                "factLedgerEnabled": enable_fact_ledger,
+                "factLedgerStatus": fact_ledger.status.value,
+                "factLedgerAdapterId": fact_ledger.adapter_id,
+                "factLedgerAdapterVersion": fact_ledger.adapter_version,
+                "factLedgerVersion": (
+                    FACT_LEDGER_CORE_SCHEMA_VERSION
+                    if fact_ledger.ledger is not None
+                    else 0
+                ),
+                "factLedgerRecordCount": fact_ledger.record_count,
+                "factLedgerKnownCount": (
+                    sum(
+                        record.status.value == "known"
+                        for record in fact_ledger.ledger.records
+                    )
+                    if fact_ledger.ledger is not None
+                    else 0
+                ),
+                "factLedgerUnknownCount": (
+                    sum(
+                        record.status.value == "unknown"
+                        for record in fact_ledger.ledger.records
+                    )
+                    if fact_ledger.ledger is not None
+                    else 0
+                ),
+                "factLedgerConflictingCount": (
+                    sum(
+                        record.status.value == "conflicting"
+                        for record in fact_ledger.ledger.records
+                    )
+                    if fact_ledger.ledger is not None
+                    else 0
+                ),
+                "factValidationIssueCount": len(fact_validation_issue_codes),
+                "factLedgerBuildSeconds": round(fact_ledger.build_seconds, 6),
+                "factLedgerValidationSeconds": round(
+                    fact_ledger.validation_seconds,
+                    6,
+                ),
+                "plannerSeconds": round(planner_seconds, 6),
+                "executorSeconds": round(executor_seconds, 6),
                 "routerVersion": route_decision.router_version if route_decision else 0,
                 "routeComplexity": (
                     route_decision.complexity.value if route_decision else "disabled"
@@ -846,6 +986,222 @@ async def run_rule_turn(
     if dropped_count:
         yield {"type": "context_truncated", "droppedMessages": dropped_count}
     yield {"type": "status", "status": "thinking"}
+    if complex_plan is not None:
+        executor_started = time.monotonic()
+        executor_deadline = executor_started + min(
+            model.request_timeout_seconds,
+            PLAN_EXECUTOR_DEADLINE_SECONDS,
+        )
+        results_by_id: dict[str, TaskResult] = {}
+        for task_index, task in enumerate(complex_plan.tasks, start=1):
+            failed_dependencies = [
+                dependency
+                for dependency in task.depends_on
+                if results_by_id.get(dependency) is None
+                or results_by_id[dependency].status != "completed"
+            ]
+            if failed_dependencies:
+                result = TaskResult(
+                    task_id=task.id,
+                    status="blocked_dependency",
+                    missing_fields=tuple(failed_dependencies),
+                    visible_summary="前置任务未取得完整证据，未执行本任务。",
+                )
+                plan_results.append(result)
+                results_by_id[task.id] = result
+                continue
+            if time.monotonic() >= executor_deadline:
+                result = TaskResult(
+                    task_id=task.id,
+                    status="deadline_exceeded",
+                    missing_fields=("global_deadline",),
+                    visible_summary="全局执行期限已到，未执行本任务。",
+                )
+                plan_results.append(result)
+                results_by_id[task.id] = result
+                continue
+            if task.type == PlanTaskType.SELECTION:
+                dependency_sources = tuple(
+                    dict.fromkeys(
+                        source_id
+                        for dependency in task.depends_on
+                        for source_id in results_by_id[dependency].source_ids
+                    )
+                )
+                result = TaskResult(
+                    task_id=task.id,
+                    status="completed" if dependency_sources else "missing_evidence",
+                    source_ids=dependency_sources,
+                    missing_fields=() if dependency_sources else ("rule_evidence",),
+                    visible_summary=(
+                        "前置规则任务已完成，可执行条件分支与选择。"
+                        if dependency_sources
+                        else "没有可用于条件分支的已注册来源。"
+                    ),
+                )
+                plan_results.append(result)
+                results_by_id[task.id] = result
+                continue
+
+            task_started = time.monotonic()
+            if budget.searches >= budget.max_searches:
+                result = TaskResult(
+                    task_id=task.id,
+                    status="budget_exhausted",
+                    missing_fields=("search_budget",),
+                    visible_summary="全局搜索预算已耗尽。",
+                )
+                plan_results.append(result)
+                results_by_id[task.id] = result
+                continue
+            controller.searches_without_read = 0
+            registered_before_task = set(citations.by_document_id)
+            search_started = time.monotonic()
+            execution = _execute_tool(
+                name="search_rules",
+                arguments=json.dumps(
+                    {"query": task.query, "limit": 10},
+                    ensure_ascii=False,
+                ),
+                library=library,
+                budget=budget,
+                citations=citations,
+                controller=controller,
+            )
+            timer.retrieval_seconds += time.monotonic() - search_started
+            yield {"type": "status", "status": execution.status}
+            _log_tool_step(
+                request_id=request_id,
+                model=model,
+                library=library,
+                decision_index=task_index,
+                requested_calls=0,
+                executed_tool="search_rules_planner",
+                budget=budget,
+                stop_reason=execution.stop_reason,
+                query_hash=execution.query_hash,
+            )
+            remaining_documents = max(
+                0,
+                controller.max_answer_documents - budget.documents,
+            )
+            candidate_ids = [
+                document_id
+                for document_id in controller.latest_result_ids
+                if document_id not in citations.by_document_id
+            ]
+            if candidate_ids and remaining_documents:
+                read_started = time.monotonic()
+                read_execution = _execute_tool(
+                    name="read_rules",
+                    arguments=json.dumps(
+                        {"ids": candidate_ids[: min(4, remaining_documents)]},
+                        ensure_ascii=False,
+                    ),
+                    library=library,
+                    budget=budget,
+                    citations=citations,
+                    controller=controller,
+                )
+                timer.read_seconds += time.monotonic() - read_started
+                yield {"type": "status", "status": read_execution.status}
+                _log_tool_step(
+                    request_id=request_id,
+                    model=model,
+                    library=library,
+                    decision_index=task_index,
+                    requested_calls=0,
+                    executed_tool="read_rules_planner",
+                    budget=budget,
+                    stop_reason=read_execution.stop_reason,
+                    new_documents=read_execution.new_documents,
+                )
+            source_ids = tuple(
+                sorted(
+                    set(citations.by_document_id).difference(registered_before_task)
+                    | {
+                        document_id
+                        for document_id in controller.latest_result_ids
+                        if document_id in citations.by_document_id
+                    }
+                    | controller.subquestion_document_ids.get(task.id, set())
+                )
+            )
+            elapsed = time.monotonic() - task_started
+            status = (
+                "task_timeout"
+                if elapsed > PLAN_TASK_TIMEOUT_SECONDS
+                else "completed"
+                if source_ids
+                else "missing_evidence"
+            )
+            result = TaskResult(
+                task_id=task.id,
+                status=status,
+                source_ids=source_ids,
+                missing_fields=() if status == "completed" else ("rule_evidence",),
+                visible_summary=(
+                    f"已注册 {len(source_ids)} 个规则来源。"
+                    if source_ids
+                    else "未取得可注册的规则来源。"
+                ),
+            )
+            plan_results.append(result)
+            results_by_id[task.id] = result
+
+        executor_seconds = time.monotonic() - executor_started
+        if citations.by_document_id:
+            fact_ledger_payload: dict[str, Any] | None = None
+            answer_validator: Callable[[str], tuple[ValidationIssue, ...]] | None = None
+            if enable_fact_ledger:
+                fact_ledger = build_default_fact_ledger_runtime(
+                    library.manifest,
+                    complex_plan.goal,
+                    citations.by_document_id.values(),
+                )
+                candidate_payload: dict[str, Any] | None = None
+                if fact_ledger.active:
+                    candidate_payload = fact_ledger.public()
+                if fact_ledger.active:
+                    # Verify the optional validation boundary before it changes
+                    # final-answer streaming behavior.
+                    fact_ledger.validate("")
+                if fact_ledger.active:
+                    fact_ledger_payload = candidate_payload
+                    answer_validator = fact_ledger.validate
+            async for event in _stream_final_answer(
+                gateway,
+                conversation,
+                citations,
+                timer,
+                final_answer_tokens,
+                final_guidance=planner_result_guidance(
+                    complex_plan,
+                    plan_results,
+                    synthesis_contract=synthesis_contract,
+                    fact_ledger=fact_ledger_payload,
+                ),
+                answer_validator=answer_validator,
+                validation_issue_codes=fact_validation_issue_codes,
+            ):
+                yield event
+            _emit_turn_metrics("planner_finish", final_answer_tokens[0])
+            return
+        async for event in _finish_after_controller_stop(
+            gateway=gateway,
+            conversation=conversation,
+            citations=citations,
+            library=library,
+            stop_reason="planner_no_evidence",
+            model=model,
+            budget=budget,
+            controller=controller,
+            request_id=request_id,
+            decision_index=len(complex_plan.tasks),
+        ):
+            yield event
+        _emit_turn_metrics("planner_no_evidence", final_answer_tokens[0])
+        return
     if decomposition.questions:
         for question_index, question in enumerate(decomposition.questions, start=1):
             if budget.searches >= budget.max_searches:
@@ -1318,11 +1674,19 @@ async def _stream_final_answer(
     citations: CitationRegistry,
     timer: TurnPhaseTimer | None = None,
     final_answer_tokens: list[int] | None = None,
+    final_guidance: str = "",
+    answer_validator: Callable[[str], tuple[ValidationIssue, ...]] | None = None,
+    validation_issue_codes: list[str] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
-    answer_conversation = _final_answer_conversation(conversation, citations)
+    answer_conversation = _final_answer_conversation(
+        conversation,
+        citations,
+        final_guidance=final_guidance,
+    )
     yield {"type": "status", "status": "answering"}
     last_issue = "empty"
     final_answer_tokens_estimate = 0
+    defer_until_validated = answer_validator is not None
     for attempt in range(2):
         answer_prompt_tokens = estimate_message_tokens(answer_conversation)
         answer_started = time.monotonic()
@@ -1330,8 +1694,11 @@ async def _stream_final_answer(
         guarded_parts: list[str] = []
         answer_exposed = False
         detected_issue = ""
+        fact_issues: tuple[ValidationIssue, ...] = ()
         async for delta in gateway.stream_answer(answer_conversation):
             answer_parts.append(delta)
+            if defer_until_validated:
+                continue
             if answer_exposed:
                 yield {"type": "text_delta", "delta": delta}
                 continue
@@ -1359,8 +1726,23 @@ async def _stream_final_answer(
             )
         final_answer_tokens_estimate = max(final_answer_tokens_estimate, estimate_tokens(content))
         last_issue = detected_issue or _answer_quality_issue(content) or ""
+        if not last_issue and answer_validator is not None:
+            fact_issues = tuple(
+                issue
+                for issue in answer_validator(content)
+                if issue.severity is ValidationSeverity.ERROR
+            )
+            if fact_issues:
+                last_issue = "fact_validation"
+                if validation_issue_codes is not None:
+                    validation_issue_codes[:] = list(
+                        dict.fromkeys(issue.code for issue in fact_issues)
+                    )
         if not last_issue:
-            if not answer_exposed:
+            if defer_until_validated:
+                for index in range(0, len(content), 24):
+                    yield {"type": "text_delta", "delta": content[index : index + 24]}
+            elif not answer_exposed:
                 for delta in guarded_parts:
                     yield {"type": "text_delta", "delta": delta}
             suffix = _missing_citation_suffix(content, citations.labels())
@@ -1392,6 +1774,10 @@ async def _stream_final_answer(
         )
         if attempt == 0:
             recovery = _answer_recovery_instruction(last_issue)
+            if fact_issues:
+                recovery += "\n服务器事实校验失败：\n- " + "\n- ".join(
+                    issue.message for issue in fact_issues
+                )
             answer_conversation = [
                 *answer_conversation,
                 {
@@ -1696,6 +2082,7 @@ async def _finish_after_controller_stop(
 def _final_answer_conversation(
     conversation: list[dict[str, Any]],
     citations: CitationRegistry,
+    final_guidance: str = "",
 ) -> list[dict[str, str]]:
     if not citations.by_document_id:
         return conversation
@@ -1750,6 +2137,7 @@ def _final_answer_conversation(
                 "该状态需要用规则证据验证，不能覆盖规则原文；状态字段之间互不构成"
                 "约束，除非证据明确说明。\n"
                 f"本题字段解释：{state.answer_guidance(question) or '无'}\n\n"
+                + (f"受限任务执行结果：\n{final_guidance}\n\n" if final_guidance else "")
                 + f"已读取证据：\n{evidence}"
             ),
         },
@@ -2132,6 +2520,11 @@ def _answer_recovery_instruction(issue: str) -> str:
             "上一份候选输出只是搜索或读取计划。检索已经结束，工具不可用；请立即根据"
             "已提供证据生成完整最终答案，不要描述下一步计划。"
         )
+    if issue == "fact_validation":
+        return (
+            "上一份候选输出与服务器从已读证据提取的 Fact Ledger 冲突。必须修正列出的"
+            "等级求和、资格、法术节点或数值问题；不得删除缺失信息或改用模型记忆。"
+        )
     return "上一份候选输出不可用；请根据已提供证据重新生成完整的中文最终答案。"
 
 
@@ -2142,4 +2535,6 @@ def _answer_quality_failure(issue: str) -> str:
         return "所选模型服务连续返回临时异常信息，本次没有生成可验证的规则回答，请稍后重试。"
     if issue == "unfinished_process":
         return "所选模型连续返回未完成的检索过程，本次没有生成可验证的最终回答。"
+    if issue == "fact_validation":
+        return "候选答案连续未通过服务器事实校验，本次没有输出可能错误的构筑结论或附加规则来源。"
     return "所选模型没有生成可验证的规则回答，请重试或更换模型。"
