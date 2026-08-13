@@ -1,6 +1,6 @@
 # TrpgRuleAgent 项目现状
 
-更新时间：2026-08-10
+更新时间：2026-08-13
 
 本文档用于记录当前实现状态、架构边界和后续迭代重点。后续开发前应先阅读本文，并同步更新其中的状态。
 
@@ -103,7 +103,11 @@ TrpgRuleAgent 当前是一套面向少量可信用户的多游戏系统 Web 规�
   §8.7 Stage 3 发布门整改。2026-08-12 已完成通用 Fact Ledger 核心、严格三元组注册表、PF1E
   Adapter 等价迁移和 GSS/失败安全降级；独立 `enable_fact_ledger` 默认关闭。2026-08-13 又完成
   PF1E Adapter v2 的专长时间线、前提/BAB 和法术元数据覆盖，三个已知漏判形状均进入确定性
-  拒绝门。下一步是结构化局部修补与确定性 Renderer；完成本地正负样本门前不再运行外部 A/B。
+  拒绝门。随后完成通用 `AnswerDraft` / `RepairPatch`、只修改失败 claim 的一次局部修补、完整
+  重验证和确定性 Renderer；失败候选不流出，安全拒答作为独立 SSE/评测指标且不附来源。下一步
+  的全仓回归、本地成本探针和发布审计已通过（App 221、Retrieval 64、Vitest 268、两套类型检查
+  和两套构建）；无修补 1 次、触发修补最多 2 次模型调用。真实 MiMo A/B 仍需另行授权，两个
+  Feature Flag 继续默认关闭。
 - MiMo 已完成 4 组、6 轮 PF1E 真实问答验收；事实、来源和多轮追问均通过。按本轮决定未重复验收 Agnes 与 SenseNova。
 - 《夕妖晚谣》1.2 中文规则库已发布 154 个父文档、488 个检索子块。
 - 当前发布版本为 `20260801T105530Z`，包含 `GSS` 与 `Golden Sky Stories` 显式别名。
@@ -219,8 +223,8 @@ npx vitest run <test-file> --pool=forks --maxWorkers=1
    不满足 Summary 启动条件。
 3. 动态 Evidence Budget Stage 1 与受限多问题拆解 Stage 2 均已完成真实 MiMo A/B、回归和发布门。
    Stage 3 受限 Planner 已满足启动条件但连续真实质量门失败，Feature Flag 保持关闭；§8.7 的
-   通用核心、PF1E Adapter 等价迁移与失败样本覆盖已经完成，下一步实现结构化局部修补和确定性
-   Renderer，不进入 Summary 或并行。
+   通用核心、PF1E Adapter 等价迁移、失败样本覆盖、结构化局部修补及本地全门已经完成；下一步
+   仅在另行授权后执行真实 MiMo A/B，不进入 Summary 或并行。
 4. 答案级评测（已落地，见 `services/app-python/src/trpg_app/answer_evaluation.py` 与 `docs/answer-evaluation.md`）：事实点(`requiredAny`)、引用支持度(`source_match`)、工具预算(`toolCalls`/`withinBudget`)、无依据结论率(`unsupportedRate`)、**LLM-judge 事实正确性/幻觉(`factualCorrect`/`hallucinationFree`, 经 `--judge-model`)** 五项指标 + 多轮/错误/超时/judge 容错 + 单测。PF1E 已有 v2.0/v2.1 真实金标题集。前端仍保留 Agnes/SenseNova 可选，并将 MiMo 设为新对话默认模型；**Agnes / SenseNova 明确不在本轮评测范围**。待补：GSS 的真实金标题集。
 5. 检索质量：结构化切块、重排器和剩余漏召回题优化。V2.2 Stage 0 已修复锚点章节切分（CRB 战斗规则 10 子章节恢复）与 table 策略页正文丢失（overview 兜底），候选重建为 7140 文档、质量门通过；85/30 题相关 ID 100% 覆盖，检索基线待确认。
 6. PDF/CHM 图片、扫描件 OCR 和复杂表格理解。

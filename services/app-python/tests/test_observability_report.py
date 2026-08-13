@@ -55,11 +55,20 @@ def record(total_seconds: float, total_tokens: int, *, intent: str = "rule_fact"
             "factValidationIssueCount": 1,
             "factLedgerBuildSeconds": 0.003,
             "factLedgerValidationSeconds": 0.004,
+            "factRepairAttempted": True,
+            "factRepairApplied": True,
+            "factRepairPatchCount": 1,
+            "factRepairSafeRefusal": False,
+            "factRepairFailureReason": "none",
+            "factDraftParseSeconds": 0.001,
+            "factRepairSeconds": 0.5,
+            "factRenderSeconds": 0.002,
         },
         "usage": {
             "promptTokens": total_tokens - 20,
             "completionTokens": 20,
             "totalTokens": total_tokens,
+            "calls": 2,
             "reportedCalls": 1,
             "estimatedCalls": 0,
         },
@@ -81,6 +90,7 @@ class ObservabilityReportTest(unittest.TestCase):
         self.assertEqual(report["dimensions"]["intent"], {"procedure": 1, "rule_fact": 1})
         self.assertEqual(report["metrics"]["latency.totalSeconds"]["mean"], 4.0)
         self.assertEqual(report["metrics"]["usage.totalTokens"]["p95"], 140.0)
+        self.assertEqual(report["metrics"]["usage.calls"]["mean"], 2.0)
         self.assertEqual(report["usageCoverage"]["reportedRate"], 1.0)
         self.assertEqual(report["derivedRates"]["contextTruncationRate"], 0.5)
         self.assertEqual(report["metrics"]["policy.maxSearches"]["mean"], 3.0)
@@ -98,6 +108,9 @@ class ObservabilityReportTest(unittest.TestCase):
         )
         self.assertEqual(report["dimensions"]["factLedgerVersion"], {"1": 2})
         self.assertEqual(report["dimensions"]["factLedgerStatus"], {"matched": 2})
+        self.assertEqual(report["dimensions"]["factRepairAttempted"], {"True": 2})
+        self.assertEqual(report["metrics"]["factRepair.patchCount"]["mean"], 1.0)
+        self.assertEqual(report["metrics"]["latency.factRepairSeconds"]["mean"], 0.5)
         self.assertEqual(report["dimensions"]["factLedgerAdapterId"], {"catalog-v1": 2})
         self.assertEqual(report["metrics"]["factLedger.recordCount"]["mean"], 12.0)
         self.assertEqual(

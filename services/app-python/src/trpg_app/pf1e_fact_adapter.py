@@ -218,6 +218,20 @@ class PF1EFactData:
                     key=lambda item: item.name,
                 )
             ],
+            "draft_path_templates": {
+                "class_allocation": "answer.build.levels",
+                "prestige_requirements": "answer.classes[<class>].requirements",
+                "level_feats": "answer.levels[<level>].feats",
+                "level_spell_progression": "answer.levels[<level>].spells",
+                "level_spell_slots": "answer.levels[<level>].spell_slots[<spell_level>]",
+                "feat": "answer.feats[<name>]",
+                "named_spell": "answer.spells[<name>]",
+                "spell_level": "answer.spells[<name>].level",
+                "spell_school": "answer.spells[<name>].school",
+                "spell_duration": "answer.spells[<name>].duration",
+                "spell_saving_throw": "answer.spells[<name>].saving_throw",
+                "equipment_stats": "answer.equipment.stats",
+            },
         }
 
     @property
@@ -620,7 +634,13 @@ def _parse_feat_rows(ledger: PF1EFactData, label: str, content: str) -> None:
 
 def _validate_citations(content: str, ledger: PF1EFactData) -> list[FactValidationIssue]:
     return [
-        FactValidationIssue("unknown_citation", f"答案引用了未注册来源 {label}")
+        FactValidationIssue(
+            "unknown_citation",
+            f"答案引用了未注册来源 {label}",
+            path=f"answer.citations[{label}]",
+            actual=label,
+            repairable=False,
+        )
         for label in sorted(set(_CITATION.findall(content)) - set(ledger.evidence))
     ]
 
@@ -642,6 +662,9 @@ def _validate_level_sums(content: str) -> list[FactValidationIssue]:
                     FactValidationIssue(
                         "class_level_sum",
                         f"职业等级分配 {allocation_text} 合计 {total}，不等于声明的角色等级 {target}",
+                        path="answer.build.levels",
+                        expected=target,
+                        actual=total,
                     )
                 )
     return issues
@@ -667,6 +690,10 @@ def _validate_prestige_requirements(
                         FactValidationIssue(
                             "invented_prestige_requirement",
                             f"{fact.class_name} 的已读进阶要求不包含 BAB/基本攻击条件",
+                            path=f"answer.classes[{fact.class_name}].requirements",
+                            expected=list(fact.requirements),
+                            actual="BAB/基本攻击",
+                            evidence_refs=(fact.source_label,),
                         )
                     )
                     break
@@ -693,6 +720,10 @@ def _validate_bonus_feat_scope(
                         FactValidationIssue(
                             "bonus_feat_scope",
                             f"{scope.class_name}{level}级奖励专长被错误扩展到战斗专长",
+                            path=f"answer.levels[{level}].feats",
+                            expected=list(scope.allowed_categories),
+                            actual="战斗专长",
+                            evidence_refs=(scope.source_label,),
                         )
                     )
                 for feat_name, feat in ledger.feats.items():
@@ -708,6 +739,14 @@ def _validate_bonus_feat_scope(
                             FactValidationIssue(
                                 "bonus_feat_scope",
                                 f"{feat_name} 不在已读的 {scope.class_name}{level}级奖励专长范围内",
+                                path=f"answer.levels[{level}].feats",
+                                expected=list(scope.allowed_categories),
+                                actual=feat_name,
+                                evidence_refs=tuple(
+                                    dict.fromkeys(
+                                        (scope.source_label, feat.source_label)
+                                    )
+                                ),
                             )
                         )
     return issues
@@ -954,6 +993,10 @@ def _validate_spell_progression(
                 FactValidationIssue(
                     "spell_progression",
                     f"法师{level}级最高法术环级应为 {fact.max_spell_level}，候选答案写为 {claimed}",
+                    path=f"answer.levels[{level}].spells",
+                    expected=fact.max_spell_level,
+                    actual=claimed,
+                    evidence_refs=(fact.source_label,),
                 )
             )
     for level_text, count_text, spell_text in _WIZARD_SLOT_COUNT.findall(content):
@@ -969,6 +1012,10 @@ def _validate_spell_progression(
                 FactValidationIssue(
                     "spell_slot_count",
                     f"法师{level}级的{spell_level}环基础每日法术位应为 {expected_count}，候选答案写为 {claimed_count}",
+                    path=f"answer.levels[{level}].spell_slots[{spell_level}]",
+                    expected=expected_count,
+                    actual=claimed_count,
+                    evidence_refs=(fact.source_label,),
                 )
             )
     return issues
@@ -1142,6 +1189,9 @@ def _validate_cited_numeric_stats(
                     FactValidationIssue(
                         "unsupported_numeric_stat",
                         f"数值 {stat} 未出现在该句引用的来源中",
+                        path="answer.equipment.stats",
+                        actual=stat,
+                        evidence_refs=tuple(dict.fromkeys(labels)),
                     )
                 )
     return issues
@@ -1173,6 +1223,8 @@ def _validate_named_recommendations(
                 FactValidationIssue(
                     "unsupported_named_option",
                     f"推荐的专长 {name} 未出现在本轮已读专长条目中",
+                    path=f"answer.feats[{name}]",
+                    actual=name,
                 )
             )
     return issues

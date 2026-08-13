@@ -43,6 +43,7 @@ export interface Conversation {
 export type ChatEvent =
   | { type: "status"; status: "thinking" | "searching" | "reading" | "answering" }
   | { type: "context_truncated"; droppedMessages: number }
+  | { type: "safe_refusal"; reason: string }
   | { type: "text_delta"; delta: string }
   | { type: "sources"; sources: Source[] }
   | {

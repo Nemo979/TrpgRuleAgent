@@ -349,6 +349,34 @@ class AnswerEvaluationTest(unittest.TestCase):
         self.assertEqual(report["unsupportedTurns"], 1)
         self.assertEqual(report["unsupportedRate"], 1.0)
 
+    def test_evaluate_counts_safe_refusal_separately(self) -> None:
+        class _Judge:
+            calls = 0
+
+            async def __call__(self, _input):
+                type(self).calls += 1
+                return {"factual_correct": True, "hallucination_free": True}
+
+        cases = [AnswerCase("c1", (AnswerTurn("硬度？", ("p",), (("60",),)),))]
+        events = [
+            {"type": "safe_refusal", "reason": "repair_validation_failed"},
+            {"type": "text_delta", "delta": "候选答案未通过服务器事实校验。"},
+            {"type": "sources", "sources": []},
+            {"type": "done"},
+        ]
+
+        report = self._run_with_judge(cases, [events], _Judge())
+
+        turn = report["cases"][0]["turns"][0]
+        self.assertTrue(turn["safeRefusal"])
+        self.assertEqual(turn["safeRefusalReason"], "repair_validation_failed")
+        self.assertEqual(report["safeRefusalTurns"], 1)
+        self.assertEqual(report["safeRefusalRate"], 1.0)
+        self.assertEqual(report["unsupportedTurns"], 0)
+        self.assertEqual(report["unsupportedRate"], 0.0)
+        self.assertEqual(_Judge.calls, 0)
+        self.assertEqual(report["judgedTurns"], 0)
+
     def test_evaluate_handles_timeout_as_error(self) -> None:
         class _TimeoutRunner:
             async def __call__(self, *, model, library, messages, request_id=None):

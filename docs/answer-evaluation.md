@@ -15,10 +15,13 @@
 | 多主题来源 | `missingSourceGroups` | 配置 `requiredSourceGroups` 时，每组必须至少命中一个 gold 来源；适用于 Compare/Build 双侧证据。 |
 | 工具预算 | `toolCalls` / `withinBudget` | 统计 SSE 中 `searching`/`reading` 状态事件数作为工具调用近似计数；超过软阈值 `TOOL_CALL_BUDGET`（默认 12）标记超预算。 |
 | 无依据结论率 | `unsupportedTurns` / `unsupportedRate` | 已给出非空答案、但未命中相关来源、且无错误的轮次占比；衡量"答了却没依据"的比例。 |
+| 安全拒答 | `safeRefusal` / `safeRefusalReason`、`safeRefusalTurns` / `safeRefusalRate` | 服务端结构化事实门主动停止发布的轮次；单独计数，不把空来源的安全失败误记为“模型给出无依据事实答案”。 |
 | LLM 事实正确性 | `factualCorrect` / `factualPassRate` | 由 `--judge-model` 指定的裁判模型对"答案是否准确陈述 gold 事实且未自相矛盾"给布尔判定；整轮 `factualPassRate` 为通过占比（仅当有裁判时输出）。 |
 | 幻觉/无依据 | `hallucinationFree` / `hallucinationRate` | 裁判判定答案是否含有不被问题、gold 事实或参考正文支持的陈述；`hallucinationRate` 为含幻觉轮次占比。 |
 
-聚合报告还包含 `passRate`（通过轮次占比）、`toolCallTotal` / `toolCallMax`、`judgedTurns`。未启用 `--judge-model` 时，`factualCorrect` / `hallucinationFree` 每行均为 `null`，`factualPassRate` / `hallucinationRate` 为 `null`。
+聚合报告还包含 `passRate`（通过轮次占比）、`toolCallTotal` / `toolCallMax`、`judgedTurns` 和独立的
+安全拒答计数。未启用 `--judge-model` 时，`factualCorrect` / `hallucinationFree` 每行均为 `null`，
+`factualPassRate` / `hallucinationRate` 为 `null`。
 
 归一化（`_normalize`）对全角/半角、空格、多种连字符做统一，避免"–2"与"-2"被判为不同事实。
 

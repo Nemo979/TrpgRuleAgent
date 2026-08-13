@@ -59,6 +59,10 @@ _METRICS = {
         "context",
         "factLedgerValidationSeconds",
     ),
+    "factRepair.patchCount": ("context", "factRepairPatchCount"),
+    "latency.factDraftParseSeconds": ("context", "factDraftParseSeconds"),
+    "latency.factRepairSeconds": ("context", "factRepairSeconds"),
+    "latency.factRenderSeconds": ("context", "factRenderSeconds"),
     "context.compactedToolMessages": ("context", "compactedToolMessages"),
     "context.decisionToolTokensBeforeMax": ("context", "decisionToolTokensBeforeMax"),
     "context.decisionToolTokensAfterMax": ("context", "decisionToolTokensAfterMax"),
@@ -67,6 +71,7 @@ _METRICS = {
     "usage.promptTokens": ("usage", "promptTokens"),
     "usage.completionTokens": ("usage", "completionTokens"),
     "usage.totalTokens": ("usage", "totalTokens"),
+    "usage.calls": ("usage", "calls"),
     "evidence.characters": ("evidence_characters",),
     "evidence.tokens": ("evidence_tokens",),
     "tools.searchCount": ("search_count",),
@@ -124,6 +129,10 @@ def aggregate(records: list[dict[str, Any]]) -> dict[str, Any]:
         ("factLedgerStatus", "factLedgerStatus"),
         ("factLedgerAdapterId", "factLedgerAdapterId"),
         ("factLedgerAdapterVersion", "factLedgerAdapterVersion"),
+        ("factRepairAttempted", "factRepairAttempted"),
+        ("factRepairApplied", "factRepairApplied"),
+        ("factRepairSafeRefusal", "factRepairSafeRefusal"),
+        ("factRepairFailureReason", "factRepairFailureReason"),
     ):
         counts: dict[str, int] = {}
         for record in records:

@@ -103,6 +103,20 @@ class FactLedgerTest(unittest.TestCase):
                 "feat_slots": [],
                 "base_attack": [],
                 "spells": [],
+                "draft_path_templates": {
+                    "class_allocation": "answer.build.levels",
+                    "prestige_requirements": "answer.classes[<class>].requirements",
+                    "level_feats": "answer.levels[<level>].feats",
+                    "level_spell_progression": "answer.levels[<level>].spells",
+                    "level_spell_slots": "answer.levels[<level>].spell_slots[<spell_level>]",
+                    "feat": "answer.feats[<name>]",
+                    "named_spell": "answer.spells[<name>]",
+                    "spell_level": "answer.spells[<name>].level",
+                    "spell_school": "answer.spells[<name>].school",
+                    "spell_duration": "answer.spells[<name>].duration",
+                    "spell_saving_throw": "answer.spells[<name>].saving_throw",
+                    "equipment_stats": "answer.equipment.stats",
+                },
             },
         )
 

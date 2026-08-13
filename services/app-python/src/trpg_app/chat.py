@@ -34,6 +34,17 @@ from .fact_ledger import (
 )
 from .fact_ledger_adapter import AdapterStatus, FactLedgerRuntime
 from .fact_ledger_defaults import build_default_fact_ledger_runtime
+from .fact_ledger_repair import (
+    RepairMetrics,
+    StructuredAnswerError,
+    apply_repair_patch,
+    build_repair_targets,
+    parse_answer_draft,
+    parse_repair_patch,
+    repair_instruction,
+    structured_draft_instruction,
+    timed_render,
+)
 from .libraries import Library
 from .observability import (
     TurnPhaseTimer,
@@ -696,6 +707,7 @@ async def run_rule_turn(
         )
     )
     fact_validation_issue_codes: list[str] = []
+    repair_metrics = RepairMetrics()
     planner_seconds = 0.0
     executor_seconds = 0.0
     planner_fallback = False
@@ -951,6 +963,17 @@ async def run_rule_turn(
                     fact_ledger.validation_seconds,
                     6,
                 ),
+                "factRepairAttempted": repair_metrics.attempted,
+                "factRepairApplied": repair_metrics.applied,
+                "factRepairPatchCount": repair_metrics.patch_count,
+                "factRepairSafeRefusal": repair_metrics.safe_refusal,
+                "factRepairFailureReason": repair_metrics.failure_reason or "none",
+                "factDraftParseSeconds": round(
+                    repair_metrics.draft_parse_seconds,
+                    6,
+                ),
+                "factRepairSeconds": round(repair_metrics.repair_seconds, 6),
+                "factRenderSeconds": round(repair_metrics.render_seconds, 6),
                 "plannerSeconds": round(planner_seconds, 6),
                 "executorSeconds": round(executor_seconds, 6),
                 "routerVersion": route_decision.router_version if route_decision else 0,
@@ -1183,6 +1206,7 @@ async def run_rule_turn(
                 ),
                 answer_validator=answer_validator,
                 validation_issue_codes=fact_validation_issue_codes,
+                repair_metrics=repair_metrics,
             ):
                 yield event
             _emit_turn_metrics("planner_finish", final_answer_tokens[0])
@@ -1668,6 +1692,194 @@ async def run_rule_turn(
     _emit_turn_metrics("decision_limit", final_answer_tokens[0])
 
 
+async def _collect_structured_model_output(
+    gateway: ModelGateway,
+    messages: list[dict[str, Any]],
+    timer: TurnPhaseTimer | None,
+    *,
+    record_as_repair: bool,
+    metrics: RepairMetrics,
+) -> str:
+    prompt_tokens = estimate_message_tokens(messages)
+    started = time.monotonic()
+    parts = [delta async for delta in gateway.stream_answer(messages)]
+    elapsed = time.monotonic() - started
+    if record_as_repair:
+        metrics.repair_seconds += elapsed
+    elif timer is not None:
+        timer.final_generation_seconds += elapsed
+    content = "".join(parts)
+    if timer is not None:
+        take_usage = getattr(gateway, "take_stream_usage", None)
+        provider_usage = take_usage() if callable(take_usage) else None
+        timer.usage.add(
+            prompt_tokens=provider_usage.prompt_tokens if provider_usage else None,
+            completion_tokens=provider_usage.completion_tokens if provider_usage else None,
+            estimated_prompt_tokens=prompt_tokens,
+            estimated_completion_tokens=estimate_tokens(content),
+        )
+    return content
+
+
+def _error_issues(
+    answer_validator: Callable[[str], tuple[ValidationIssue, ...]],
+    content: str,
+) -> tuple[ValidationIssue, ...]:
+    return tuple(
+        issue
+        for issue in answer_validator(content)
+        if issue.severity is ValidationSeverity.ERROR
+    )
+
+
+async def _stream_structured_validated_answer(
+    *,
+    gateway: ModelGateway,
+    answer_conversation: list[dict[str, Any]],
+    citations: CitationRegistry,
+    answer_validator: Callable[[str], tuple[ValidationIssue, ...]],
+    timer: TurnPhaseTimer | None,
+    final_answer_tokens: list[int] | None,
+    validation_issue_codes: list[str] | None,
+    metrics: RepairMetrics,
+) -> AsyncIterator[dict[str, Any]]:
+    registered_refs = tuple(citations.labels())
+    draft_conversation = [
+        *answer_conversation,
+        {"role": "system", "content": structured_draft_instruction()},
+    ]
+    raw_draft = await _collect_structured_model_output(
+        gateway,
+        draft_conversation,
+        timer,
+        record_as_repair=False,
+        metrics=metrics,
+    )
+    quality_issue = _answer_quality_issue(raw_draft)
+    if quality_issue:
+        metrics.safe_refusal = True
+        metrics.failure_reason = quality_issue
+        yield {"type": "safe_refusal", "reason": quality_issue}
+        yield {"type": "text_delta", "delta": _answer_quality_failure(quality_issue)}
+        yield {"type": "sources", "sources": []}
+        yield {"type": "done"}
+        return
+    parse_started = time.monotonic()
+    try:
+        draft = parse_answer_draft(raw_draft, registered_refs)
+    except StructuredAnswerError as error:
+        metrics.safe_refusal = True
+        metrics.failure_reason = "invalid_answer_draft"
+        logger.warning("structured_answer_rejected reason=%s", type(error).__name__)
+        yield {"type": "safe_refusal", "reason": metrics.failure_reason}
+        yield {"type": "text_delta", "delta": _answer_quality_failure("fact_validation")}
+        yield {"type": "sources", "sources": []}
+        yield {"type": "done"}
+        return
+    finally:
+        metrics.draft_parse_seconds += time.monotonic() - parse_started
+    try:
+        rendered = timed_render(draft, metrics)
+    except Exception as error:  # Renderer is a server-owned publication boundary.
+        metrics.safe_refusal = True
+        metrics.failure_reason = "render_failed"
+        logger.warning("structured_render_rejected reason=%s", type(error).__name__)
+        yield {"type": "safe_refusal", "reason": metrics.failure_reason}
+        yield {"type": "text_delta", "delta": _answer_quality_failure("fact_validation")}
+        yield {"type": "sources", "sources": []}
+        yield {"type": "done"}
+        return
+    issues = _error_issues(answer_validator, rendered)
+    if validation_issue_codes is not None:
+        validation_issue_codes[:] = list(dict.fromkeys(issue.code for issue in issues))
+    if issues:
+        metrics.attempted = True
+        try:
+            targets = build_repair_targets(draft, issues)
+        except StructuredAnswerError as error:
+            metrics.safe_refusal = True
+            metrics.failure_reason = "unrepairable_issue"
+            logger.warning("structured_repair_rejected reason=%s", type(error).__name__)
+            yield {"type": "safe_refusal", "reason": metrics.failure_reason}
+            yield {"type": "text_delta", "delta": _answer_quality_failure("fact_validation")}
+            yield {"type": "sources", "sources": []}
+            yield {"type": "done"}
+            return
+        repair_conversation = [
+            *draft_conversation,
+            {"role": "assistant", "content": raw_draft},
+            {
+                "role": "system",
+                "content": repair_instruction(draft, issues, targets),
+            },
+        ]
+        raw_patch = await _collect_structured_model_output(
+            gateway,
+            repair_conversation,
+            timer,
+            record_as_repair=True,
+            metrics=metrics,
+        )
+        if _answer_quality_issue(raw_patch):
+            metrics.safe_refusal = True
+            metrics.failure_reason = "invalid_repair_output"
+            yield {"type": "safe_refusal", "reason": metrics.failure_reason}
+            yield {"type": "text_delta", "delta": _answer_quality_failure("fact_validation")}
+            yield {"type": "sources", "sources": []}
+            yield {"type": "done"}
+            return
+        merge_started = time.monotonic()
+        try:
+            patch = parse_repair_patch(raw_patch, registered_refs)
+            repaired = apply_repair_patch(draft, patch, targets)
+            metrics.patch_count = len(patch.operations)
+            metrics.applied = True
+        except StructuredAnswerError as error:
+            metrics.safe_refusal = True
+            metrics.failure_reason = "invalid_repair_patch"
+            logger.warning("structured_repair_rejected reason=%s", type(error).__name__)
+            yield {"type": "safe_refusal", "reason": metrics.failure_reason}
+            yield {"type": "text_delta", "delta": _answer_quality_failure("fact_validation")}
+            yield {"type": "sources", "sources": []}
+            yield {"type": "done"}
+            return
+        finally:
+            metrics.repair_seconds += time.monotonic() - merge_started
+        try:
+            rendered = timed_render(repaired, metrics)
+        except Exception as error:  # Do not publish a partially repaired draft.
+            metrics.safe_refusal = True
+            metrics.failure_reason = "render_failed"
+            logger.warning("structured_render_rejected reason=%s", type(error).__name__)
+            yield {"type": "safe_refusal", "reason": metrics.failure_reason}
+            yield {"type": "text_delta", "delta": _answer_quality_failure("fact_validation")}
+            yield {"type": "sources", "sources": []}
+            yield {"type": "done"}
+            return
+        remaining = _error_issues(answer_validator, rendered)
+        if remaining:
+            if validation_issue_codes is not None:
+                validation_issue_codes[:] = list(
+                    dict.fromkeys(
+                        [*validation_issue_codes, *(issue.code for issue in remaining)]
+                    )
+                )
+            metrics.safe_refusal = True
+            metrics.failure_reason = "repair_validation_failed"
+            yield {"type": "safe_refusal", "reason": metrics.failure_reason}
+            yield {"type": "text_delta", "delta": _answer_quality_failure("fact_validation")}
+            yield {"type": "sources", "sources": []}
+            yield {"type": "done"}
+            return
+    final_answer_tokens_estimate = estimate_tokens(rendered)
+    for index in range(0, len(rendered), 24):
+        yield {"type": "text_delta", "delta": rendered[index : index + 24]}
+    yield {"type": "sources", "sources": citations.public()}
+    yield {"type": "done", "finalAnswerTokens": final_answer_tokens_estimate}
+    if final_answer_tokens is not None:
+        final_answer_tokens[0] = final_answer_tokens_estimate
+
+
 async def _stream_final_answer(
     gateway: ModelGateway,
     conversation: list[dict[str, Any]],
@@ -1677,6 +1889,7 @@ async def _stream_final_answer(
     final_guidance: str = "",
     answer_validator: Callable[[str], tuple[ValidationIssue, ...]] | None = None,
     validation_issue_codes: list[str] | None = None,
+    repair_metrics: RepairMetrics | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     answer_conversation = _final_answer_conversation(
         conversation,
@@ -1684,9 +1897,21 @@ async def _stream_final_answer(
         final_guidance=final_guidance,
     )
     yield {"type": "status", "status": "answering"}
+    if answer_validator is not None:
+        async for event in _stream_structured_validated_answer(
+            gateway=gateway,
+            answer_conversation=answer_conversation,
+            citations=citations,
+            answer_validator=answer_validator,
+            timer=timer,
+            final_answer_tokens=final_answer_tokens,
+            validation_issue_codes=validation_issue_codes,
+            metrics=repair_metrics or RepairMetrics(),
+        ):
+            yield event
+        return
     last_issue = "empty"
     final_answer_tokens_estimate = 0
-    defer_until_validated = answer_validator is not None
     for attempt in range(2):
         answer_prompt_tokens = estimate_message_tokens(answer_conversation)
         answer_started = time.monotonic()
@@ -1694,11 +1919,8 @@ async def _stream_final_answer(
         guarded_parts: list[str] = []
         answer_exposed = False
         detected_issue = ""
-        fact_issues: tuple[ValidationIssue, ...] = ()
         async for delta in gateway.stream_answer(answer_conversation):
             answer_parts.append(delta)
-            if defer_until_validated:
-                continue
             if answer_exposed:
                 yield {"type": "text_delta", "delta": delta}
                 continue
@@ -1726,23 +1948,8 @@ async def _stream_final_answer(
             )
         final_answer_tokens_estimate = max(final_answer_tokens_estimate, estimate_tokens(content))
         last_issue = detected_issue or _answer_quality_issue(content) or ""
-        if not last_issue and answer_validator is not None:
-            fact_issues = tuple(
-                issue
-                for issue in answer_validator(content)
-                if issue.severity is ValidationSeverity.ERROR
-            )
-            if fact_issues:
-                last_issue = "fact_validation"
-                if validation_issue_codes is not None:
-                    validation_issue_codes[:] = list(
-                        dict.fromkeys(issue.code for issue in fact_issues)
-                    )
         if not last_issue:
-            if defer_until_validated:
-                for index in range(0, len(content), 24):
-                    yield {"type": "text_delta", "delta": content[index : index + 24]}
-            elif not answer_exposed:
+            if not answer_exposed:
                 for delta in guarded_parts:
                     yield {"type": "text_delta", "delta": delta}
             suffix = _missing_citation_suffix(content, citations.labels())
@@ -1774,10 +1981,6 @@ async def _stream_final_answer(
         )
         if attempt == 0:
             recovery = _answer_recovery_instruction(last_issue)
-            if fact_issues:
-                recovery += "\n服务器事实校验失败：\n- " + "\n- ".join(
-                    issue.message for issue in fact_issues
-                )
             answer_conversation = [
                 *answer_conversation,
                 {
@@ -2519,11 +2722,6 @@ def _answer_recovery_instruction(issue: str) -> str:
         return (
             "上一份候选输出只是搜索或读取计划。检索已经结束，工具不可用；请立即根据"
             "已提供证据生成完整最终答案，不要描述下一步计划。"
-        )
-    if issue == "fact_validation":
-        return (
-            "上一份候选输出与服务器从已读证据提取的 Fact Ledger 冲突。必须修正列出的"
-            "等级求和、资格、法术节点或数值问题；不得删除缺失信息或改用模型记忆。"
         )
     return "上一份候选输出不可用；请根据已提供证据重新生成完整的中文最终答案。"
 
