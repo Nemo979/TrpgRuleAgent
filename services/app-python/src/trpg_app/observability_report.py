@@ -47,9 +47,17 @@ _METRICS = {
         "synthesisMissingEvidenceCheckCount",
     ),
     "factLedger.recordCount": ("context", "factLedgerRecordCount"),
+    "factLedger.knownCount": ("context", "factLedgerKnownCount"),
+    "factLedger.unknownCount": ("context", "factLedgerUnknownCount"),
+    "factLedger.conflictingCount": ("context", "factLedgerConflictingCount"),
     "factLedger.validationIssueCount": (
         "context",
         "factValidationIssueCount",
+    ),
+    "latency.factLedgerBuildSeconds": ("context", "factLedgerBuildSeconds"),
+    "latency.factLedgerValidationSeconds": (
+        "context",
+        "factLedgerValidationSeconds",
     ),
     "context.compactedToolMessages": ("context", "compactedToolMessages"),
     "context.decisionToolTokensBeforeMax": ("context", "decisionToolTokensBeforeMax"),
@@ -113,6 +121,9 @@ def aggregate(records: list[dict[str, Any]]) -> dict[str, Any]:
         ("complexPlannerUsed", "complexPlannerUsed"),
         ("synthesisContractVersion", "synthesisContractVersion"),
         ("factLedgerVersion", "factLedgerVersion"),
+        ("factLedgerStatus", "factLedgerStatus"),
+        ("factLedgerAdapterId", "factLedgerAdapterId"),
+        ("factLedgerAdapterVersion", "factLedgerAdapterVersion"),
     ):
         counts: dict[str, int] = {}
         for record in records:

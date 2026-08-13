@@ -327,6 +327,35 @@ class AppApiTest(unittest.TestCase):
         self.assertFalse(metrics["context"]["complexPlannerUsed"])
         self.assertEqual(metrics["context"]["plannerTaskCount"], 0)
 
+    def test_fact_ledger_flag_is_inert_without_complex_planner(self) -> None:
+        metrics_path = Path(self.temporary.name) / "fact-ledger-metrics.jsonl"
+        config = replace(self.config, enable_fact_ledger=True)
+        with patch.dict(
+            "os.environ",
+            {"TRPG_TURN_METRICS_PATH": str(metrics_path)},
+            clear=False,
+        ):
+            with TestClient(
+                create_app(config, gateway_factory=ApiFakeGateway)
+            ) as client:
+                client.post("/api/auth/login", json={"password": "shared"})
+                response = client.post(
+                    "/api/chat",
+                    json={
+                        "model_id": "test",
+                        "library_id": "pathfinder-1e",
+                        "messages": [
+                            {"role": "user", "content": "借机攻击是什么"}
+                        ],
+                    },
+                )
+
+        self.assertEqual(response.status_code, 200)
+        metrics = json.loads(metrics_path.read_text(encoding="utf-8").splitlines()[-1])
+        self.assertTrue(metrics["context"]["factLedgerEnabled"])
+        self.assertEqual(metrics["context"]["factLedgerStatus"], "planner_disabled")
+        self.assertEqual(metrics["context"]["factLedgerVersion"], 0)
+
     def test_source_is_scoped_to_selected_library(self) -> None:
         self.client.post("/api/auth/login", json={"password": "shared"})
         pf_source = self.client.get(

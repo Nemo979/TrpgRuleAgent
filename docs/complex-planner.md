@@ -14,10 +14,11 @@ V2.3 Stage 3 在 Stage 2 路由与拆解之上增加确定性的受限计划和�
 
 ## Fact Ledger 集成边界
 
-当前 Planner 路径直接调用 PF1E 原型 Ledger。§8.7 整改后，Planner 只依赖通用 Ledger/Adapter
-接口：根据当前 `LibraryManifest` 选择 Adapter，把已注册 Evidence 转换为 FactRecord，验证带稳定
-claim ID 的 AnswerDraft，并只修补失败路径。Planner 不导入 PF1E Parser 或 Validator；没有匹配
-Adapter 时记录降级原因并沿用原回答路径。
+Planner 已改为只依赖通用 Ledger/Adapter 接口：根据当前 `LibraryManifest` 的
+`id + system + edition` 精确选择 Adapter，把本轮已注册 Evidence 转换为 FactRecord。Planner
+不导入 PF1E Parser 或 Validator；没有匹配 Adapter、协议不兼容或 Adapter 失败时记录低基数原因，
+不注入 Ledger 提示、不安装 Validator，沿用原回答与流式路径。带稳定 claim ID 的 AnswerDraft 和
+局部修补仍属于 §8.7 后续步骤。
 
 ## 串行执行
 
@@ -76,8 +77,9 @@ Evidence 就绪，正确识别 1 个未决目标环级，32/32 Planner 任务完
 时延 87.81s → 111.51s、模型总 token 244,592 → 290,132。MiMo 仍违反等级求和、职业奖励专长
 范围、法术表和装备数值约束，因此提示级合成契约不足以关闭发布门。
 
-下一步不继续扩写提示，改为评估服务器控制的类型化 Fact Ledger 与流式输出前校验；Feature Flag
-继续关闭。再次运行以下命令仍需取得明确授权：
+通用 Fact Ledger 核心与 PF1E Adapter 等价迁移已于 2026-08-12 完成，新增独立且默认关闭的
+`enable_fact_ledger`。下一步不继续扩写提示，而按失败样本扩充 PF1E 覆盖，再实现结构化局部修补；
+两个 Feature Flag 继续关闭。再次运行以下命令仍需取得明确授权：
 
 Stage 3.2 已完成第一版 Fact Ledger：从已注册证据解析职业法术表、奖励专长范围、进阶要求、专长
 条目和装备数值；候选答案在流出前校验，失败时只允许一次修正，连续失败不输出候选或来源。上一轮

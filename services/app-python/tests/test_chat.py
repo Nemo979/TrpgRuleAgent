@@ -17,6 +17,8 @@ from trpg_app.chat import (
     run_rule_turn,
 )
 from trpg_app.config import ModelConfig
+from trpg_app.fact_ledger import FactLedger
+from trpg_app.fact_ledger_adapter import AdapterStatus, FactLedgerRuntime
 from trpg_app.query_decomposition import decompose_query, route_query
 
 
@@ -412,6 +414,14 @@ class DecompositionLibrary(FakeLibrary):
 
 
 class PlannerLibrary(FakeLibrary):
+    manifest = SimpleNamespace(
+        id="pathfinder-1e",
+        name="Pathfinder 1E",
+        system="Pathfinder",
+        edition="1E",
+        revision="test-revision",
+    )
+
     def search(self, query: str, limit: int):
         self.search_queries.append(query)
         document_id = f"pf1e:planner-{len(self.search_queries)}"
@@ -422,9 +432,35 @@ class PlannerLibrary(FakeLibrary):
         return [
             {
                 "id": document_id,
+                "rulesetId": "pathfinder-1e",
                 "title": f"规则 {document_id}",
                 "fullPath": "PF1E > 规则",
                 "content": "这是当前任务已读取的规则正文。",
+                "metadata": {},
+            }
+            for document_id in ids
+        ]
+
+
+class GSSPlannerLibrary(PlannerLibrary):
+    manifest = SimpleNamespace(
+        id="golden-sky-stories-zh-1-2",
+        name="夕妖晚谣 1.2",
+        system="夕妖晚谣（Golden Sky Stories）",
+        edition="中文 1.2",
+        revision="test-revision-gss",
+    )
+
+    def read(self, ids):
+        return [
+            {
+                "id": document_id,
+                "rulesetId": "golden-sky-stories-zh-1-2",
+                "title": f"规则 {document_id}",
+                "fullPath": "GSS > 规则",
+                # Deliberately contains PF vocabulary. Adapter selection must
+                # depend only on the selected library identity.
+                "content": "法师5/战士4、专长与奖励专长只是一段隔离测试文本。",
                 "metadata": {},
             }
             for document_id in ids
@@ -874,6 +910,150 @@ class PausedStreamingGateway:
 
 
 class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def planner_query() -> str:
+        return (
+            "我想规划6到12级法师兼职战士，必须保持指定法术环级；"
+            "先核对兼职造成的施法进度变化，再根据是否满足环级决定兼职等级，"
+            "并比较战士专长与装备收益。"
+        )
+
+    async def test_fact_ledger_flag_off_preserves_planner_path(self) -> None:
+        with patch("trpg_app.chat._log_turn_metrics") as log_metrics:
+            baseline = [
+                event
+                async for event in run_rule_turn(
+                    model=self.model(),
+                    library=PlannerLibrary(),
+                    messages=[{"role": "user", "content": self.planner_query()}],
+                    gateway_factory=PlannerGateway,
+                    enable_complex_planner=True,
+                )
+            ]
+            baseline_prompt = PlannerGateway.final_messages[-1]["content"]
+            events = [
+                event
+                async for event in run_rule_turn(
+                    model=self.model(),
+                    library=PlannerLibrary(),
+                    messages=[{"role": "user", "content": self.planner_query()}],
+                    gateway_factory=PlannerGateway,
+                    enable_complex_planner=True,
+                    enable_fact_ledger=False,
+                )
+            ]
+
+        final_prompt = PlannerGateway.final_messages[-1]["content"]
+        self.assertEqual(events, baseline)
+        self.assertEqual(final_prompt, baseline_prompt)
+        self.assertNotIn('"fact_ledger"', final_prompt)
+        self.assertNotIn("Fact Ledger 是服务器", final_prompt)
+        self.assertEqual(log_metrics.call_args.kwargs["context"]["factLedgerStatus"], "disabled")
+        self.assertEqual(events[-1]["type"], "done")
+
+    async def test_gss_without_adapter_never_runs_pf1e_validation(self) -> None:
+        with patch("trpg_app.chat._log_turn_metrics") as log_metrics:
+            events = [
+                event
+                async for event in run_rule_turn(
+                    model=self.model(),
+                    library=GSSPlannerLibrary(),
+                    messages=[{"role": "user", "content": self.planner_query()}],
+                    gateway_factory=FactRetryPlannerGateway,
+                    enable_complex_planner=True,
+                    enable_fact_ledger=True,
+                )
+            ]
+
+        output = "".join(event.get("delta", "") for event in events)
+        self.assertEqual(FactRetryPlannerGateway.attempts, 1)
+        self.assertIn("法师5/战士4", output)
+        self.assertNotIn('"fact_ledger"', FactRetryPlannerGateway.final_messages[-1]["content"])
+        context = log_metrics.call_args.kwargs["context"]
+        self.assertEqual(context["factLedgerStatus"], "unregistered")
+        self.assertEqual(context["factLedgerAdapterId"], "")
+        self.assertEqual(context["factValidationIssueCount"], 0)
+
+    async def test_incompatible_and_failed_adapters_preserve_planner_output(self) -> None:
+        for status in (
+            AdapterStatus.INCOMPATIBLE,
+            AdapterStatus.BUILD_FAILED,
+            AdapterStatus.NO_FACTS,
+        ):
+            with self.subTest(status=status), patch(
+                "trpg_app.chat.build_default_fact_ledger_runtime",
+                return_value=FactLedgerRuntime(status=status),
+            ):
+                events = [
+                    event
+                    async for event in run_rule_turn(
+                        model=self.model(),
+                        library=PlannerLibrary(),
+                        messages=[{"role": "user", "content": self.planner_query()}],
+                        gateway_factory=FactRetryPlannerGateway,
+                        enable_complex_planner=True,
+                        enable_fact_ledger=True,
+                    )
+                ]
+
+            output = "".join(event.get("delta", "") for event in events)
+            self.assertEqual(FactRetryPlannerGateway.attempts, 1)
+            self.assertIn("法师5/战士4", output)
+            self.assertNotIn(
+                '"fact_ledger"',
+                FactRetryPlannerGateway.final_messages[-1]["content"],
+            )
+
+    async def test_publication_or_validation_preflight_failure_injects_no_ledger(self) -> None:
+        class RuntimeAdapter:
+            adapter_id = "pathfinder-1e"
+            adapter_version = 1
+
+        for method in ("public", "validate"):
+            runtime = FactLedgerRuntime(
+                status=AdapterStatus.MATCHED,
+                adapter=RuntimeAdapter(),  # type: ignore[arg-type]
+                ledger=FactLedger(
+                    adapter_id="pathfinder-1e",
+                    adapter_version=1,
+                    goal=self.planner_query(),
+                    registered_evidence_refs=(),
+                ),
+            )
+
+            def fail_public():
+                runtime.status = AdapterStatus.PUBLICATION_FAILED
+                return {}
+
+            def fail_validate(_content):
+                runtime.status = AdapterStatus.VALIDATION_FAILED
+                return ()
+
+            runtime.public = fail_public if method == "public" else lambda: {"ok": True}  # type: ignore[method-assign]
+            runtime.validate = fail_validate if method == "validate" else lambda _content: ()  # type: ignore[method-assign]
+            with self.subTest(method=method), patch(
+                "trpg_app.chat.build_default_fact_ledger_runtime",
+                return_value=runtime,
+            ):
+                events = [
+                    event
+                    async for event in run_rule_turn(
+                        model=self.model(),
+                        library=PlannerLibrary(),
+                        messages=[{"role": "user", "content": self.planner_query()}],
+                        gateway_factory=FactRetryPlannerGateway,
+                        enable_complex_planner=True,
+                        enable_fact_ledger=True,
+                    )
+                ]
+
+            output = "".join(event.get("delta", "") for event in events)
+            self.assertEqual(FactRetryPlannerGateway.attempts, 1)
+            self.assertIn("法师5/战士4", output)
+            prompt = FactRetryPlannerGateway.final_messages[-1]["content"]
+            self.assertNotIn('"fact_ledger"', prompt)
+            self.assertNotIn("Fact Ledger 是服务器", prompt)
+
     async def test_complex_planner_executes_topologically_and_reports_metrics(self) -> None:
         library = PlannerLibrary()
         query = (
@@ -890,6 +1070,7 @@ class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
                     messages=[{"role": "user", "content": query}],
                     gateway_factory=PlannerGateway,
                     enable_complex_planner=True,
+                    enable_fact_ledger=True,
                 )
             ]
 
@@ -914,6 +1095,8 @@ class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context["synthesisUnresolvedFieldCount"], 1)
         self.assertEqual(context["synthesisMissingEvidenceCheckCount"], 0)
         self.assertEqual(context["factLedgerVersion"], 1)
+        self.assertEqual(context["factLedgerStatus"], "matched")
+        self.assertEqual(context["factLedgerAdapterId"], "pathfinder-1e")
         self.assertEqual(context["factValidationIssueCount"], 0)
         self.assertEqual(events[-1]["type"], "done")
 
@@ -931,6 +1114,7 @@ class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
                     messages=[{"role": "user", "content": query}],
                     gateway_factory=FactRetryPlannerGateway,
                     enable_complex_planner=True,
+                    enable_fact_ledger=True,
                 )
             ]
 
@@ -959,6 +1143,7 @@ class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
                 messages=[{"role": "user", "content": query}],
                 gateway_factory=AlwaysInvalidFactPlannerGateway,
                 enable_complex_planner=True,
+                enable_fact_ledger=True,
             )
         ]
 

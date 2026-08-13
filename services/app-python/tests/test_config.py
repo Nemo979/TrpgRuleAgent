@@ -46,6 +46,7 @@ class AppConfigTest(unittest.TestCase):
         self.assertFalse(config.enable_dynamic_evidence_budget)
         self.assertFalse(config.enable_query_decomposition)
         self.assertFalse(config.enable_complex_planner)
+        self.assertFalse(config.enable_fact_ledger)
 
     def test_loads_dynamic_evidence_budget_feature_flag(self) -> None:
         config = self.load(
@@ -76,6 +77,16 @@ class AppConfigTest(unittest.TestCase):
         )
 
         self.assertTrue(config.enable_complex_planner)
+
+    def test_loads_fact_ledger_feature_flag(self) -> None:
+        config = self.load(
+            BASE_CONFIG.replace(
+                "library_root: data/libraries",
+                "library_root: data/libraries\nenable_fact_ledger: true",
+            )
+        )
+
+        self.assertTrue(config.enable_fact_ledger)
 
     def test_rejects_unbounded_retry_count(self) -> None:
         with self.assertRaisesRegex(ValueError, "max_retries"):
@@ -112,6 +123,14 @@ class AppConfigTest(unittest.TestCase):
                 BASE_CONFIG.replace(
                     "library_root: data/libraries",
                     'library_root: data/libraries\nenable_complex_planner: "false"',
+                )
+            )
+
+        with self.assertRaisesRegex(ValueError, "must be a boolean"):
+            self.load(
+                BASE_CONFIG.replace(
+                    "library_root: data/libraries",
+                    'library_root: data/libraries\nenable_fact_ledger: "false"',
                 )
             )
 

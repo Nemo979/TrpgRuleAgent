@@ -297,17 +297,21 @@ def planner_result_guidance(
             )
         ]
     if fact_ledger is not None:
-        payload["fact_ledger"] = fact_ledger.public()
-    return (
+        payload["fact_ledger"] = fact_ledger
+    guidance = (
         "受限 Planner 已按依赖顺序完成。下面结构只描述目标覆盖和来源注册状态，"
         "不是规则事实；规则结论仍必须逐条引用已读取证据。回答必须明确区分规则事实、"
         "基于规则的推导、选择建议、收益与损失、适用条件、缺失信息和来源。条件未满足时"
         "必须执行题目要求的替代分支；不得把未完成任务写成已验证结论。合成契约也不是"
         "规则事实：它只规定哪些主张必须精确取证。数值、等级、资格、法术和装备明细若没有"
-        "同项证据，必须删除或标为证据不足，不能用模型记忆补全。Fact Ledger 是服务器从"
-        "已读证据确定性提取的唯一结构化事实表；最终数值和资格不得与其冲突。\n"
-        + json.dumps(payload, ensure_ascii=False, indent=2)
+        "同项证据，必须删除或标为证据不足，不能用模型记忆补全。"
     )
+    if fact_ledger is not None:
+        guidance += (
+            "Fact Ledger 是服务器从已读证据确定性提取的唯一结构化事实表；"
+            "最终数值和资格不得与其冲突。"
+        )
+    return guidance + "\n" + json.dumps(payload, ensure_ascii=False, indent=2)
 
 
 def _assert_acyclic(tasks: Iterable[PlanTask]) -> None:

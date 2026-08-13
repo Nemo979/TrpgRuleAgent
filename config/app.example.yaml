@@ -7,6 +7,7 @@ max_concurrent_turns: 5
 enable_dynamic_evidence_budget: false
 enable_query_decomposition: false
 enable_complex_planner: false
+enable_fact_ledger: false
 
 models:
   - id: deepseek-v4-flash

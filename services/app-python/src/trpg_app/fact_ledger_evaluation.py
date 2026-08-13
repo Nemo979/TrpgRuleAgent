@@ -7,7 +7,10 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .fact_ledger import build_fact_ledger, validate_fact_answer
+from .pf1e_fact_adapter import (
+    build_pf1e_fact_ledger,
+    validate_pf1e_fact_answer,
+)
 
 
 def evaluate_report(
@@ -44,8 +47,8 @@ def evaluate_report(
                 )
             )
         query = str(turn.get("query", ""))
-        ledger = build_fact_ledger(query, sources)
-        issues = validate_fact_answer(str(turn.get("answer", "")), ledger)
+        ledger = build_pf1e_fact_ledger(query, sources)
+        issues = validate_pf1e_fact_answer(str(turn.get("answer", "")), ledger)
         rows.append(
             {
                 "id": str(case.get("id", "")),
@@ -69,7 +72,7 @@ def evaluate_report(
         "expectationPassedCases": expectation_passed,
         "passed": bool(rows) and expectation_passed == len(rows),
         "nextAction": (
-            "request_real_fact_ledger_ab"
+            "fact_ledger_migration_gate_complete"
             if rows and expectation_passed == len(rows)
             else "expand_fact_ledger_validation"
         ),

@@ -28,12 +28,12 @@ from .context_budget import ContextBudget
 from .conversation_state import ConversationState
 from .evidence_policy import EvidenceBudgetPolicy, EvidenceBudgetProfile
 from .fact_ledger import (
-    FACT_LEDGER_VERSION,
-    FactLedger,
-    FactValidationIssue,
-    build_fact_ledger,
-    validate_fact_answer,
+    FACT_LEDGER_CORE_SCHEMA_VERSION,
+    ValidationIssue,
+    ValidationSeverity,
 )
+from .fact_ledger_adapter import AdapterStatus, FactLedgerRuntime
+from .fact_ledger_defaults import build_default_fact_ledger_runtime
 from .libraries import Library
 from .observability import (
     TurnPhaseTimer,
@@ -668,6 +668,7 @@ async def run_rule_turn(
     enable_dynamic_evidence_budget: bool = False,
     enable_query_decomposition: bool = False,
     enable_complex_planner: bool = False,
+    enable_fact_ledger: bool = False,
 ) -> AsyncIterator[dict[str, Any]]:
     gateway = gateway_factory(model)
     state = ConversationState.from_messages(messages)
@@ -685,7 +686,15 @@ async def run_rule_turn(
     complex_plan: ComplexPlan | None = None
     synthesis_contract: SynthesisContract | None = None
     plan_results: list[TaskResult] = []
-    fact_ledger: FactLedger | None = None
+    fact_ledger = FactLedgerRuntime(
+        status=(
+            AdapterStatus.DISABLED
+            if not enable_fact_ledger
+            else AdapterStatus.PLANNER_DISABLED
+            if not enable_complex_planner
+            else AdapterStatus.NOT_APPLICABLE
+        )
+    )
     fact_validation_issue_codes: list[str] = []
     planner_seconds = 0.0
     executor_seconds = 0.0
@@ -902,9 +911,46 @@ async def run_rule_turn(
                     if synthesis_contract and complex_plan
                     else 0
                 ),
-                "factLedgerVersion": FACT_LEDGER_VERSION if fact_ledger else 0,
-                "factLedgerRecordCount": fact_ledger.record_count if fact_ledger else 0,
+                "factLedgerEnabled": enable_fact_ledger,
+                "factLedgerStatus": fact_ledger.status.value,
+                "factLedgerAdapterId": fact_ledger.adapter_id,
+                "factLedgerAdapterVersion": fact_ledger.adapter_version,
+                "factLedgerVersion": (
+                    FACT_LEDGER_CORE_SCHEMA_VERSION
+                    if fact_ledger.ledger is not None
+                    else 0
+                ),
+                "factLedgerRecordCount": fact_ledger.record_count,
+                "factLedgerKnownCount": (
+                    sum(
+                        record.status.value == "known"
+                        for record in fact_ledger.ledger.records
+                    )
+                    if fact_ledger.ledger is not None
+                    else 0
+                ),
+                "factLedgerUnknownCount": (
+                    sum(
+                        record.status.value == "unknown"
+                        for record in fact_ledger.ledger.records
+                    )
+                    if fact_ledger.ledger is not None
+                    else 0
+                ),
+                "factLedgerConflictingCount": (
+                    sum(
+                        record.status.value == "conflicting"
+                        for record in fact_ledger.ledger.records
+                    )
+                    if fact_ledger.ledger is not None
+                    else 0
+                ),
                 "factValidationIssueCount": len(fact_validation_issue_codes),
+                "factLedgerBuildSeconds": round(fact_ledger.build_seconds, 6),
+                "factLedgerValidationSeconds": round(
+                    fact_ledger.validation_seconds,
+                    6,
+                ),
                 "plannerSeconds": round(planner_seconds, 6),
                 "executorSeconds": round(executor_seconds, 6),
                 "routerVersion": route_decision.router_version if route_decision else 0,
@@ -1105,10 +1151,24 @@ async def run_rule_turn(
 
         executor_seconds = time.monotonic() - executor_started
         if citations.by_document_id:
-            fact_ledger = build_fact_ledger(
-                complex_plan.goal,
-                citations.by_document_id.values(),
-            )
+            fact_ledger_payload: dict[str, Any] | None = None
+            answer_validator: Callable[[str], tuple[ValidationIssue, ...]] | None = None
+            if enable_fact_ledger:
+                fact_ledger = build_default_fact_ledger_runtime(
+                    library.manifest,
+                    complex_plan.goal,
+                    citations.by_document_id.values(),
+                )
+                candidate_payload: dict[str, Any] | None = None
+                if fact_ledger.active:
+                    candidate_payload = fact_ledger.public()
+                if fact_ledger.active:
+                    # Verify the optional validation boundary before it changes
+                    # final-answer streaming behavior.
+                    fact_ledger.validate("")
+                if fact_ledger.active:
+                    fact_ledger_payload = candidate_payload
+                    answer_validator = fact_ledger.validate
             async for event in _stream_final_answer(
                 gateway,
                 conversation,
@@ -1119,12 +1179,9 @@ async def run_rule_turn(
                     complex_plan,
                     plan_results,
                     synthesis_contract=synthesis_contract,
-                    fact_ledger=fact_ledger,
+                    fact_ledger=fact_ledger_payload,
                 ),
-                answer_validator=lambda content: validate_fact_answer(
-                    content,
-                    fact_ledger,
-                ),
+                answer_validator=answer_validator,
                 validation_issue_codes=fact_validation_issue_codes,
             ):
                 yield event
@@ -1618,7 +1675,7 @@ async def _stream_final_answer(
     timer: TurnPhaseTimer | None = None,
     final_answer_tokens: list[int] | None = None,
     final_guidance: str = "",
-    answer_validator: Callable[[str], tuple[FactValidationIssue, ...]] | None = None,
+    answer_validator: Callable[[str], tuple[ValidationIssue, ...]] | None = None,
     validation_issue_codes: list[str] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     answer_conversation = _final_answer_conversation(
@@ -1637,7 +1694,7 @@ async def _stream_final_answer(
         guarded_parts: list[str] = []
         answer_exposed = False
         detected_issue = ""
-        fact_issues: tuple[FactValidationIssue, ...] = ()
+        fact_issues: tuple[ValidationIssue, ...] = ()
         async for delta in gateway.stream_answer(answer_conversation):
             answer_parts.append(delta)
             if defer_until_validated:
@@ -1670,7 +1727,11 @@ async def _stream_final_answer(
         final_answer_tokens_estimate = max(final_answer_tokens_estimate, estimate_tokens(content))
         last_issue = detected_issue or _answer_quality_issue(content) or ""
         if not last_issue and answer_validator is not None:
-            fact_issues = answer_validator(content)
+            fact_issues = tuple(
+                issue
+                for issue in answer_validator(content)
+                if issue.severity is ValidationSeverity.ERROR
+            )
             if fact_issues:
                 last_issue = "fact_validation"
                 if validation_issue_codes is not None:

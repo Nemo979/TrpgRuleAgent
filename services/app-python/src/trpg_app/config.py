@@ -42,6 +42,7 @@ class AppConfig:
     enable_dynamic_evidence_budget: bool = False
     enable_query_decomposition: bool = False
     enable_complex_planner: bool = False
+    enable_fact_ledger: bool = False
 
 
 def load_config(path: Path | None = None) -> AppConfig:
@@ -110,6 +111,7 @@ def load_config(path: Path | None = None) -> AppConfig:
             raw, "enable_query_decomposition", False
         ),
         enable_complex_planner=_optional_bool(raw, "enable_complex_planner", False),
+        enable_fact_ledger=_optional_bool(raw, "enable_fact_ledger", False),
     )
 
 

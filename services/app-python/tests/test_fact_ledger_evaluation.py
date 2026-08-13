@@ -45,7 +45,10 @@ class FactLedgerEvaluationTest(unittest.TestCase):
         negative_result = evaluate_report(report, expect_rejected=True)
         self.assertTrue(negative_result["passed"])
         self.assertEqual(negative_result["expectationPassedCases"], 1)
-        self.assertEqual(negative_result["nextAction"], "request_real_fact_ledger_ab")
+        self.assertEqual(
+            negative_result["nextAction"],
+            "fact_ledger_migration_gate_complete",
+        )
 
 
 if __name__ == "__main__":
