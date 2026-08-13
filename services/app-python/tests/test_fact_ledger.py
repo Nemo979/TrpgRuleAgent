@@ -64,7 +64,7 @@ class FactLedgerTest(unittest.TestCase):
         self.assertEqual(
             PF1E_FACT_LEDGER_ADAPTER.public(value),
             {
-                "version": 1,
+                "version": 2,
                 "class_levels": [
                     {
                         "class": "法师",
@@ -99,6 +99,10 @@ class FactLedgerTest(unittest.TestCase):
                     }
                 ],
                 "feat_count": 2,
+                "feats": [],
+                "feat_slots": [],
+                "base_attack": [],
+                "spells": [],
             },
         )
 

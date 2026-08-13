@@ -1,9 +1,10 @@
 """PF1E evidence parsing and deterministic validation adapter.
 
 The ledger only parses facts present in registered rule documents. It is
-deliberately narrow: class spell tables, prestige requirements, class bonus
-feat scopes, feat rows, and cited equipment numbers. Unknown formats stay
-unresolved instead of being completed from model knowledge.
+deliberately narrow: class spell tables, feat-slot timelines, feat
+prerequisites, spell metadata, prestige requirements, class bonus feat scopes,
+and cited equipment numbers. Unknown formats stay unresolved instead of being
+completed from model knowledge.
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ from .fact_ledger_adapter import (
 )
 
 
-PF1E_FACT_SCHEMA_VERSION = 1
+PF1E_FACT_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -84,6 +85,72 @@ class FeatFact:
     category: str
     source_label: str
 
+    def public(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "prerequisites": self.prerequisites,
+            "category": self.category,
+            "source": self.source_label,
+        }
+
+
+@dataclass(frozen=True)
+class FeatSlotFact:
+    level: int
+    source_type: str
+    source_name: str
+    count: int
+    allowed_categories: tuple[str, ...]
+    source_label: str
+
+    def public(self) -> dict[str, Any]:
+        return {
+            "level": self.level,
+            "source_type": self.source_type,
+            "source_name": self.source_name,
+            "count": self.count,
+            "allowed_categories": list(self.allowed_categories),
+            "source": self.source_label,
+        }
+
+
+@dataclass(frozen=True)
+class BaseAttackFact:
+    class_name: str
+    level: int
+    bonus: int
+    source_label: str
+
+    def public(self) -> dict[str, Any]:
+        return {
+            "class": self.class_name,
+            "level": self.level,
+            "bonus": self.bonus,
+            "source": self.source_label,
+        }
+
+
+@dataclass(frozen=True)
+class SpellFact:
+    name: str
+    school: str
+    class_levels: tuple[tuple[str, int], ...]
+    duration: str
+    saving_throw: str
+    source_label: str
+
+    def public(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "school": self.school,
+            "class_levels": {
+                class_name: level for class_name, level in self.class_levels
+            },
+            "duration": self.duration,
+            "saving_throw": self.saving_throw,
+            "source": self.source_label,
+        }
+
 
 FactValidationIssue = ValidationIssue
 
@@ -96,6 +163,9 @@ class PF1EFactData:
     bonus_feat_scopes: list[BonusFeatScope] = field(default_factory=list)
     prestige_requirements: list[PrestigeRequirements] = field(default_factory=list)
     feats: dict[str, FeatFact] = field(default_factory=dict)
+    feat_slots: list[FeatSlotFact] = field(default_factory=list)
+    base_attack: dict[tuple[str, int], BaseAttackFact] = field(default_factory=dict)
+    spells: dict[str, SpellFact] = field(default_factory=dict)
     version: int = PF1E_FACT_SCHEMA_VERSION
 
     def public(self) -> dict[str, Any]:
@@ -119,6 +189,35 @@ class PF1EFactData:
                 item.public() for item in self.prestige_requirements
             ],
             "feat_count": len(self.feats),
+            "feats": [
+                self.feats[name].public()
+                for name in _goal_relevant_feat_names(self.goal, self.feats)
+            ],
+            "feat_slots": [
+                item.public()
+                for item in sorted(
+                    self.feat_slots,
+                    key=lambda item: (item.level, item.source_type, item.source_name),
+                )
+                if level_range is None
+                or level_range[0] <= item.level <= level_range[1]
+            ],
+            "base_attack": [
+                item.public()
+                for item in sorted(
+                    self.base_attack.values(),
+                    key=lambda item: (item.class_name, item.level),
+                )
+                if level_range is None
+                or level_range[0] <= item.level <= level_range[1]
+            ],
+            "spells": [
+                item.public()
+                for item in sorted(
+                    self.spells.values(),
+                    key=lambda item: item.name,
+                )
+            ],
         }
 
     @property
@@ -128,6 +227,9 @@ class PF1EFactData:
             + len(self.bonus_feat_scopes)
             + len(self.prestige_requirements)
             + len(self.feats)
+            + len(self.feat_slots)
+            + len(self.base_attack)
+            + len(self.spells)
         )
 
 
@@ -157,6 +259,58 @@ _WIZARD_SLOT_COUNT = re.compile(
     re.MULTILINE,
 )
 _NUMERIC_STAT = re.compile(r"\d+\s*gp|\d+d\d+|[+-]\d+%|[+-]\d+\s*(?:AC|攻击|伤害)", re.I)
+_SCHOOL_NAMES = (
+    "防护系",
+    "咒法系",
+    "预言系",
+    "惑控系",
+    "塑能系",
+    "幻术系",
+    "死灵系",
+    "变化系",
+)
+
+
+def _goal_relevant_feat_names(
+    goal: str,
+    feats: dict[str, FeatFact],
+) -> tuple[str, ...]:
+    selected = {name for name in feats if name in goal}
+    changed = True
+    while changed:
+        changed = False
+        prerequisites = "\n".join(feats[name].prerequisites for name in selected)
+        for name in feats:
+            if name not in selected and name in prerequisites:
+                selected.add(name)
+                changed = True
+    return tuple(sorted(selected))
+
+
+def _document_content(document: dict[str, Any]) -> str:
+    """Return direct evidence text, with blocks only as an empty-body fallback."""
+
+    direct = str(document.get("content", "")).strip()
+    if direct:
+        return direct
+    metadata = document.get("metadata", {})
+    values: list[str] = []
+    if isinstance(metadata, dict):
+        blocks = metadata.get("structuralBlocks", ())
+        if isinstance(blocks, list):
+            values.extend(
+                str(block.get("content", ""))
+                for block in blocks
+                if isinstance(block, dict)
+            )
+    unique: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = value.strip()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            unique.append(normalized)
+    return "\n".join(unique)
 
 
 def _build_pf1e_data(
@@ -165,21 +319,29 @@ def _build_pf1e_data(
 ) -> PF1EFactData:
     documents = tuple(labeled_documents)
     evidence = {
-        label: str(document.get("content", ""))
+        label: _document_content(document)
         for label, document in documents
-        if label and str(document.get("content", "")).strip()
+        if label and _document_content(document)
     }
     ledger = PF1EFactData(goal=goal, evidence=evidence)
     for label, document in documents:
         title = str(document.get("title", ""))
-        content = str(document.get("content", ""))
+        content = _document_content(document)
         if "法师" in title and "表：法师" in content:
             _parse_wizard_table(ledger, label, content)
             _parse_wizard_bonus_scope(ledger, label, content)
+        if "战士" in title:
+            _parse_fighter_progression(ledger, label, content)
+        if "角色升级" in title or "Character Advancement" in content:
+            _parse_general_feat_slots(ledger, label, content)
+        if "人类" in title:
+            _parse_human_feat_slot(ledger, label, content)
         if "进阶要求" in content:
             _parse_prestige_requirements(ledger, label, title, content)
         if "专长" in title or "专长列表" in content:
             _parse_feat_rows(ledger, label, content)
+        if "学派" in content and "环位" in content:
+            _parse_spell(ledger, label, title, content)
     return ledger
 
 
@@ -193,7 +355,10 @@ def _validate_pf1e_answer(
     issues.extend(_validate_level_sums(plain))
     issues.extend(_validate_prestige_requirements(plain, ledger))
     issues.extend(_validate_bonus_feat_scope(plain, ledger))
+    issues.extend(_validate_feat_timeline(plain, ledger))
+    issues.extend(_validate_feat_prerequisites(plain, ledger))
     issues.extend(_validate_spell_progression(plain, ledger))
+    issues.extend(_validate_spell_metadata(plain, ledger))
     issues.extend(_validate_cited_numeric_stats(content, ledger))
     issues.extend(_validate_named_recommendations(content, ledger))
     unique: list[FactValidationIssue] = []
@@ -241,6 +406,178 @@ def _parse_wizard_bonus_scope(ledger: PF1EFactData, label: str, content: str) ->
     )
     ledger.bonus_feat_scopes.append(
         BonusFeatScope("法师", (5, 10, 15, 20), allowed, label)
+    )
+
+
+def _append_feat_slot(ledger: PF1EFactData, fact: FeatSlotFact) -> None:
+    key = (fact.level, fact.source_type, fact.source_name)
+    if not any(
+        (item.level, item.source_type, item.source_name) == key
+        for item in ledger.feat_slots
+    ):
+        ledger.feat_slots.append(fact)
+
+
+def _parse_fighter_progression(
+    ledger: PF1EFactData,
+    label: str,
+    content: str,
+) -> None:
+    if "表：战士" not in content:
+        return
+    for line in content.splitlines():
+        if "|" not in line:
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) >= 2 and cells[0].isdigit():
+            match = re.match(r"\+(\d+)", cells[1])
+            if match:
+                level = int(cells[0])
+                ledger.base_attack[("战士", level)] = BaseAttackFact(
+                    "战士", level, int(match.group(1)), label
+                )
+    for match in re.finditer(
+        r"表：战士\s*\n\s*(\d+)\s*\|\s*\+(\d+)",
+        content,
+    ):
+        level, bonus = (int(value) for value in match.groups())
+        ledger.base_attack[("战士", level)] = BaseAttackFact(
+            "战士", level, bonus, label
+        )
+    if re.search(r"1级以及之后的每个偶数等级[^。]{0,80}奖励专长", content):
+        for level in (1, *range(2, 21, 2)):
+            _append_feat_slot(
+                ledger,
+                FeatSlotFact(
+                    level=level,
+                    source_type="class_bonus",
+                    source_name="战士",
+                    count=1,
+                    allowed_categories=("战斗",),
+                    source_label=label,
+                ),
+            )
+        if "意味着战士每级都可获得专长" in content:
+            for level in range(1, 21, 2):
+                _append_feat_slot(
+                    ledger,
+                    FeatSlotFact(
+                        level=level,
+                        source_type="general",
+                        source_name="角色升级",
+                        count=1,
+                        allowed_categories=(),
+                        source_label=label,
+                    ),
+                )
+
+
+def _parse_general_feat_slots(
+    ledger: PF1EFactData,
+    label: str,
+    content: str,
+) -> None:
+    if "专长获得" not in content:
+        return
+    levels = {
+        int(match.group(1))
+        for match in re.finditer(
+            r"(?m)^\s*\|?\s*(\d+)\s*\|\s*第\d+项(?:\s*\||\s*$)",
+            content,
+        )
+    }
+    levels.update(
+        int(match.group(1))
+        for match in re.finditer(r"(?m)^\s*(\d+)\s*\n\s*第\d+项\s*$", content)
+    )
+    for level in sorted(levels):
+        _append_feat_slot(
+            ledger,
+            FeatSlotFact(
+                level=level,
+                source_type="general",
+                source_name="角色升级",
+                count=1,
+                allowed_categories=(),
+                source_label=label,
+            ),
+        )
+
+
+def _parse_human_feat_slot(
+    ledger: PF1EFactData,
+    label: str,
+    content: str,
+) -> None:
+    if not re.search(
+        r"奖励专长[：:]\s*人类角色在1级时获得一个额外专长",
+        content,
+    ):
+        return
+    _append_feat_slot(
+        ledger,
+        FeatSlotFact(
+            level=1,
+            source_type="ancestry_bonus",
+            source_name="人类",
+            count=1,
+            allowed_categories=(),
+            source_label=label,
+        ),
+    )
+
+
+def _standalone_field(content: str, name: str, following: str) -> str:
+    match = re.search(
+        rf"(?ms)^\s*{re.escape(name)}\s*$\s*(.+?)(?=^\s*(?:{following})\s*$)",
+        content,
+    )
+    return re.sub(r"\s+", " ", match.group(1)).strip() if match else ""
+
+
+def _parse_spell(
+    ledger: PF1EFactData,
+    label: str,
+    title: str,
+    content: str,
+) -> None:
+    if not re.search(r"(?m)^\s*学派\s*$", content) or not re.search(
+        r"(?m)^\s*环位\s*$", content
+    ):
+        return
+    raw_name = re.split(r"[（(\n]", title.strip(), maxsplit=1)[0].strip()
+    name_match = re.search(r"[\u4e00-\u9fff]+", raw_name)
+    name = name_match.group(0) if name_match else raw_name
+    if not name:
+        return
+    school_text = _standalone_field(content, "学派", "环位")
+    school = next((item for item in _SCHOOL_NAMES if item in school_text), "")
+    level_text = _standalone_field(
+        content,
+        "环位",
+        "施法时间|成分|距离|目标|区域|效果|持续时间|豁免|法术抗力",
+    )
+    class_levels: dict[str, int] = {}
+    for class_names, level_text_value in re.findall(
+        r"([\u4e00-\u9fff]+(?:/[\u4e00-\u9fff]+)*)\s*(\d+)",
+        level_text,
+    ):
+        for class_name in class_names.split("/"):
+            class_levels.setdefault(class_name, int(level_text_value))
+    if not school or not class_levels:
+        return
+    duration = _standalone_field(content, "持续时间", "豁免|法术抗力")
+    saving_throw = _standalone_field(content, "豁免", "法术抗力")
+    ledger.spells.setdefault(
+        name,
+        SpellFact(
+            name=name,
+            school=school,
+            class_levels=tuple(sorted(class_levels.items())),
+            duration=duration,
+            saving_throw=saving_throw,
+            source_label=label,
+        ),
     )
 
 
@@ -376,6 +713,227 @@ def _validate_bonus_feat_scope(
     return issues
 
 
+def _level_sections(content: str) -> dict[int, str]:
+    sections: dict[int, list[str]] = {}
+    current_level: int | None = None
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        level: int | None = None
+        if "|" in line:
+            first_cell = re.sub(r"[^\d级]", "", line.strip("|").split("|", 1)[0])
+            match = re.fullmatch(r"(\d+)级?", first_cell)
+            if match:
+                level = int(match.group(1))
+        if level is None:
+            normalized = re.sub(r"^[\s>*#-]+", "", line)
+            normalized = re.sub(r"[*_`]", "", normalized)
+            match = re.match(r"(\d+)\s*级(?:\s*[：:]|\b)", normalized)
+            if match:
+                level = int(match.group(1))
+        if level is not None:
+            current_level = level
+        if current_level is not None:
+            sections.setdefault(current_level, []).append(line)
+    return {level: "\n".join(lines) for level, lines in sections.items()}
+
+
+def _mentioned_feat_names(section: str, ledger: PF1EFactData) -> set[str]:
+    names: set[str] = set()
+    occupied: list[tuple[int, int]] = []
+    for name in sorted(ledger.feats, key=len, reverse=True):
+        for match in re.finditer(re.escape(name), section):
+            span = match.span()
+            if any(span[0] < end and start < span[1] for start, end in occupied):
+                continue
+            occupied.append(span)
+            names.add(name)
+    return names
+
+
+def _selection_count(section: str, ledger: PF1EFactData) -> int:
+    known = _mentioned_feat_names(section, ledger)
+    counts: list[int] = [len(known)] if known else []
+    for match in re.finditer(
+        r"(?:选择专长|获得[^：:\n]{0,12}专长)[：:]\s*([^。；\n]+)",
+        section,
+    ):
+        value = re.sub(r"[`*_]", "", match.group(1))
+        choices = [
+            item.strip()
+            for item in re.split(r"[，,、]", value)
+            if item.strip() and "职业特性" not in item
+        ]
+        counts.append(len(choices))
+    numbered = {int(value) for value in re.findall(r"专长\s*(\d+)", section)}
+    if numbered:
+        counts.append(max(numbered))
+    return max(counts, default=0)
+
+
+def _relevant_feat_slots(ledger: PF1EFactData) -> tuple[FeatSlotFact, ...]:
+    level_range = _goal_level_range(ledger.goal)
+    if level_range is None or "专长" not in ledger.goal:
+        return ()
+    relevant: list[FeatSlotFact] = []
+    for fact in ledger.feat_slots:
+        if not level_range[0] <= fact.level <= level_range[1]:
+            continue
+        if fact.source_type == "class_bonus" and fact.source_name not in ledger.goal:
+            continue
+        if fact.source_type == "ancestry_bonus" and fact.source_name not in ledger.goal:
+            continue
+        relevant.append(fact)
+    return tuple(relevant)
+
+
+def _validate_feat_timeline(
+    content: str,
+    ledger: PF1EFactData,
+) -> list[FactValidationIssue]:
+    slots = _relevant_feat_slots(ledger)
+    if not slots:
+        return []
+    sections = _level_sections(content)
+    by_level: dict[int, list[FeatSlotFact]] = {}
+    for fact in slots:
+        by_level.setdefault(fact.level, []).append(fact)
+    issues: list[FactValidationIssue] = []
+    for level, facts in sorted(by_level.items()):
+        expected = sum(item.count for item in facts)
+        actual = _selection_count(sections.get(level, ""), ledger)
+        if actual >= expected:
+            continue
+        sources = tuple(dict.fromkeys(item.source_label for item in facts))
+        issues.append(
+            FactValidationIssue(
+                "feat_timeline_slot_count",
+                (
+                    f"角色{level}级应安排 {expected} 个专长选择，"
+                    f"候选答案只安排了 {actual} 个"
+                ),
+                path=f"answer.levels[{level}].feats",
+                expected=expected,
+                actual=actual,
+                evidence_refs=sources,
+            )
+        )
+    return issues
+
+
+def _selected_feats_by_level(
+    content: str,
+    ledger: PF1EFactData,
+) -> dict[int, set[str]]:
+    return {
+        level: _mentioned_feat_names(section, ledger)
+        for level, section in _level_sections(content).items()
+    }
+
+
+def _declared_attribute(content: str, attribute: str) -> int | None:
+    values = [
+        int(value)
+        for value in re.findall(
+            rf"{re.escape(attribute)}(?:属性)?\s*(?:为|达到|=|：|:)?\s*(\d+)",
+            content,
+        )
+    ]
+    return max(values) if values else None
+
+
+def _validate_feat_prerequisites(
+    content: str,
+    ledger: PF1EFactData,
+) -> list[FactValidationIssue]:
+    selections = _selected_feats_by_level(content, ledger)
+    issues: list[FactValidationIssue] = []
+    for level, selected_names in sorted(selections.items()):
+        earlier = {
+            name
+            for selected_level, names in selections.items()
+            if selected_level < level
+            for name in names
+        }
+        section = _level_sections(content).get(level, "")
+        for name in sorted(selected_names):
+            fact = ledger.feats[name]
+            prerequisites = fact.prerequisites
+            for required_name in sorted(
+                other
+                for other in ledger.feats
+                if other != name and other in prerequisites
+            ):
+                if required_name not in earlier:
+                    issues.append(
+                        FactValidationIssue(
+                            "feat_prerequisite_missing",
+                            (
+                                f"{name} 在 {level} 级选择时尚未获得前提专长 "
+                                f"{required_name}"
+                            ),
+                            path=f"answer.levels[{level}].feats[{name}].prerequisites",
+                            expected=required_name,
+                            actual=None,
+                            evidence_refs=(fact.source_label,),
+                        )
+                    )
+            bab_match = re.search(r"(?:BAB|基本攻击加值)\s*\+?(\d+)", prerequisites, re.I)
+            if bab_match:
+                required_bab = int(bab_match.group(1))
+                declared = re.search(r"(?:BAB|基本攻击加值)\s*\+?(\d+)", section, re.I)
+                fighter_fact = ledger.base_attack.get(("战士", level))
+                actual_bab: int | None = None
+                if declared:
+                    actual_bab = int(declared.group(1))
+                elif (
+                    fighter_fact
+                    and "战士" in ledger.goal
+                    and "兼职" not in ledger.goal
+                ):
+                    actual_bab = fighter_fact.bonus
+                if actual_bab is None or actual_bab < required_bab:
+                    refs = [fact.source_label]
+                    if fighter_fact is not None:
+                        refs.append(fighter_fact.source_label)
+                    actual_text = actual_bab if actual_bab is not None else "未知"
+                    issues.append(
+                        FactValidationIssue(
+                            "feat_bab_prerequisite",
+                            (
+                                f"{name} 在 {level} 级需要 BAB +{required_bab}，"
+                                f"候选状态为 {actual_text}"
+                            ),
+                            path=f"answer.levels[{level}].feats[{name}].bab",
+                            expected=required_bab,
+                            actual=actual_bab,
+                            evidence_refs=tuple(dict.fromkeys(refs)),
+                        )
+                    )
+            for attribute, required_text in re.findall(
+                r"(力量|敏捷|体质|智力|感知|魅力)\s*(\d+)", prerequisites
+            ):
+                required = int(required_text)
+                actual = _declared_attribute(content, attribute)
+                if actual is None or actual < required:
+                    actual_text = actual if actual is not None else "未知"
+                    issues.append(
+                        FactValidationIssue(
+                            "feat_attribute_prerequisite",
+                            (
+                                f"{name} 需要 {attribute}{required}，"
+                                f"候选状态为 {actual_text}"
+                            ),
+                            path=f"answer.levels[{level}].feats[{name}].attributes.{attribute}",
+                            expected=required,
+                            actual=actual,
+                            evidence_refs=(fact.source_label,),
+                        )
+                    )
+    return issues
+
+
 def _validate_spell_progression(
     content: str,
     ledger: PF1EFactData,
@@ -413,6 +971,156 @@ def _validate_spell_progression(
                     f"法师{level}级的{spell_level}环基础每日法术位应为 {expected_count}，候选答案写为 {claimed_count}",
                 )
             )
+    return issues
+
+
+def _canonical_school_claims(value: str) -> tuple[str, ...]:
+    claims: list[str] = []
+    for match in re.finditer(
+        r"(防护|咒法|预言|惑控|塑能|幻术|死灵|变化)(?:系|学派)",
+        value,
+    ):
+        prefix = value[max(0, match.start() - 5) : match.start()]
+        if re.search(r"(?:不是|并非|而非|不属于|并不属于)\s*$", prefix):
+            continue
+        claims.append(f"{match.group(1)}系")
+    return tuple(dict.fromkeys(claims))
+
+
+def _spell_windows(content: str, name: str) -> tuple[str, ...]:
+    windows: list[str] = []
+    for match in re.finditer(re.escape(name), content):
+        starts = [content.rfind(token, 0, match.start()) for token in ("\n", "。", "；")]
+        start = max(starts) + 1
+        stops = [
+            position
+            for token in ("\n", "。", "；")
+            if (position := content.find(token, match.end())) >= 0
+        ]
+        stop = min(stops) if stops else min(len(content), match.end() + 80)
+        windows.append(content[start:stop])
+    return tuple(windows)
+
+
+def _normalized_rule_text(value: str) -> str:
+    return re.sub(r"[\s，,。；;：（）()]", "", value).lower()
+
+
+def _validate_spell_metadata(
+    content: str,
+    ledger: PF1EFactData,
+) -> list[FactValidationIssue]:
+    if not ledger.spells:
+        return []
+    issues: list[FactValidationIssue] = []
+    for name, fact in sorted(ledger.spells.items()):
+        if name not in content:
+            continue
+        levels = dict(fact.class_levels)
+        expected_level = levels.get("法师") or levels.get("术士/法师")
+        for window in _spell_windows(content, name):
+            tail = window.split(name, 1)[1][:40]
+            level_claims: set[int] = set()
+            for level_match in re.finditer(r"(\d+)\s*环", tail):
+                prefix = tail[max(0, level_match.start() - 4) : level_match.start()]
+                if re.search(r"(?:不是|并非)\s*$", prefix):
+                    continue
+                level_claims.add(int(level_match.group(1)))
+            if expected_level is not None:
+                for claimed in sorted(level_claims):
+                    if claimed != expected_level:
+                        issues.append(
+                            FactValidationIssue(
+                                "spell_level",
+                                (
+                                    f"{name} 的法师法术环级应为 {expected_level}，"
+                                    f"候选答案写为 {claimed}"
+                                ),
+                                path=f"answer.spells[{name}].level",
+                                expected=expected_level,
+                                actual=claimed,
+                                evidence_refs=(fact.source_label,),
+                            )
+                        )
+            for claimed_school in _canonical_school_claims(window):
+                if claimed_school != fact.school:
+                    issues.append(
+                        FactValidationIssue(
+                            "spell_school",
+                            (
+                                f"{name} 的学派应为 {fact.school}，"
+                                f"候选答案写为 {claimed_school}"
+                            ),
+                            path=f"answer.spells[{name}].school",
+                            expected=fact.school,
+                            actual=claimed_school,
+                            evidence_refs=(fact.source_label,),
+                        )
+                    )
+            duration_match = re.search(
+                r"(?:持续时间\s*(?:为|[：:])?|持续)\s*([^，。；\n]{1,30})",
+                window,
+            )
+            if duration_match and fact.duration:
+                claimed_duration = duration_match.group(1).strip()
+                expected_duration = _normalized_rule_text(fact.duration)
+                normalized_claim = _normalized_rule_text(claimed_duration)
+                if normalized_claim and normalized_claim not in expected_duration:
+                    issues.append(
+                        FactValidationIssue(
+                            "spell_duration",
+                            (
+                                f"{name} 的持续时间应为 {fact.duration}，"
+                                f"候选答案写为 {claimed_duration}"
+                            ),
+                            path=f"answer.spells[{name}].duration",
+                            expected=fact.duration,
+                            actual=claimed_duration,
+                            evidence_refs=(fact.source_label,),
+                        )
+                    )
+            saving_match = re.search(
+                r"豁免\s*(?:为|[：:])\s*([^，。；\n]{1,30})",
+                window,
+            )
+            if saving_match and fact.saving_throw:
+                claimed_saving = saving_match.group(1).strip()
+                expected_saving = _normalized_rule_text(fact.saving_throw)
+                normalized_claim = _normalized_rule_text(claimed_saving)
+                if normalized_claim and normalized_claim not in expected_saving:
+                    issues.append(
+                        FactValidationIssue(
+                            "spell_saving_throw",
+                            (
+                                f"{name} 的豁免应为 {fact.saving_throw}，"
+                                f"候选答案写为 {claimed_saving}"
+                            ),
+                            path=f"answer.spells[{name}].saving_throw",
+                            expected=fact.saving_throw,
+                            actual=claimed_saving,
+                            evidence_refs=(fact.source_label,),
+                        )
+                    )
+    known_names = set(ledger.spells)
+    candidates = {
+        name
+        for name, _level in re.findall(
+            r"(?:准备|施放|学习|推荐|选择|获得)(?:并施放)?(?:[`*“”‘’]*)"
+            r"([\u4e00-\u9fff]{2,6}术)(?:[`*“”‘’]*)\s*[（(](\d+)\s*环",
+            content,
+        )
+    }
+    for name in sorted(candidates - known_names):
+        issues.append(
+            FactValidationIssue(
+                "unsupported_named_spell",
+                f"推荐的法术 {name} 未出现在本轮已读法术条目中",
+                path=f"answer.spells[{name}]",
+                expected="registered spell evidence",
+                actual=name,
+                evidence_refs=(),
+            )
+        )
     return issues
 
 
@@ -484,7 +1192,7 @@ def _goal_level_range(goal: str) -> tuple[int, int] | None:
 
 
 PF1E_ADAPTER_ID = "pathfinder-1e"
-PF1E_ADAPTER_VERSION = 1
+PF1E_ADAPTER_VERSION = 2
 PF1E_ADAPTER_KEY = AdapterKey(
     library_id="pathfinder-1e",
     system="Pathfinder",
@@ -542,13 +1250,50 @@ def _records(data: PF1EFactData) -> tuple[FactRecord, ...]:
                 adapter_version=PF1E_ADAPTER_VERSION,
                 subject=fact.name,
                 predicate="feat",
-                value={
-                    "name": fact.name,
-                    "prerequisites": fact.prerequisites,
-                    "category": fact.category,
-                    "source": fact.source_label,
-                },
+                value=fact.public(),
                 value_type="option",
+                evidence_refs=(fact.source_label,),
+            )
+        )
+    for fact in sorted(
+        data.feat_slots,
+        key=lambda item: (item.level, item.source_type, item.source_name),
+    ):
+        records.append(
+            FactRecord(
+                adapter_id=PF1E_ADAPTER_ID,
+                adapter_version=PF1E_ADAPTER_VERSION,
+                subject=f"character:{fact.level}",
+                predicate="feat_slot",
+                value=fact.public(),
+                value_type="slot",
+                evidence_refs=(fact.source_label,),
+            )
+        )
+    for fact in sorted(
+        data.base_attack.values(),
+        key=lambda item: (item.class_name, item.level),
+    ):
+        records.append(
+            FactRecord(
+                adapter_id=PF1E_ADAPTER_ID,
+                adapter_version=PF1E_ADAPTER_VERSION,
+                subject=f"{fact.class_name}:{fact.level}",
+                predicate="base_attack_bonus",
+                value=fact.public(),
+                value_type="integer",
+                evidence_refs=(fact.source_label,),
+            )
+        )
+    for fact in sorted(data.spells.values(), key=lambda item: item.name):
+        records.append(
+            FactRecord(
+                adapter_id=PF1E_ADAPTER_ID,
+                adapter_version=PF1E_ADAPTER_VERSION,
+                subject=fact.name,
+                predicate="spell_metadata",
+                value=fact.public(),
+                value_type="spell",
                 evidence_refs=(fact.source_label,),
             )
         )
@@ -642,7 +1387,7 @@ def build_pf1e_fact_ledger(
             ),
         )
         for label, document in documents
-        if str(label).strip() and str(document.get("content", "")).strip()
+        if str(label).strip() and _document_content(document)
     )
     return PF1E_FACT_LEDGER_ADAPTER.build(goal, evidence)
 
