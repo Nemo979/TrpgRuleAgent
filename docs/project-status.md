@@ -107,7 +107,10 @@ TrpgRuleAgent 当前是一套面向少量可信用户的多游戏系统 Web 规�
   重验证和确定性 Renderer；失败候选不流出，安全拒答作为独立 SSE/评测指标且不附来源。下一步
   的全仓回归、本地成本探针和发布审计已通过（App 221、Retrieval 64、Vitest 268、两套类型检查
   和两套构建）；无修补 1 次、触发修补最多 2 次模型调用。真实 MiMo A/B 仍需另行授权，两个
-  Feature Flag 继续默认关闭。
+  Feature Flag 继续默认关闭。2026-08-14 经授权完成同六题真实 A/B：Planner 对照自动门 4/6，
+  结构化 Fact Ledger 为 0/6、6/6 安全拒答，实际 patch 为 0；平均延迟增加 29.49%，平均模型
+  token 增加 4.75%。安全边界有效但发布门失败，下一步回到本地修复 claim path/schema 契约，
+  确定性 patch 成功金线通过前不再运行外部 A/B。
 - MiMo 已完成 4 组、6 轮 PF1E 真实问答验收；事实、来源和多轮追问均通过。按本轮决定未重复验收 Agnes 与 SenseNova。
 - 《夕妖晚谣》1.2 中文规则库已发布 154 个父文档、488 个检索子块。
 - 当前发布版本为 `20260801T105530Z`，包含 `GSS` 与 `Golden Sky Stories` 显式别名。
@@ -223,8 +226,9 @@ npx vitest run <test-file> --pool=forks --maxWorkers=1
    不满足 Summary 启动条件。
 3. 动态 Evidence Budget Stage 1 与受限多问题拆解 Stage 2 均已完成真实 MiMo A/B、回归和发布门。
    Stage 3 受限 Planner 已满足启动条件但连续真实质量门失败，Feature Flag 保持关闭；§8.7 的
-   通用核心、PF1E Adapter 等价迁移、失败样本覆盖、结构化局部修补及本地全门已经完成；下一步
-   仅在另行授权后执行真实 MiMo A/B，不进入 Summary 或并行。
+   通用核心、PF1E Adapter 等价迁移、失败样本覆盖、结构化局部修补及本地全门已经完成；真实
+   MiMo A/B 因 6/6 安全拒答而失败。下一步在本地修复 claim path/schema 契约，不进入 Summary
+   或并行。
 4. 答案级评测（已落地，见 `services/app-python/src/trpg_app/answer_evaluation.py` 与 `docs/answer-evaluation.md`）：事实点(`requiredAny`)、引用支持度(`source_match`)、工具预算(`toolCalls`/`withinBudget`)、无依据结论率(`unsupportedRate`)、**LLM-judge 事实正确性/幻觉(`factualCorrect`/`hallucinationFree`, 经 `--judge-model`)** 五项指标 + 多轮/错误/超时/judge 容错 + 单测。PF1E 已有 v2.0/v2.1 真实金标题集。前端仍保留 Agnes/SenseNova 可选，并将 MiMo 设为新对话默认模型；**Agnes / SenseNova 明确不在本轮评测范围**。待补：GSS 的真实金标题集。
 5. 检索质量：结构化切块、重排器和剩余漏召回题优化。V2.2 Stage 0 已修复锚点章节切分（CRB 战斗规则 10 子章节恢复）与 table 策略页正文丢失（overview 兜底），候选重建为 7140 文档、质量门通过；85/30 题相关 ID 100% 覆盖，检索基线待确认。
 6. PDF/CHM 图片、扫描件 OCR 和复杂表格理解。
