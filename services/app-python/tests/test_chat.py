@@ -18,7 +18,7 @@ from trpg_app.chat import (
     run_rule_turn,
 )
 from trpg_app.config import ModelConfig
-from trpg_app.fact_ledger import FactLedger, ValidationIssue
+from trpg_app.fact_ledger import DraftPathSpec, FactLedger, ValidationIssue
 from trpg_app.fact_ledger_adapter import AdapterStatus, FactLedgerRuntime
 from trpg_app.fact_ledger_repair import RepairMetrics
 from trpg_app.query_decomposition import decompose_query, route_query
@@ -1300,6 +1300,106 @@ class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn({"type": "sources", "sources": []}, events)
         self.assertNotIn("这不是结构化草稿", "".join(event.get("delta", "") for event in events))
 
+    async def test_structured_alias_path_repairs_once_and_passes_full_validation(self) -> None:
+        class RepairingGateway:
+            calls = 0
+
+            async def stream_answer(self, _messages):
+                type(self).calls += 1
+                if type(self).calls == 1:
+                    yield json.dumps(
+                        {
+                            "schema_version": 1,
+                            "sections": [
+                                {
+                                    "id": "route",
+                                    "heading": "路线",
+                                    "claims": [
+                                        {
+                                            "id": "level_5_feat",
+                                            "path": "answer.progression[5].feats",
+                                            "text": "5级没有新的专长选择。",
+                                            "evidence_refs": ["S1"],
+                                        },
+                                        {
+                                            "id": "verified_claim",
+                                            "path": "answer.summary[verified]",
+                                            "text": "这条结论已经验证。",
+                                            "evidence_refs": ["S1"],
+                                        },
+                                    ],
+                                }
+                            ],
+                        },
+                        ensure_ascii=False,
+                    )
+                    return
+                yield json.dumps(
+                    {
+                        "schema_version": 1,
+                        "operations": [
+                            {
+                                "claim_id": "level_5_feat",
+                                "path": "answer.levels[5].feats",
+                                "replacement_text": "5级选择钢铁意志。",
+                                "evidence_refs": ["S1"],
+                                "issue_codes": ["feat_timeline_slot_count"],
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                )
+
+        citations = CitationRegistry()
+        citations.register(
+            {
+                "id": "rule-1",
+                "title": "规则",
+                "fullPath": "规则 > 条目",
+                "content": "规则正文",
+                "metadata": {},
+            }
+        )
+        metrics = RepairMetrics()
+
+        events = [
+            event
+            async for event in _stream_final_answer(
+                RepairingGateway(),
+                [{"role": "user", "content": "规则问题"}],
+                citations,
+                answer_validator=lambda content: (
+                    ValidationIssue(
+                        "feat_timeline_slot_count",
+                        "5级缺少专长",
+                        path="answer.levels[5].feats",
+                        evidence_refs=("S1",),
+                    ),
+                )
+                if "没有新的专长" in content
+                else (),
+                repair_metrics=metrics,
+                draft_path_specs=(
+                    DraftPathSpec(
+                        "answer.levels[{level}].feats",
+                        ("answer.progression[{level}].feats",),
+                    ),
+                    DraftPathSpec("answer.summary[{key}]"),
+                ),
+            )
+        ]
+
+        output = "".join(event.get("delta", "") for event in events)
+        self.assertEqual(RepairingGateway.calls, 2)
+        self.assertTrue(metrics.attempted)
+        self.assertTrue(metrics.applied)
+        self.assertEqual(metrics.patch_count, 1)
+        self.assertFalse(metrics.safe_refusal)
+        self.assertIn("5级选择钢铁意志", output)
+        self.assertIn("这条结论已经验证", output)
+        self.assertNotIn("没有新的专长", output)
+        self.assertNotIn("safe_refusal", [event["type"] for event in events])
+
     async def test_structured_repair_cannot_modify_verified_claim(self) -> None:
         class TamperingPatchGateway:
             calls = 0
@@ -1390,6 +1490,88 @@ class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metrics.failure_reason, "invalid_repair_patch")
         output = "".join(event.get("delta", "") for event in events)
         self.assertNotIn("篡改后的值", output)
+        self.assertIn({"type": "sources", "sources": []}, events)
+
+    async def test_structured_repair_full_revalidation_failure_is_not_published(self) -> None:
+        class StillInvalidGateway:
+            calls = 0
+
+            async def stream_answer(self, _messages):
+                type(self).calls += 1
+                if type(self).calls == 1:
+                    yield json.dumps(
+                        {
+                            "schema_version": 1,
+                            "sections": [
+                                {
+                                    "id": "route",
+                                    "heading": "路线",
+                                    "claims": [
+                                        {
+                                            "id": "bad_claim",
+                                            "path": "answer.route.bad",
+                                            "text": "错误值。",
+                                            "evidence_refs": ["S1"],
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                        ensure_ascii=False,
+                    )
+                    return
+                yield json.dumps(
+                    {
+                        "schema_version": 1,
+                        "operations": [
+                            {
+                                "claim_id": "bad_claim",
+                                "path": "answer.route.bad",
+                                "replacement_text": "仍然错误。",
+                                "evidence_refs": ["S1"],
+                                "issue_codes": ["wrong_value"],
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                )
+
+        citations = CitationRegistry()
+        citations.register(
+            {
+                "id": "rule-1",
+                "title": "规则",
+                "fullPath": "规则 > 条目",
+                "content": "规则正文",
+                "metadata": {},
+            }
+        )
+        metrics = RepairMetrics()
+
+        events = [
+            event
+            async for event in _stream_final_answer(
+                StillInvalidGateway(),
+                [{"role": "user", "content": "规则问题"}],
+                citations,
+                answer_validator=lambda _content: (
+                    ValidationIssue(
+                        "wrong_value",
+                        "值错误",
+                        path="answer.route.bad",
+                        evidence_refs=("S1",),
+                    ),
+                ),
+                repair_metrics=metrics,
+            )
+        ]
+
+        output = "".join(event.get("delta", "") for event in events)
+        self.assertEqual(StillInvalidGateway.calls, 2)
+        self.assertTrue(metrics.applied)
+        self.assertTrue(metrics.safe_refusal)
+        self.assertEqual(metrics.failure_reason, "repair_validation_failed")
+        self.assertNotIn("仍然错误", output)
         self.assertIn({"type": "sources", "sources": []}, events)
 
     async def test_nonrepairable_issue_safely_refuses_without_patch_call(self) -> None:

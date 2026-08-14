@@ -145,7 +145,7 @@ class PF1EFactCoverageTest(unittest.TestCase):
         ledger = build("创建1到5级人类战士专长与法术方案")
         data = ledger.adapter_data
 
-        self.assertEqual(ledger.adapter_version, 2)
+        self.assertEqual(ledger.adapter_version, 3)
         self.assertEqual(
             sorted(
                 (item.level, item.source_type)

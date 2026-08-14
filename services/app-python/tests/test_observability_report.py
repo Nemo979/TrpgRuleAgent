@@ -60,6 +60,8 @@ def record(total_seconds: float, total_tokens: int, *, intent: str = "rule_fact"
             "factRepairPatchCount": 1,
             "factRepairSafeRefusal": False,
             "factRepairFailureReason": "none",
+            "factRepairTargetFailureReason": "none",
+            "factValidationIssueCodes": ["capacity"],
             "factDraftParseSeconds": 0.001,
             "factRepairSeconds": 0.5,
             "factRenderSeconds": 0.002,
@@ -109,6 +111,7 @@ class ObservabilityReportTest(unittest.TestCase):
         self.assertEqual(report["dimensions"]["factLedgerVersion"], {"1": 2})
         self.assertEqual(report["dimensions"]["factLedgerStatus"], {"matched": 2})
         self.assertEqual(report["dimensions"]["factRepairAttempted"], {"True": 2})
+        self.assertEqual(report["dimensions"]["factValidationIssueCode"], {"capacity": 2})
         self.assertEqual(report["metrics"]["factRepair.patchCount"]["mean"], 1.0)
         self.assertEqual(report["metrics"]["latency.factRepairSeconds"]["mean"], 0.5)
         self.assertEqual(report["dimensions"]["factLedgerAdapterId"], {"catalog-v1": 2})

@@ -13,10 +13,11 @@ from .fact_ledger import (
     EvidenceDocument,
     FactLedger,
     ValidationIssue,
+    DraftPathSpec,
 )
 
 
-FACT_LEDGER_ADAPTER_PROTOCOL_VERSION = 1
+FACT_LEDGER_ADAPTER_PROTOCOL_VERSION = 2
 
 
 def _identity_part(value: str) -> str:
@@ -76,6 +77,9 @@ class FactLedgerAdapter(Protocol):
         ...
 
     def public(self, ledger: FactLedger) -> dict[str, Any]:
+        ...
+
+    def draft_path_specs(self, ledger: FactLedger) -> tuple[DraftPathSpec, ...]:
         ...
 
 
@@ -158,6 +162,22 @@ class FactLedgerRuntime:
             return ()
         finally:
             self.validation_seconds += time.monotonic() - started
+
+    def draft_path_specs(self) -> tuple[DraftPathSpec, ...]:
+        if not self.active:
+            return ()
+        assert self.adapter is not None and self.ledger is not None
+        try:
+            specs = tuple(self.adapter.draft_path_specs(self.ledger))
+            if not specs:
+                raise ValueError("adapter must publish draft path specs")
+            if any(not isinstance(spec, DraftPathSpec) for spec in specs):
+                raise TypeError("adapter draft path spec is invalid")
+            return specs
+        except Exception as error:
+            self.status = AdapterStatus.PUBLICATION_FAILED
+            self.reason = f"adapter draft path publication failed: {type(error).__name__}"
+            return ()
 
 
 class FactLedgerRegistry:

@@ -8,7 +8,7 @@ import re
 import time
 from typing import Any, Iterable
 
-from .fact_ledger import ValidationIssue, ValidationSeverity
+from .fact_ledger import DraftPathSpec, ValidationIssue, ValidationSeverity
 
 
 ANSWER_DRAFT_SCHEMA_VERSION = 1
@@ -20,10 +20,19 @@ MAX_STRUCTURED_OUTPUT_CHARACTERS = 256_000
 _ID = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 _PATH = re.compile(r"^answer(?:\.[A-Za-z_][A-Za-z0-9_]*|\[[^\]\n]{1,80}\])+$")
 _CITATION = re.compile(r"\[(?:\^)?(S\d+)]")
+_TEMPLATE_FIELD = re.compile(r"\{([a-z][a-z0-9_]*)\}")
 
 
 class StructuredAnswerError(ValueError):
     """Raised when a draft or patch crosses the server-owned schema boundary."""
+
+
+class RepairTargetError(StructuredAnswerError):
+    """A privacy-safe classification of why validation cannot be patched."""
+
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 @dataclass(frozen=True)
@@ -129,8 +138,8 @@ class RepairOperation:
             raise StructuredAnswerError("repair issue codes must be a non-empty tuple")
         if len(set(self.issue_codes)) != len(self.issue_codes):
             raise StructuredAnswerError("repair issue codes must be unique")
-        if any(not value.strip() for value in self.issue_codes):
-            raise StructuredAnswerError("repair issue codes must not be empty")
+        if any(not _ID.fullmatch(value) for value in self.issue_codes):
+            raise StructuredAnswerError("repair issue code is invalid")
 
 
 @dataclass(frozen=True)
@@ -172,6 +181,8 @@ class RepairMetrics:
     patch_count: int = 0
     safe_refusal: bool = False
     failure_reason: str = ""
+    target_failure_reason: str = ""
+    issue_codes: tuple[str, ...] = ()
 
 
 def _validate_refs(values: tuple[str, ...], owner: str) -> None:
@@ -202,8 +213,45 @@ def _json_payload(raw: str) -> Any:
         raise StructuredAnswerError("structured answer is not valid JSON") from error
 
 
-def parse_answer_draft(raw: str, registered_refs: Iterable[str]) -> AnswerDraft:
+def _path_template_pattern(template: str) -> re.Pattern[str]:
+    fields = _TEMPLATE_FIELD.findall(template)
+    if len(fields) != len(set(fields)):
+        raise StructuredAnswerError("draft path template fields must be unique")
+    cursor = 0
+    parts: list[str] = []
+    for match in _TEMPLATE_FIELD.finditer(template):
+        parts.append(re.escape(template[cursor : match.start()]))
+        parts.append(f"(?P<{match.group(1)}>[^\\]\\n]{{1,80}})")
+        cursor = match.end()
+    parts.append(re.escape(template[cursor:]))
+    return re.compile("^" + "".join(parts) + "$")
+
+
+def canonicalize_draft_path(path: str, specs: Iterable[DraftPathSpec]) -> str:
+    available = tuple(specs)
+    if not available:
+        return path
+    for spec in available:
+        canonical_fields = set(_TEMPLATE_FIELD.findall(spec.canonical_template))
+        for template in (spec.canonical_template, *spec.alias_templates):
+            if set(_TEMPLATE_FIELD.findall(template)) != canonical_fields:
+                raise StructuredAnswerError("draft path alias fields are incompatible")
+            match = _path_template_pattern(template).fullmatch(path)
+            if match:
+                canonical = spec.canonical_template.format(**match.groupdict())
+                if not _PATH.fullmatch(canonical):
+                    raise StructuredAnswerError("canonical draft path is invalid")
+                return canonical
+    raise StructuredAnswerError("claim path is outside the adapter contract")
+
+
+def parse_answer_draft(
+    raw: str,
+    registered_refs: Iterable[str],
+    path_specs: Iterable[DraftPathSpec] = (),
+) -> AnswerDraft:
     allowed = set(registered_refs)
+    specs = tuple(path_specs)
     payload = _strict_object(
         _json_payload(raw),
         {"schema_version", "sections"},
@@ -244,7 +292,7 @@ def parse_answer_draft(raw: str, registered_refs: Iterable[str]) -> AnswerDraft:
             claims.append(
                 AnswerClaim(
                     id=claim["id"],
-                    path=claim["path"],
+                    path=canonicalize_draft_path(claim["path"], specs),
                     text=claim["text"],
                     evidence_refs=refs,
                 )
@@ -280,13 +328,19 @@ def build_repair_targets(
     for issue in issues:
         if (
             issue.severity is not ValidationSeverity.ERROR
-            or not issue.repairable
-            or not issue.path
         ):
-            raise StructuredAnswerError("validation issue is not structurally repairable")
+            raise RepairTargetError("non_error", "validation issue is not an error")
+        if not issue.repairable:
+            raise RepairTargetError(
+                "nonrepairable", "validation issue is explicitly nonrepairable"
+            )
+        if not issue.path:
+            raise RepairTargetError("missing_path", "validation issue has no path")
         claim = claims_by_path.get(issue.path)
         if claim is None:
-            raise StructuredAnswerError("validation issue path has no exact draft claim")
+            raise RepairTargetError(
+                "path_not_found", "validation issue path has no exact draft claim"
+            )
         grouped.setdefault((claim.id, claim.path), []).append(issue.code)
     return tuple(
         RepairTarget(claim_id, path, tuple(dict.fromkeys(codes)))
@@ -370,13 +424,29 @@ def apply_repair_patch(
     return AnswerDraft(tuple(sections))
 
 
-def structured_draft_instruction() -> str:
+def structured_draft_instruction(path_specs: Iterable[DraftPathSpec] = ()) -> str:
+    specs = tuple(path_specs)
+    contract = [
+        {
+            "canonical": spec.canonical_template,
+            "aliases": list(spec.alias_templates),
+        }
+        for spec in specs
+    ]
+    suffix = (
+        " claim path 只能从以下服务器路径模板中选择；花括号参数替换为答案中的实际键，"
+        "别名会由服务器规范化，优先使用 canonical："
+        + json.dumps(contract, ensure_ascii=False, separators=(",", ":"))
+        if contract
+        else ""
+    )
     return (
         "最终输出必须是严格 JSON，不得使用代码围栏或输出 JSON 之外的文字。"
         "Schema 为 {schema_version:1,sections:[{id,heading,claims:[{id,path,text,evidence_refs}]}]}。"
         "section/claim id 使用小写字母数字与下划线；每个 claim path 必须是唯一稳定语义路径，"
         "格式为 answer.<domain>[<key>].<field>。每条规则结论单独一个 claim；text 不要手写引用，"
         "引用只放 evidence_refs，且只能使用已注册的 S 标签。"
+        + suffix
     )
 
 

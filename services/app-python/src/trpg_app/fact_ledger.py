@@ -8,10 +8,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+import re
 from typing import Any, Mapping
 
 
 FACT_LEDGER_CORE_SCHEMA_VERSION = 1
+_DRAFT_PATH_TEMPLATE = re.compile(
+    r"^answer(?:\.[A-Za-z_][A-Za-z0-9_]*|\[(?:[^\]\n{}]{1,80}|\{[a-z][a-z0-9_]*\})\])+$"
+)
+_DRAFT_PATH_FIELD = re.compile(r"\{([a-z][a-z0-9_]*)\}")
+_ISSUE_CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
 
 class FactStatus(str, Enum):
@@ -114,8 +120,8 @@ class ValidationIssue:
     repairable: bool = True
 
     def __post_init__(self) -> None:
-        if not self.code.strip() or not self.message.strip():
-            raise ValueError("validation issue code and message must not be empty")
+        if not _ISSUE_CODE.fullmatch(self.code) or not self.message.strip():
+            raise ValueError("validation issue code or message is invalid")
         if not isinstance(self.severity, ValidationSeverity):
             raise ValueError("validation issue severity is invalid")
         if not isinstance(self.evidence_refs, tuple):
@@ -124,6 +130,31 @@ class ValidationIssue:
             raise ValueError("validation issue evidence refs must be unique")
         if any(not value.strip() for value in self.evidence_refs):
             raise ValueError("validation issue evidence refs must not be empty")
+
+
+@dataclass(frozen=True)
+class DraftPathSpec:
+    """Adapter-owned canonical claim path and accepted model aliases."""
+
+    canonical_template: str
+    alias_templates: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.alias_templates, tuple):
+            raise ValueError("draft path aliases must be a tuple")
+        if len(set(self.alias_templates)) != len(self.alias_templates):
+            raise ValueError("draft path aliases must be unique")
+        templates = (self.canonical_template, *self.alias_templates)
+        if any(not _DRAFT_PATH_TEMPLATE.fullmatch(value) for value in templates):
+            raise ValueError("draft path template is invalid")
+        canonical_fields = _DRAFT_PATH_FIELD.findall(self.canonical_template)
+        if len(canonical_fields) != len(set(canonical_fields)):
+            raise ValueError("canonical draft path fields must be unique")
+        if any(
+            set(_DRAFT_PATH_FIELD.findall(value)) != set(canonical_fields)
+            for value in self.alias_templates
+        ):
+            raise ValueError("draft path alias fields are incompatible")
 
 
 @dataclass(frozen=True)

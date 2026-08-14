@@ -227,8 +227,9 @@ npx vitest run <test-file> --pool=forks --maxWorkers=1
 3. 动态 Evidence Budget Stage 1 与受限多问题拆解 Stage 2 均已完成真实 MiMo A/B、回归和发布门。
    Stage 3 受限 Planner 已满足启动条件但连续真实质量门失败，Feature Flag 保持关闭；§8.7 的
    通用核心、PF1E Adapter 等价迁移、失败样本覆盖、结构化局部修补及本地全门已经完成；真实
-   MiMo A/B 因 6/6 安全拒答而失败。下一步在本地修复 claim path/schema 契约，不进入 Summary
-   或并行。
+   MiMo A/B 曾因 6/6 安全拒答而失败。服务器拥有的 claim path/schema 契约、本地真实输出形状
+   回放和隐私安全失败分类现已完成，确定性一次 patch/full revalidation 金线通过；下一步须另行
+   授权新的真实 MiMo A/B，仍不进入 Summary 或并行。
 4. 答案级评测（已落地，见 `services/app-python/src/trpg_app/answer_evaluation.py` 与 `docs/answer-evaluation.md`）：事实点(`requiredAny`)、引用支持度(`source_match`)、工具预算(`toolCalls`/`withinBudget`)、无依据结论率(`unsupportedRate`)、**LLM-judge 事实正确性/幻觉(`factualCorrect`/`hallucinationFree`, 经 `--judge-model`)** 五项指标 + 多轮/错误/超时/judge 容错 + 单测。PF1E 已有 v2.0/v2.1 真实金标题集。前端仍保留 Agnes/SenseNova 可选，并将 MiMo 设为新对话默认模型；**Agnes / SenseNova 明确不在本轮评测范围**。待补：GSS 的真实金标题集。
 5. 检索质量：结构化切块、重排器和剩余漏召回题优化。V2.2 Stage 0 已修复锚点章节切分（CRB 战斗规则 10 子章节恢复）与 table 策略页正文丢失（overview 兜底），候选重建为 7140 文档、质量门通过；85/30 题相关 ID 100% 覆盖，检索基线待确认。
 6. PDF/CHM 图片、扫描件 OCR 和复杂表格理解。

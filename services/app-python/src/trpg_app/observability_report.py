@@ -133,6 +133,7 @@ def aggregate(records: list[dict[str, Any]]) -> dict[str, Any]:
         ("factRepairApplied", "factRepairApplied"),
         ("factRepairSafeRefusal", "factRepairSafeRefusal"),
         ("factRepairFailureReason", "factRepairFailureReason"),
+        ("factRepairTargetFailureReason", "factRepairTargetFailureReason"),
     ):
         counts: dict[str, int] = {}
         for record in records:
@@ -140,6 +141,16 @@ def aggregate(records: list[dict[str, Any]]) -> dict[str, Any]:
             key = str(context.get(context_field, "-")) if isinstance(context, dict) else "-"
             counts[key] = counts.get(key, 0) + 1
         dimensions[name] = dict(sorted(counts.items()))
+    issue_code_counts: dict[str, int] = {}
+    for record in records:
+        context = record.get("context", {})
+        values = context.get("factValidationIssueCodes", []) if isinstance(context, dict) else []
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            key = str(value)
+            issue_code_counts[key] = issue_code_counts.get(key, 0) + 1
+    dimensions["factValidationIssueCode"] = dict(sorted(issue_code_counts.items()))
     reported_calls = sum(int(record.get("usage", {}).get("reportedCalls", 0)) for record in records)
     estimated_calls = sum(int(record.get("usage", {}).get("estimatedCalls", 0)) for record in records)
     truncated_turns = sum(

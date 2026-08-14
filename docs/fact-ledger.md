@@ -149,3 +149,12 @@ Fact Ledger 实验为 0/6，并对 6/6 安全拒答：5 轮 `unrepairable_issue`
 下一阶段回到本地修复服务器拥有的 claim path/schema 契约：生成器必须从 Adapter 发布的规范路径
 中选择，指标增加稳定 issue code/path-match 分类，并用真实输出形状构建不含规则正文的回放夹具。
 出现确定性“发现可修补问题 → 一次 patch → 完整复验通过”金线前，不再次请求外部 A/B。
+
+同日完成上述本地整改。Adapter 协议 v2 新增服务器拥有的 `DraftPathSpec`，PF1E Adapter v3 发布
+有限 canonical 模板与 alias；生成提示只公布该词表，严格解析时将 alias 规范化为 Validator 使用的
+canonical path，并拒绝契约外路径。修补资格失败现稳定区分 `nonrepairable`、`missing_path` 和
+`path_not_found`，观测只记录这些分类与 issue code。完全合成夹具已证明 alias 草稿可完成一次精确
+patch、保留已验证 claim，并在完整重验证通过后才发布；Schema 偏差、混合可修补性、越权 patch 和
+重验证失败仍安全拒答且来源为空。完整回归为 Python App 227、Retrieval 64、Vitest 268、两套
+TypeScript 检查和两套 Web 构建全部通过。本轮未调用外部模型，两个 Flag 继续默认关闭；新的真实
+MiMo A/B 仍需另行授权。

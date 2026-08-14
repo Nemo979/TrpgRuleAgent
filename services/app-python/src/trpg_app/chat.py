@@ -28,6 +28,7 @@ from .context_budget import ContextBudget
 from .conversation_state import ConversationState
 from .evidence_policy import EvidenceBudgetPolicy, EvidenceBudgetProfile
 from .fact_ledger import (
+    DraftPathSpec,
     FACT_LEDGER_CORE_SCHEMA_VERSION,
     ValidationIssue,
     ValidationSeverity,
@@ -36,6 +37,7 @@ from .fact_ledger_adapter import AdapterStatus, FactLedgerRuntime
 from .fact_ledger_defaults import build_default_fact_ledger_runtime
 from .fact_ledger_repair import (
     RepairMetrics,
+    RepairTargetError,
     StructuredAnswerError,
     apply_repair_patch,
     build_repair_targets,
@@ -958,6 +960,7 @@ async def run_rule_turn(
                     else 0
                 ),
                 "factValidationIssueCount": len(fact_validation_issue_codes),
+                "factValidationIssueCodes": fact_validation_issue_codes,
                 "factLedgerBuildSeconds": round(fact_ledger.build_seconds, 6),
                 "factLedgerValidationSeconds": round(
                     fact_ledger.validation_seconds,
@@ -968,6 +971,9 @@ async def run_rule_turn(
                 "factRepairPatchCount": repair_metrics.patch_count,
                 "factRepairSafeRefusal": repair_metrics.safe_refusal,
                 "factRepairFailureReason": repair_metrics.failure_reason or "none",
+                "factRepairTargetFailureReason": (
+                    repair_metrics.target_failure_reason or "none"
+                ),
                 "factDraftParseSeconds": round(
                     repair_metrics.draft_parse_seconds,
                     6,
@@ -1176,6 +1182,7 @@ async def run_rule_turn(
         if citations.by_document_id:
             fact_ledger_payload: dict[str, Any] | None = None
             answer_validator: Callable[[str], tuple[ValidationIssue, ...]] | None = None
+            draft_path_specs: tuple[DraftPathSpec, ...] = ()
             if enable_fact_ledger:
                 fact_ledger = build_default_fact_ledger_runtime(
                     library.manifest,
@@ -1189,6 +1196,8 @@ async def run_rule_turn(
                     # Verify the optional validation boundary before it changes
                     # final-answer streaming behavior.
                     fact_ledger.validate("")
+                if fact_ledger.active:
+                    draft_path_specs = fact_ledger.draft_path_specs()
                 if fact_ledger.active:
                     fact_ledger_payload = candidate_payload
                     answer_validator = fact_ledger.validate
@@ -1205,6 +1214,7 @@ async def run_rule_turn(
                     fact_ledger=fact_ledger_payload,
                 ),
                 answer_validator=answer_validator,
+                draft_path_specs=draft_path_specs,
                 validation_issue_codes=fact_validation_issue_codes,
                 repair_metrics=repair_metrics,
             ):
@@ -1742,11 +1752,15 @@ async def _stream_structured_validated_answer(
     final_answer_tokens: list[int] | None,
     validation_issue_codes: list[str] | None,
     metrics: RepairMetrics,
+    draft_path_specs: tuple[DraftPathSpec, ...] = (),
 ) -> AsyncIterator[dict[str, Any]]:
     registered_refs = tuple(citations.labels())
     draft_conversation = [
         *answer_conversation,
-        {"role": "system", "content": structured_draft_instruction()},
+        {
+            "role": "system",
+            "content": structured_draft_instruction(draft_path_specs),
+        },
     ]
     raw_draft = await _collect_structured_model_output(
         gateway,
@@ -1766,7 +1780,7 @@ async def _stream_structured_validated_answer(
         return
     parse_started = time.monotonic()
     try:
-        draft = parse_answer_draft(raw_draft, registered_refs)
+        draft = parse_answer_draft(raw_draft, registered_refs, draft_path_specs)
     except StructuredAnswerError as error:
         metrics.safe_refusal = True
         metrics.failure_reason = "invalid_answer_draft"
@@ -1792,13 +1806,15 @@ async def _stream_structured_validated_answer(
     issues = _error_issues(answer_validator, rendered)
     if validation_issue_codes is not None:
         validation_issue_codes[:] = list(dict.fromkeys(issue.code for issue in issues))
+    metrics.issue_codes = tuple(dict.fromkeys(issue.code for issue in issues))
     if issues:
         metrics.attempted = True
         try:
             targets = build_repair_targets(draft, issues)
-        except StructuredAnswerError as error:
+        except RepairTargetError as error:
             metrics.safe_refusal = True
             metrics.failure_reason = "unrepairable_issue"
+            metrics.target_failure_reason = error.reason
             logger.warning("structured_repair_rejected reason=%s", type(error).__name__)
             yield {"type": "safe_refusal", "reason": metrics.failure_reason}
             yield {"type": "text_delta", "delta": _answer_quality_failure("fact_validation")}
@@ -1864,6 +1880,9 @@ async def _stream_structured_validated_answer(
                         [*validation_issue_codes, *(issue.code for issue in remaining)]
                     )
                 )
+            metrics.issue_codes = tuple(
+                dict.fromkeys([*metrics.issue_codes, *(issue.code for issue in remaining)])
+            )
             metrics.safe_refusal = True
             metrics.failure_reason = "repair_validation_failed"
             yield {"type": "safe_refusal", "reason": metrics.failure_reason}
@@ -1890,6 +1909,7 @@ async def _stream_final_answer(
     answer_validator: Callable[[str], tuple[ValidationIssue, ...]] | None = None,
     validation_issue_codes: list[str] | None = None,
     repair_metrics: RepairMetrics | None = None,
+    draft_path_specs: tuple[DraftPathSpec, ...] = (),
 ) -> AsyncIterator[dict[str, Any]]:
     answer_conversation = _final_answer_conversation(
         conversation,
@@ -1903,6 +1923,7 @@ async def _stream_final_answer(
             answer_conversation=answer_conversation,
             citations=citations,
             answer_validator=answer_validator,
+            draft_path_specs=draft_path_specs,
             timer=timer,
             final_answer_tokens=final_answer_tokens,
             validation_issue_codes=validation_issue_codes,

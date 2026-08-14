@@ -14,6 +14,7 @@ import re
 from typing import Any, Iterable
 
 from .fact_ledger import (
+    DraftPathSpec,
     EvidenceDocument,
     FactDerivation,
     FactLedger as GenericFactLedger,
@@ -964,7 +965,7 @@ def _validate_feat_prerequisites(
                                 f"{name} 需要 {attribute}{required}，"
                                 f"候选状态为 {actual_text}"
                             ),
-                            path=f"answer.levels[{level}].feats[{name}].attributes.{attribute}",
+                            path=f"answer.levels[{level}].feats[{name}].attributes[{attribute}]",
                             expected=required,
                             actual=actual,
                             evidence_refs=(fact.source_label,),
@@ -1244,11 +1245,36 @@ def _goal_level_range(goal: str) -> tuple[int, int] | None:
 
 
 PF1E_ADAPTER_ID = "pathfinder-1e"
-PF1E_ADAPTER_VERSION = 2
+PF1E_ADAPTER_VERSION = 3
 PF1E_ADAPTER_KEY = AdapterKey(
     library_id="pathfinder-1e",
     system="Pathfinder",
     edition="1E",
+)
+
+PF1E_DRAFT_PATH_SPECS = (
+    DraftPathSpec("answer.build.levels", ("answer.build.class_levels",)),
+    DraftPathSpec("answer.citations[{label}]"),
+    DraftPathSpec("answer.classes[{class_name}].requirements"),
+    DraftPathSpec(
+        "answer.levels[{level}].feats",
+        ("answer.progression[{level}].feats", "answer.level[{level}].feats"),
+    ),
+    DraftPathSpec("answer.levels[{level}].feats[{feat_name}].prerequisites"),
+    DraftPathSpec("answer.levels[{level}].feats[{feat_name}].bab"),
+    DraftPathSpec("answer.levels[{level}].feats[{feat_name}].attributes[{attribute}]"),
+    DraftPathSpec("answer.levels[{level}].spells"),
+    DraftPathSpec("answer.levels[{level}].spell_slots[{spell_level}]"),
+    DraftPathSpec("answer.spells[{spell_name}].level"),
+    DraftPathSpec("answer.spells[{spell_name}].school"),
+    DraftPathSpec("answer.spells[{spell_name}].duration"),
+    DraftPathSpec("answer.spells[{spell_name}].saving_throw"),
+    DraftPathSpec("answer.spells[{spell_name}]"),
+    DraftPathSpec("answer.equipment.stats"),
+    DraftPathSpec("answer.feats[{feat_name}]"),
+    DraftPathSpec("answer.summary[{key}]"),
+    DraftPathSpec("answer.other[{key}]"),
+    DraftPathSpec("answer.sections[{section}].claims[{claim}]"),
 )
 
 
@@ -1407,6 +1433,13 @@ class PF1EFactLedgerAdapter:
 
     def public(self, ledger: GenericFactLedger) -> dict[str, Any]:
         return _adapter_data(ledger).public()
+
+    def draft_path_specs(
+        self,
+        ledger: GenericFactLedger,
+    ) -> tuple[DraftPathSpec, ...]:
+        _adapter_data(ledger)
+        return PF1E_DRAFT_PATH_SPECS
 
 
 PF1E_FACT_LEDGER_ADAPTER = PF1EFactLedgerAdapter()

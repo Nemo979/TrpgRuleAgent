@@ -4,7 +4,7 @@ import unittest
 from dataclasses import replace
 from types import SimpleNamespace
 
-from trpg_app.fact_ledger import FactLedger, FactRecord, ValidationIssue
+from trpg_app.fact_ledger import DraftPathSpec, FactLedger, FactRecord, ValidationIssue
 from trpg_app.fact_ledger_adapter import (
     FACT_LEDGER_ADAPTER_PROTOCOL_VERSION,
     AdapterKey,
@@ -57,6 +57,9 @@ class StubAdapter:
         self.validate_calls += 1
         return (ValidationIssue("capacity", "capacity is inconsistent"),) if "9" in content else ()
 
+    def draft_path_specs(self, ledger):
+        return (DraftPathSpec("answer.entries[{key}].capacity"),)
+
 
 def evidence(*, ruleset_id="catalog", document_id="entry-a"):
     return [("D1", {"id": document_id, "rulesetId": ruleset_id, "title": "A", "content": "capacity 8"})]
@@ -73,6 +76,10 @@ class FactLedgerAdapterRegistryTest(unittest.TestCase):
         self.assertEqual(runtime.status, AdapterStatus.MATCHED)
         self.assertEqual(runtime.public(), {"count": 1})
         self.assertEqual([item.code for item in runtime.validate("capacity 9")], ["capacity"])
+        self.assertEqual(
+            runtime.draft_path_specs(),
+            (DraftPathSpec("answer.entries[{key}].capacity"),),
+        )
         self.assertEqual((adapter.build_calls, adapter.public_calls, adapter.validate_calls), (1, 1, 1))
 
         for identity in (
