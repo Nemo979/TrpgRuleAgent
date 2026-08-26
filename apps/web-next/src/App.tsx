@@ -172,6 +172,8 @@ export function App() {
               chatEvent.droppedMessages,
             ),
           );
+        } else if (chatEvent.type === "safe_refusal") {
+          setStatus("事实校验未通过，已安全停止");
         } else if (chatEvent.type === "text_delta") {
           setConversations((items) =>
             appendAssistant(items, pending.id, assistantId, chatEvent.delta),

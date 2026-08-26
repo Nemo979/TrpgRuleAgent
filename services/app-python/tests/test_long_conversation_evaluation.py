@@ -25,6 +25,11 @@ class LongConversationEvaluationTest(unittest.TestCase):
                                     "turn": 1,
                                     "user": "我选择猫作为真身",
                                     "assistant": "我猜是真身为狐",
+                                },
+                                {
+                                    "turn": 12,
+                                    "user": "给我一个属性建议",
+                                    "assistant": "上一版属性分配建议：力量8",
                                 }
                             ],
                         },
@@ -41,6 +46,11 @@ class LongConversationEvaluationTest(unittest.TestCase):
                             "query": "弱点",
                             "latestUserMessage": "它有什么弱点？",
                             "mustContain": ["猫"],
+                        },
+                        "artifactProbe": {
+                            "latestUserMessage": "重新检查上一版属性分配建议",
+                            "mustContain": ["上一版属性分配建议"],
+                            "mustNotContain": ["从未出现的答案"],
                         },
                         "turns": [
                             {
@@ -62,6 +72,7 @@ class LongConversationEvaluationTest(unittest.TestCase):
         self.assertEqual(report["unconfirmedStateContaminationRate"], 0.0)
         self.assertEqual(report["revisionMismatchAccuracy"], 1.0)
         self.assertEqual(report["queryProbeAccuracy"], 1.0)
+        self.assertEqual(report["artifactReferenceAccuracy"], 1.0)
         self.assertEqual(report["contextTruncationRate"], 1.0)
         serialized = json.dumps(report, ensure_ascii=False)
         self.assertNotIn("一般问题", serialized)

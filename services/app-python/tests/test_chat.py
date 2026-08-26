@@ -1,4 +1,5 @@
 import asyncio
+import json
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -11,18 +12,241 @@ from trpg_app.chat import (
     ToolLoopController,
     ToolInvocation,
     _answer_quality_issue,
+    _final_answer_conversation,
     _missing_citation_suffix,
+    _select_prior_assistant_artifact,
     _stream_final_answer,
     _visible_content,
     run_rule_turn,
 )
 from trpg_app.config import ModelConfig
-from trpg_app.fact_ledger import FactLedger
+from trpg_app.conversation_state import ConversationState
+from trpg_app.fact_ledger import (
+    DraftClaimContract,
+    DraftPathSpec,
+    DraftSelectionOption,
+    FactLedger,
+    RepairPathMapping,
+    ValidationIssue,
+)
 from trpg_app.fact_ledger_adapter import AdapterStatus, FactLedgerRuntime
+from trpg_app.fact_ledger_repair import RepairMetrics
 from trpg_app.query_decomposition import decompose_query, route_query
 
 
 class EvidenceBudgetTest(unittest.TestCase):
+    def test_selects_relevant_prior_assistant_draft_for_explicit_review(self) -> None:
+        conversation = [
+            {"role": "user", "content": "给我一个20点购点属性分配建议"},
+            {
+                "role": "assistant",
+                "content": (
+                    "20点购点属性分配建议：\n"
+                    "| 属性 | 购点后 | 含种族 |\n"
+                    "| 力量 | 8 | 8 |\n"
+                    "| 感知 | 14 | 16 |"
+                ),
+            },
+            {"role": "user", "content": "猫族会-2感知吧？"},
+            {"role": "assistant", "content": "是的，猫族会-2感知。"},
+            {
+                "role": "user",
+                "content": "结合猫族会-2感知，检查一下20点购点属性分配建议是否正确",
+            },
+        ]
+
+        selected = _select_prior_assistant_artifact(
+            conversation, conversation[-1]["content"]
+        )
+
+        self.assertIn("20点购点属性分配建议", selected)
+        self.assertIn("| 感知 | 14 | 16 |", selected)
+        self.assertNotEqual(selected, "是的，猫族会-2感知。")
+
+    def test_does_not_include_assistant_draft_without_explicit_reference(self) -> None:
+        conversation = [
+            {"role": "user", "content": "猫族的属性调整是什么？"},
+            {"role": "assistant", "content": "一个未经验证的旧答案"},
+            {"role": "user", "content": "给我推荐专长"},
+        ]
+
+        self.assertEqual(
+            _select_prior_assistant_artifact(conversation, conversation[-1]["content"]),
+            "",
+        )
+
+    def test_final_prompt_labels_prior_assistant_draft_as_untrusted(self) -> None:
+        citations = CitationRegistry()
+        citations.register(
+            {
+                "id": "catfolk",
+                "title": "猫族",
+                "fullPath": "种族 > 猫族",
+                "content": "+2敏捷，+2魅力，-2感知。",
+            }
+        )
+        conversation = [
+            {"role": "user", "content": "给我一个20点购点属性分配建议"},
+            {"role": "assistant", "content": "旧建议：感知14，种族调整后16。"},
+            {"role": "user", "content": "检查一下这个属性分配建议"},
+        ]
+
+        messages = _final_answer_conversation(conversation, citations)
+
+        self.assertIn("不是规则事实或可引用来源", messages[0]["content"])
+        self.assertIn("待审查的上一版助手草案", messages[-1]["content"])
+        self.assertIn("旧建议：感知14", messages[-1]["content"])
+
+    def test_final_prompt_includes_deterministic_point_buy_audit(self) -> None:
+        citations = CitationRegistry()
+        citations.register(
+            {
+                "id": "point-buy",
+                "title": "生成属性值",
+                "fullPath": "核心规则 > 生成属性值",
+                "content": "购点规则表",
+            }
+        )
+        conversation = [
+            {
+                "role": "user",
+                "content": "20buy，猫族，给我一个属性分配建议",
+            },
+            {"role": "assistant", "content": "上一版六项属性分配表"},
+            {"role": "user", "content": "重新检查上一版属性分配建议"},
+        ]
+        audit = SimpleNamespace(prompt_guidance=lambda: "deterministic-audit-result")
+
+        with patch(
+            "trpg_app.chat._point_buy_audit_result",
+            return_value=(audit, "S1", "S1"),
+        ):
+            messages = _final_answer_conversation(conversation, citations)
+
+        self.assertIn("deterministic-audit-result", messages[-1]["content"])
+
+    def test_final_prompt_uses_preserved_state_after_history_trimming(self) -> None:
+        citations = CitationRegistry()
+        citations.register(
+            {
+                "id": "rule",
+                "title": "规则",
+                "fullPath": "规则",
+                "content": "规则正文",
+            }
+        )
+        preserved = ConversationState(
+            characterLevel=5,
+            race="猫族",
+            characterClass="通灵者",
+            archetype="虚空之声",
+            pointBuyBudget=20,
+        )
+
+        messages = _final_answer_conversation(
+            [{"role": "user", "content": "这个建议正确吗？"}],
+            citations,
+            conversation_state=preserved,
+        )
+
+        prompt = messages[-1]["content"]
+        self.assertIn('"characterLevel": 5', prompt)
+        self.assertIn('"pointBuyBudget": 20', prompt)
+        self.assertIn('"archetype": "虚空之声"', prompt)
+
+    def test_stream_uses_server_owned_point_buy_answer(self) -> None:
+        class NeverGateway:
+            called = False
+
+            async def stream_answer(self, _messages):
+                self.called = True
+                if False:
+                    yield ""
+
+        citations = CitationRegistry()
+        citations.register(
+            {
+                "id": "catfolk",
+                "title": "猫族",
+                "fullPath": "种族 > 猫族",
+                "content": "+2敏捷，+2魅力，-2感知。",
+            }
+        )
+        citations.register(
+            {
+                "id": "point-buy",
+                "title": "生成属性值",
+                "fullPath": "核心规则 > 生成属性值",
+                "content": (
+                    "购点规则\n| 原始属性 | 消耗购点 |\n"
+                    "| 7 | -4 |\n| 8 | -2 |\n| 9 | -1 |\n| 10 | 0 |\n"
+                    "| 11 | 1 |\n| 12 | 2 |\n| 13 | 3 |\n| 14 | 5 |\n"
+                    "| 15 | 7 |\n| 16 | 10 |\n| 17 | 13 |\n| 18 | 17 |"
+                ),
+            }
+        )
+        artifact = (
+            "| **力量** | -2 (降至8) | 8 |\n"
+            "| **敏捷** | +2 (升至12) | 14 |\n"
+            "| **体质** | +2 (升至12) | 12 |\n"
+            "| **智力** | +5 (升至14) | 14 |\n"
+            "| **感知** | +5 (升至14) | 16 |\n"
+            "| **魅力** | +2 (升至12) | 12 |"
+        )
+        gateway = NeverGateway()
+
+        async def collect():
+            return [
+                event
+                async for event in _stream_final_answer(
+                    gateway,
+                    [{"role": "user", "content": "重新检查上一版属性分配建议"}],
+                    citations,
+                    prior_assistant_artifact=artifact,
+                    conversation_state=ConversationState(
+                        race="猫族", pointBuyBudget=20
+                    ),
+                )
+            ]
+
+        events = asyncio.run(collect())
+        answer = "".join(
+            event.get("delta", "")
+            for event in events
+            if event.get("type") == "text_delta"
+        )
+        self.assertFalse(gateway.called)
+        self.assertIn("= 14", answer)
+        self.assertIn("还剩 6 点未使用", answer)
+        self.assertIn("感知应为12", answer)
+        self.assertEqual(events[-2]["type"], "sources")
+        self.assertEqual(events[-1]["type"], "done")
+
+    def test_structured_evidence_bound_keeps_every_source_label(self) -> None:
+        citations = CitationRegistry()
+        for index in range(3):
+            citations.register(
+                {
+                    "id": f"doc-{index}",
+                    "title": f"规则{index}",
+                    "fullPath": f"规则 > {index}",
+                    "content": str(index) * 10_000,
+                }
+            )
+
+        messages = _final_answer_conversation(
+            [{"role": "user", "content": "核对规则"}],
+            citations,
+            max_evidence_characters=3_000,
+        )
+        evidence_prompt = messages[-1]["content"]
+
+        self.assertIn("[S1]", evidence_prompt)
+        self.assertIn("[S2]", evidence_prompt)
+        self.assertIn("[S3]", evidence_prompt)
+        self.assertIn("[正文已由服务器按长度截断]", evidence_prompt)
+        self.assertLess(len(evidence_prompt), 4_000)
+
     def test_admits_small_documents_when_a_later_document_exceeds_budget(self) -> None:
         budget = EvidenceBudget(max_documents=10, max_evidence_characters=20)
         accepted = budget.consume_documents([{"content": "短规则"}, {"content": "另一条"}])
@@ -63,6 +287,20 @@ class EvidenceBudgetTest(unittest.TestCase):
         self.assertEqual(
             gateway._extra_body(),
             {"chat_template_kwargs": {"enable_thinking": False}},
+        )
+
+    def test_disables_mimo_thinking_with_official_request_parameter(self) -> None:
+        model = ModelConfig(
+            id="mimo-v2.5",
+            label="MiMo",
+            base_url="https://api.xiaomimimo.com/v1",
+            model="mimo-v2.5",
+            api_key="secret",
+            disable_thinking=True,
+        )
+        self.assertEqual(
+            OpenAIModelGateway(model)._extra_body(),
+            {"thinking": {"type": "disabled"}},
         )
 
     def test_enforces_search_safety_ceiling(self) -> None:
@@ -478,7 +716,65 @@ class PlannerGateway:
 
     async def stream_answer(self, messages):
         type(self).final_messages = messages
+        if "对象只能有 values 一个字段" in messages[-1]["content"]:
+            yield json.dumps(
+                {
+                    "values": _fact_draft_values(
+                        messages[-1]["content"],
+                        "角色达到12级时，可采用法师9/战士3。",
+                    )
+                },
+                ensure_ascii=False,
+            )
+            return
+        if "最终输出必须是严格 JSON" in messages[-1]["content"]:
+            yield json.dumps(
+                {
+                    "schema_version": 1,
+                    "sections": [
+                        {
+                            "id": "summary",
+                            "heading": "结论",
+                            "claims": [
+                                {
+                                    "id": "summary_claim",
+                                    "path": "answer.summary.claim",
+                                    "text": "按依赖顺序完成规则核对与条件分支。",
+                                    "evidence_refs": ["S1"],
+                                }
+                            ],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            )
+            return
         yield "按依赖顺序完成规则核对与条件分支。[S1]"
+
+
+def _fact_draft_values(prompt: str, build_text: str) -> list[object]:
+    if "输出形状：" not in prompt:
+        return [build_text]
+    shape_text = prompt.split("输出形状：", 1)[1].split("\n值规则：", 1)[0]
+    rules_text = prompt.split("\n值规则：", 1)[1].split("\n选项目录：", 1)[0]
+    catalogs_text = prompt.split("\n选项目录：", 1)[1]
+    shape = json.loads(shape_text)
+    rules = json.loads(rules_text)
+    catalogs = json.loads(catalogs_text)
+    values = list(shape["values"])
+    for rule in rules:
+        index = rule["index"]
+        if rule["kind"] == "selection":
+            values[index] = catalogs[rule["catalog"]][: rule["exact_count"]]
+        elif rule["topic"] == "answer.build.levels":
+            values[index] = build_text
+        elif rule["topic"] == "answer.summary[conditional_branch]":
+            values[index] = "如果满足目标条件就采用对应分支，否则保持原职业路线。"
+        elif rule["topic"] == "answer.equipment.stats":
+            values[index] = "装备比较以护甲价格和 AC 收益为准。"
+        else:
+            values[index] = "只回答当前语义槽。"
+    return values
 
 
 class FactRetryPlannerGateway(PlannerGateway):
@@ -492,9 +788,20 @@ class FactRetryPlannerGateway(PlannerGateway):
         type(self).attempts += 1
         type(self).final_messages = messages
         if type(self).attempts == 1:
-            yield "角色达到12级时，可采用法师5/战士4。[S1]"
+            yield json.dumps(
+                {"values": _fact_draft_values(
+                    messages[-1]["content"],
+                    "角色达到12级时，可采用法师5/战士4。",
+                )},
+                ensure_ascii=False,
+            )
             return
-        yield "角色达到12级时，可采用法师9/战士3。[S1]"
+        yield json.dumps(
+            {
+                "values": ["角色达到12级时，可采用法师9/战士3。"],
+            },
+            ensure_ascii=False,
+        )
 
 
 class AlwaysInvalidFactPlannerGateway(PlannerGateway):
@@ -507,7 +814,17 @@ class AlwaysInvalidFactPlannerGateway(PlannerGateway):
     async def stream_answer(self, messages):
         type(self).attempts += 1
         type(self).final_messages = messages
-        yield "角色达到12级时，可采用法师5/战士4。[S1]"
+        payload = (
+            {"values": _fact_draft_values(
+                messages[-1]["content"],
+                "角色达到12级时，可采用法师5/战士4。",
+            )}
+            if type(self).attempts == 1
+            else {
+                "values": ["角色达到12级时，仍采用法师5/战士4。"],
+            }
+        )
+        yield json.dumps(payload, ensure_ascii=False)
 
 
 class DecompositionCoverageGateway:
@@ -973,6 +1290,9 @@ class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context["factLedgerStatus"], "unregistered")
         self.assertEqual(context["factLedgerAdapterId"], "")
         self.assertEqual(context["factValidationIssueCount"], 0)
+        self.assertFalse(context["factRepairAttempted"])
+        self.assertFalse(context["factRepairApplied"])
+        self.assertEqual(log_metrics.call_args.kwargs["usage"].calls, 1)
 
     async def test_incompatible_and_failed_adapters_preserve_planner_output(self) -> None:
         for status in (
@@ -1083,7 +1403,10 @@ class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(context["plannerFailedTaskCount"], 0)
         self.assertEqual(len(library.search_queries), context["plannerTaskCount"] - 1)
-        final_prompt = PlannerGateway.final_messages[-1]["content"]
+        final_prompt = "\n".join(
+            str(message.get("content", ""))
+            for message in PlannerGateway.final_messages
+        )
         self.assertIn("受限任务执行结果", final_prompt)
         self.assertIn('"depends_on"', final_prompt)
         self.assertIn('"synthesis_contract"', final_prompt)
@@ -1098,6 +1421,9 @@ class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context["factLedgerStatus"], "matched")
         self.assertEqual(context["factLedgerAdapterId"], "pathfinder-1e")
         self.assertEqual(context["factValidationIssueCount"], 0)
+        self.assertFalse(context["factRepairAttempted"])
+        self.assertFalse(context["factRepairApplied"])
+        self.assertEqual(log_metrics.call_args.kwargs["usage"].calls, 1)
         self.assertEqual(events[-1]["type"], "done")
 
     async def test_fact_ledger_retries_before_exposing_invalid_planner_answer(self) -> None:
@@ -1129,6 +1455,19 @@ class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(event["type"] == "sources" and event["sources"] for event in events))
         context = log_metrics.call_args.kwargs["context"]
         self.assertEqual(context["factValidationIssueCount"], 1)
+        self.assertTrue(context["factRepairAttempted"])
+        self.assertTrue(context["factRepairApplied"])
+        self.assertEqual(context["factRepairPatchCount"], 1)
+        self.assertFalse(context["factRepairSafeRefusal"])
+        self.assertGreaterEqual(context["factRepairSeconds"], 0)
+        self.assertGreaterEqual(context["factRenderSeconds"], 0)
+        self.assertEqual(log_metrics.call_args.kwargs["usage"].calls, 2)
+        repair_prompt = FactRetryPlannerGateway.final_messages[-1]["content"]
+        self.assertIn("不得重写整篇答案", repair_prompt)
+        self.assertIn('"target_contexts"', repair_prompt)
+        self.assertIn('"required_output"', repair_prompt)
+        self.assertIn('"values":["REPLACE_WITH_CORRECTED_CLAIM_VALUE"]', repair_prompt)
+        self.assertNotIn("重新生成完整", repair_prompt)
 
     async def test_fact_ledger_rejects_repeated_invalid_answer_without_sources(self) -> None:
         query = (
@@ -1152,6 +1491,767 @@ class RuleTurnTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("法师5/战士4", output)
         self.assertIn("连续未通过服务器事实校验", output)
         self.assertIn({"type": "sources", "sources": []}, events)
+
+    async def test_structured_answer_invalid_json_retries_once_without_sources(self) -> None:
+        class InvalidDraftGateway:
+            calls = 0
+
+            async def stream_answer(self, _messages):
+                type(self).calls += 1
+                yield "这不是结构化草稿。[S1]"
+
+        citations = CitationRegistry()
+        citations.register(
+            {
+                "id": "rule-1",
+                "title": "规则",
+                "fullPath": "规则 > 条目",
+                "content": "规则正文",
+                "metadata": {},
+            }
+        )
+        gateway = InvalidDraftGateway()
+        metrics = RepairMetrics()
+
+        events = [
+            event
+            async for event in _stream_final_answer(
+                gateway,
+                [{"role": "user", "content": "规则问题"}],
+                citations,
+                answer_validator=lambda _content: (),
+                repair_metrics=metrics,
+            )
+        ]
+
+        self.assertEqual(gateway.calls, 2)
+        self.assertTrue(metrics.safe_refusal)
+        self.assertEqual(metrics.failure_reason, "invalid_answer_draft")
+        self.assertEqual(metrics.draft_parse_failure_reason, "invalid_json")
+        self.assertTrue(metrics.draft_json_recovery_attempted)
+        self.assertFalse(metrics.draft_json_recovery_applied)
+        self.assertIn({"type": "sources", "sources": []}, events)
+        self.assertNotIn("这不是结构化草稿", "".join(event.get("delta", "") for event in events))
+
+    async def test_structured_answer_json_recovery_publishes_corrected_serialization(self) -> None:
+        class RecoveringDraftGateway:
+            calls = 0
+
+            async def stream_answer(self, _messages):
+                type(self).calls += 1
+                if type(self).calls == 1:
+                    yield "不是 JSON"
+                    return
+                yield json.dumps(
+                    {
+                        "schema_version": 1,
+                        "sections": [
+                            {
+                                "id": "summary",
+                                "heading": "结论",
+                                "claims": [
+                                    {
+                                        "id": "claim",
+                                        "path": "answer.summary.claim",
+                                        "text": "规则结论",
+                                        "evidence_refs": ["S1"],
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                )
+
+        citations = CitationRegistry()
+        citations.register(
+            {
+                "id": "rule-1",
+                "title": "规则",
+                "fullPath": "规则 > 条目",
+                "content": "规则正文",
+                "metadata": {},
+            }
+        )
+        gateway = RecoveringDraftGateway()
+        metrics = RepairMetrics()
+
+        events = [
+            event
+            async for event in _stream_final_answer(
+                gateway,
+                [{"role": "user", "content": "规则问题"}],
+                citations,
+                answer_validator=lambda _content: (),
+                repair_metrics=metrics,
+            )
+        ]
+
+        self.assertEqual(gateway.calls, 2)
+        self.assertTrue(metrics.draft_json_recovery_attempted)
+        self.assertTrue(metrics.draft_json_recovery_applied)
+        self.assertFalse(metrics.safe_refusal)
+        self.assertIn("规则结论", "".join(event.get("delta", "") for event in events))
+
+    async def test_minimal_values_wire_builds_server_owned_draft_and_publishes(self) -> None:
+        class ValuesGateway:
+            calls = 0
+            prompt = ""
+
+            async def stream_answer(self, messages):
+                type(self).calls += 1
+                type(self).prompt = messages[-1]["content"]
+                yield json.dumps(
+                    {"values": ["力量13。[S9]", ["猛力攻击", "闪避"]]},
+                    ensure_ascii=False,
+                )
+
+        citations = CitationRegistry()
+        for number in (1, 2):
+            citations.register(
+                {
+                    "id": f"rule-{number}",
+                    "title": f"规则{number}",
+                    "fullPath": f"规则 > 条目{number}",
+                    "content": "规则正文",
+                    "metadata": {},
+                }
+            )
+        summary_path = "answer.summary[feat_eligibility]"
+        feat_path = "answer.levels[1].feats"
+        contracts = (
+            DraftClaimContract(summary_path, evidence_refs=("S1",)),
+            DraftClaimContract(
+                feat_path,
+                evidence_refs=("S1",),
+                selection_count=2,
+                selection_options=(
+                    DraftSelectionOption("猛力攻击", ("S2",)),
+                    DraftSelectionOption("闪避", ("S2",)),
+                ),
+                text_template="1级选择专长：{values}。",
+            ),
+        )
+        validated: list[str] = []
+
+        def validator(content: str):
+            validated.append(content)
+            return ()
+
+        metrics = RepairMetrics()
+        events = [
+            event
+            async for event in _stream_final_answer(
+                ValuesGateway(),
+                [{"role": "user", "content": "规划专长"}],
+                citations,
+                answer_validator=validator,
+                repair_metrics=metrics,
+                draft_path_specs=(
+                    DraftPathSpec("answer.summary[{key}]"),
+                    DraftPathSpec("answer.levels[{level}].feats"),
+                ),
+                required_draft_paths=(summary_path, feat_path),
+                draft_claim_contracts=contracts,
+            )
+        ]
+
+        output = "".join(event.get("delta", "") for event in events)
+        self.assertEqual(ValuesGateway.calls, 1)
+        self.assertIn("对象只能有 values 一个字段", ValuesGateway.prompt)
+        self.assertNotIn('"required_output"', ValuesGateway.prompt)
+        self.assertIn("## 规则结论", output)
+        self.assertIn("力量13。 [S1]", output)
+        self.assertIn("1级选择专长：猛力攻击、闪避。 [S1][S2]", output)
+        self.assertNotIn("S9", output)
+        self.assertIn("TRPGCLAIMPATH", validated[-1])
+        self.assertFalse(metrics.safe_refusal)
+        self.assertTrue(any(event["type"] == "sources" and event["sources"] for event in events))
+
+    async def test_typed_selection_repair_recovers_invalid_json_once(self) -> None:
+        class TypedRepairGateway:
+            calls = 0
+            repair_prompt = ""
+
+            async def stream_answer(self, messages):
+                type(self).calls += 1
+                if type(self).calls == 1:
+                    yield '{"values":[["闪避"]]}'
+                    return
+                if type(self).calls == 2:
+                    type(self).repair_prompt = messages[-1]["content"]
+                    yield "不是 JSON"
+                    return
+                yield '{"values":[["猛力攻击"]]}'
+
+        citations = CitationRegistry()
+        for number in (1, 2):
+            citations.register(
+                {
+                    "id": f"rule-{number}",
+                    "title": f"规则{number}",
+                    "fullPath": f"规则 > 条目{number}",
+                    "content": "规则正文",
+                    "metadata": {},
+                }
+            )
+        path = "answer.levels[1].feats"
+        contract = DraftClaimContract(
+            path,
+            evidence_refs=("S1",),
+            selection_count=1,
+            selection_options=(
+                DraftSelectionOption("猛力攻击", ("S2",)),
+                DraftSelectionOption("闪避", ("S2",)),
+            ),
+            text_template="1级选择专长：{values}。",
+        )
+        metrics = RepairMetrics()
+        events = [
+            event
+            async for event in _stream_final_answer(
+                TypedRepairGateway(),
+                [{"role": "user", "content": "规划专长"}],
+                citations,
+                answer_validator=lambda content: (
+                    ValidationIssue(
+                        "wrong_selection",
+                        "改用猛力攻击",
+                        path=path,
+                        actual="闪避",
+                        evidence_refs=("S1",),
+                    ),
+                )
+                if "闪避" in content
+                else (),
+                repair_metrics=metrics,
+                draft_path_specs=(DraftPathSpec("answer.levels[{level}].feats"),),
+                required_draft_paths=(path,),
+                draft_claim_contracts=(contract,),
+            )
+        ]
+
+        output = "".join(event.get("delta", "") for event in events)
+        self.assertEqual(TypedRepairGateway.calls, 3)
+        self.assertIn('"required_output":{"values":[[]]}', TypedRepairGateway.repair_prompt)
+        self.assertNotIn('"schema_version"', TypedRepairGateway.repair_prompt)
+        self.assertTrue(metrics.applied)
+        self.assertTrue(metrics.repair_json_recovery_attempted)
+        self.assertTrue(metrics.repair_json_recovery_applied)
+        self.assertFalse(metrics.safe_refusal)
+        self.assertIn("1级选择专长：猛力攻击。 [S1][S2]", output)
+        self.assertNotIn("闪避", output)
+
+    async def test_required_values_count_retries_once_with_contract_only(self) -> None:
+        class ContractRecoveryGateway:
+            calls = 0
+            recovery_prompt = ""
+
+            async def stream_answer(self, messages):
+                type(self).calls += 1
+                if type(self).calls == 1:
+                    yield '{"values":[]}'
+                    return
+                type(self).recovery_prompt = messages[-1]["content"]
+                yield '{"values":["满足条件后采用对应分支。"]}'
+
+        citations = CitationRegistry()
+        citations.register(
+            {
+                "id": "rule-1",
+                "title": "规则",
+                "fullPath": "规则 > 条目",
+                "content": "规则正文",
+                "metadata": {},
+            }
+        )
+        path = "answer.summary[conditional_branch]"
+        contract = DraftClaimContract(
+            path,
+            evidence_refs=("S1",),
+            value_description="只写条件分支。",
+            required_term_groups=(("条件", "满足"),),
+        )
+        metrics = RepairMetrics()
+        events = [
+            event
+            async for event in _stream_final_answer(
+                ContractRecoveryGateway(),
+                [{"role": "user", "content": "条件规则"}],
+                citations,
+                answer_validator=lambda _content: (),
+                repair_metrics=metrics,
+                draft_path_specs=(DraftPathSpec("answer.summary[{key}]"),),
+                required_draft_paths=(path,),
+                draft_claim_contracts=(contract,),
+            )
+        ]
+
+        output = "".join(event.get("delta", "") for event in events)
+        self.assertEqual(ContractRecoveryGateway.calls, 2)
+        self.assertIn("values 必须恰好有1项", ContractRecoveryGateway.recovery_prompt)
+        self.assertTrue(metrics.draft_contract_recovery_attempted)
+        self.assertTrue(metrics.draft_contract_recovery_applied)
+        self.assertFalse(metrics.safe_refusal)
+        self.assertIn("满足条件后采用对应分支", output)
+
+    async def test_structured_alias_path_repairs_once_and_passes_full_validation(self) -> None:
+        class RepairingGateway:
+            calls = 0
+
+            async def stream_answer(self, _messages):
+                type(self).calls += 1
+                if type(self).calls == 1:
+                    yield json.dumps(
+                        {
+                            "schema_version": 1,
+                            "sections": [
+                                {
+                                    "id": "route",
+                                    "heading": "路线",
+                                    "claims": [
+                                        {
+                                            "id": "level_5_feat",
+                                            "path": "answer.progression[5].feats",
+                                            "text": "5级没有新的专长选择。",
+                                            "evidence_refs": ["S1"],
+                                        },
+                                        {
+                                            "id": "verified_claim",
+                                            "path": "answer.summary[verified]",
+                                            "text": "这条结论已经验证。",
+                                            "evidence_refs": ["S1"],
+                                        },
+                                    ],
+                                }
+                            ],
+                        },
+                        ensure_ascii=False,
+                    )
+                    return
+                yield json.dumps(
+                    {
+                        "values": ["5级选择钢铁意志。"],
+                    },
+                    ensure_ascii=False,
+                )
+
+        citations = CitationRegistry()
+        citations.register(
+            {
+                "id": "rule-1",
+                "title": "规则",
+                "fullPath": "规则 > 条目",
+                "content": "规则正文",
+                "metadata": {},
+            }
+        )
+        metrics = RepairMetrics()
+
+        events = [
+            event
+            async for event in _stream_final_answer(
+                RepairingGateway(),
+                [{"role": "user", "content": "规则问题"}],
+                citations,
+                answer_validator=lambda content: (
+                    ValidationIssue(
+                        "feat_timeline_slot_count",
+                        "5级缺少专长",
+                        path="answer.levels[5].feats",
+                        evidence_refs=("S1",),
+                    ),
+                )
+                if "没有新的专长" in content
+                else (),
+                repair_metrics=metrics,
+                draft_path_specs=(
+                    DraftPathSpec(
+                        "answer.levels[{level}].feats",
+                        ("answer.progression[{level}].feats",),
+                    ),
+                    DraftPathSpec("answer.summary[{key}]"),
+                ),
+            )
+        ]
+
+        output = "".join(event.get("delta", "") for event in events)
+        self.assertEqual(RepairingGateway.calls, 2)
+        self.assertTrue(metrics.attempted)
+        self.assertTrue(metrics.applied)
+        self.assertEqual(metrics.patch_count, 1)
+        self.assertFalse(metrics.safe_refusal)
+        self.assertIn("5级选择钢铁意志", output)
+        self.assertIn("这条结论已经验证", output)
+
+    async def test_structured_sibling_mapping_repairs_and_revalidates(self) -> None:
+        class SpellSlotRepairGateway:
+            calls = 0
+
+            async def stream_answer(self, _messages):
+                type(self).calls += 1
+                if type(self).calls == 1:
+                    yield json.dumps(
+                        {
+                            "schema_version": 1,
+                            "sections": [
+                                {
+                                    "id": "spells",
+                                    "heading": "法术进度",
+                                    "claims": [
+                                        {
+                                            "id": "level_5_spells",
+                                            "path": "answer.levels[5].spells",
+                                            "text": "法师5级时2环3位。",
+                                            "evidence_refs": ["S1"],
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                        ensure_ascii=False,
+                    )
+                    return
+                yield json.dumps(
+                    {
+                        "values": ["法师5级时2环2位。"],
+                    },
+                    ensure_ascii=False,
+                )
+
+        citations = CitationRegistry()
+        citations.register(
+            {
+                "id": "rule-1",
+                "title": "法师",
+                "fullPath": "职业 > 法师",
+                "content": "法师5级2环法术位为2。",
+                "metadata": {},
+            }
+        )
+        metrics = RepairMetrics()
+
+        events = [
+            event
+            async for event in _stream_final_answer(
+                SpellSlotRepairGateway(),
+                [{"role": "user", "content": "法师法术位"}],
+                citations,
+                answer_validator=lambda content: (
+                    ValidationIssue(
+                        "spell_slot_count",
+                        "2环法术位错误",
+                        path="answer.levels[5].spell_slots[2]",
+                        expected=2,
+                        actual=3,
+                        evidence_refs=("S1",),
+                    ),
+                )
+                if "2环3位" in content
+                else (),
+                repair_metrics=metrics,
+                draft_path_specs=(
+                    DraftPathSpec("answer.levels[{level}].spells"),
+                    DraftPathSpec(
+                        "answer.levels[{level}].spell_slots[{spell_level}]"
+                    ),
+                ),
+                repair_path_mappings=(
+                    RepairPathMapping(
+                        "answer.levels[{level}].spell_slots[{spell_level}]",
+                        "answer.levels[{level}].spells",
+                        ("spell_slot_count",),
+                    ),
+                ),
+            )
+        ]
+
+        output = "".join(event.get("delta", "") for event in events)
+        self.assertEqual(SpellSlotRepairGateway.calls, 2)
+        self.assertTrue(metrics.applied)
+        self.assertFalse(metrics.safe_refusal)
+        self.assertIn("2环2位", output)
+        self.assertNotIn("2环3位", output)
+        self.assertNotIn("没有新的专长", output)
+        self.assertNotIn("safe_refusal", [event["type"] for event in events])
+
+    async def test_structured_repair_cannot_modify_verified_claim(self) -> None:
+        class TamperingPatchGateway:
+            calls = 0
+
+            async def stream_answer(self, _messages):
+                type(self).calls += 1
+                if type(self).calls == 1:
+                    yield json.dumps(
+                        {
+                            "schema_version": 1,
+                            "sections": [
+                                {
+                                    "id": "route",
+                                    "heading": "路线",
+                                    "claims": [
+                                        {
+                                            "id": "bad_claim",
+                                            "path": "answer.route.bad",
+                                            "text": "错误值。",
+                                            "evidence_refs": ["S1"],
+                                        },
+                                        {
+                                            "id": "verified_claim",
+                                            "path": "answer.route.verified",
+                                            "text": "已验证值。",
+                                            "evidence_refs": ["S1"],
+                                        },
+                                    ],
+                                }
+                            ],
+                        },
+                        ensure_ascii=False,
+                    )
+                    return
+                yield json.dumps(
+                    {
+                        "values": ["修正后的值。"],
+                    },
+                    ensure_ascii=False,
+                )
+
+        citations = CitationRegistry()
+        citations.register(
+            {
+                "id": "rule-1",
+                "title": "规则",
+                "fullPath": "规则 > 条目",
+                "content": "规则正文",
+                "metadata": {},
+            }
+        )
+        metrics = RepairMetrics()
+
+        events = [
+            event
+            async for event in _stream_final_answer(
+                TamperingPatchGateway(),
+                [{"role": "user", "content": "规则问题"}],
+                citations,
+                answer_validator=lambda content: (
+                    ValidationIssue(
+                        "wrong_value",
+                        "值错误",
+                        path="answer.route.bad",
+                        expected="正确值",
+                        actual="错误值",
+                        evidence_refs=("S1",),
+                    ),
+                )
+                if "错误值" in content
+                else (),
+                repair_metrics=metrics,
+            )
+        ]
+
+        self.assertEqual(TamperingPatchGateway.calls, 2)
+        self.assertFalse(metrics.safe_refusal)
+        self.assertTrue(metrics.applied)
+        output = "".join(event.get("delta", "") for event in events)
+        self.assertIn("修正后的值", output)
+        self.assertIn("已验证值", output)
+
+    async def test_structured_repair_full_revalidation_failure_is_not_published(self) -> None:
+        class StillInvalidGateway:
+            calls = 0
+
+            async def stream_answer(self, _messages):
+                type(self).calls += 1
+                if type(self).calls == 1:
+                    yield json.dumps(
+                        {
+                            "schema_version": 1,
+                            "sections": [
+                                {
+                                    "id": "route",
+                                    "heading": "路线",
+                                    "claims": [
+                                        {
+                                            "id": "bad_claim",
+                                            "path": "answer.route.bad",
+                                            "text": "错误值。",
+                                            "evidence_refs": ["S1"],
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                        ensure_ascii=False,
+                    )
+                    return
+                yield json.dumps(
+                    {
+                        "values": ["仍然错误。"],
+                    },
+                    ensure_ascii=False,
+                )
+
+        citations = CitationRegistry()
+        citations.register(
+            {
+                "id": "rule-1",
+                "title": "规则",
+                "fullPath": "规则 > 条目",
+                "content": "规则正文",
+                "metadata": {},
+            }
+        )
+        metrics = RepairMetrics()
+
+        events = [
+            event
+            async for event in _stream_final_answer(
+                StillInvalidGateway(),
+                [{"role": "user", "content": "规则问题"}],
+                citations,
+                answer_validator=lambda _content: (
+                    ValidationIssue(
+                        "wrong_value",
+                        "值错误",
+                        path="answer.route.bad",
+                        evidence_refs=("S1",),
+                    ),
+                ),
+                repair_metrics=metrics,
+                draft_path_specs=(DraftPathSpec("answer.route.bad"),),
+            )
+        ]
+
+        output = "".join(event.get("delta", "") for event in events)
+        self.assertEqual(StillInvalidGateway.calls, 2)
+        self.assertTrue(metrics.applied)
+        self.assertTrue(metrics.safe_refusal)
+        self.assertEqual(metrics.failure_reason, "repair_validation_failed")
+        self.assertEqual(metrics.residual_issue_codes, ("wrong_value",))
+        self.assertEqual(metrics.residual_path_templates, ("answer.route.bad",))
+        self.assertNotIn("仍然错误", output)
+        self.assertIn({"type": "sources", "sources": []}, events)
+
+    async def test_nonrepairable_issue_safely_refuses_without_patch_call(self) -> None:
+        class DraftGateway:
+            calls = 0
+
+            async def stream_answer(self, _messages):
+                type(self).calls += 1
+                yield json.dumps(
+                    {
+                        "schema_version": 1,
+                        "sections": [
+                            {
+                                "id": "summary",
+                                "heading": "摘要",
+                                "claims": [
+                                    {
+                                        "id": "summary_claim",
+                                        "path": "answer.summary.claim",
+                                        "text": "不可修补的结论。",
+                                        "evidence_refs": ["S1"],
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                )
+
+        citations = CitationRegistry()
+        citations.register(
+            {
+                "id": "rule-1",
+                "title": "规则",
+                "fullPath": "规则 > 条目",
+                "content": "规则正文",
+                "metadata": {},
+            }
+        )
+        metrics = RepairMetrics()
+
+        events = [
+            event
+            async for event in _stream_final_answer(
+                DraftGateway(),
+                [{"role": "user", "content": "规则问题"}],
+                citations,
+                answer_validator=lambda _content: (
+                    ValidationIssue(
+                        "manual_review",
+                        "不能自动修补",
+                        path="answer.summary.claim",
+                        repairable=False,
+                    ),
+                ),
+                repair_metrics=metrics,
+            )
+        ]
+
+        self.assertEqual(DraftGateway.calls, 1)
+        self.assertTrue(metrics.safe_refusal)
+        self.assertEqual(metrics.failure_reason, "unrepairable_issue")
+        self.assertIn({"type": "sources", "sources": []}, events)
+
+    async def test_structured_renderer_failure_safely_refuses_without_sources(self) -> None:
+        class DraftGateway:
+            calls = 0
+
+            async def stream_answer(self, _messages):
+                type(self).calls += 1
+                yield json.dumps(
+                    {
+                        "schema_version": 1,
+                        "sections": [
+                            {
+                                "id": "summary",
+                                "heading": "摘要",
+                                "claims": [
+                                    {
+                                        "id": "summary_claim",
+                                        "path": "answer.summary.claim",
+                                        "text": "已验证结论。",
+                                        "evidence_refs": ["S1"],
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                )
+
+        citations = CitationRegistry()
+        citations.register(
+            {
+                "id": "rule-1",
+                "title": "规则",
+                "fullPath": "规则 > 条目",
+                "content": "规则正文",
+                "metadata": {},
+            }
+        )
+        metrics = RepairMetrics()
+
+        with patch("trpg_app.chat.timed_render", side_effect=RuntimeError("renderer")):
+            events = [
+                event
+                async for event in _stream_final_answer(
+                    DraftGateway(),
+                    [{"role": "user", "content": "规则问题"}],
+                    citations,
+                    answer_validator=lambda _content: (),
+                    repair_metrics=metrics,
+                )
+            ]
+
+        self.assertEqual(DraftGateway.calls, 1)
+        self.assertTrue(metrics.safe_refusal)
+        self.assertEqual(metrics.failure_reason, "render_failed")
+        self.assertIn({"type": "safe_refusal", "reason": "render_failed"}, events)
+        self.assertIn({"type": "sources", "sources": []}, events)
+        self.assertNotIn("已验证结论", "".join(event.get("delta", "") for event in events))
 
     async def test_final_answer_forwards_safe_deltas_before_provider_finishes(self) -> None:
         gateway = PausedStreamingGateway()

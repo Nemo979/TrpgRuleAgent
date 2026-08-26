@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import re
 import unicodedata
 from dataclasses import dataclass, replace
@@ -13,6 +14,8 @@ from typing import Any, Awaitable, Callable, Sequence
 from .chat import run_rule_turn
 from .config import ModelConfig, load_config
 from .libraries import Library, LibraryManifest
+from .observability_report import aggregate as aggregate_observability
+from .observability_report import load_jsonl
 
 # Status values emitted by trpg_app.chat during tool execution. Counting these
 # events gives an observational proxy for how many retrieval/read tool calls a
@@ -22,6 +25,16 @@ TOOL_STATUS_EVENTS = ("searching", "reading")
 # most 10 decisions and one tool per decision, plus recovery searches, so a well
 # behaved turn stays well under this. Used only to flag runaway tool usage.
 TOOL_CALL_BUDGET = 12
+
+
+def evaluation_artifact_paths(report: Path) -> tuple[Path, Path]:
+    """Derive fresh per-run metrics and observability companions from --report."""
+
+    stem = report.stem
+    return (
+        report.with_name(f"{stem}-metrics.jsonl"),
+        report.with_name(f"{stem}-observability.json"),
+    )
 
 
 @dataclass(frozen=True)
@@ -351,6 +364,7 @@ async def evaluate_model(
             sources: list[dict[str, Any]] = []
             error: dict[str, Any] | None = None
             statuses: list[str] = []
+            safe_refusal_reason: str | None = None
             tool_calls = 0
             try:
                 turn_options: dict[str, Any] = {
@@ -383,6 +397,8 @@ async def evaluate_model(
                                 tool_calls += 1
                         elif event_type == "error":
                             error = dict(event)
+                        elif event_type == "safe_refusal":
+                            safe_refusal_reason = str(event.get("reason", "unknown"))
             except TimeoutError:
                 error = {
                     "type": "model_timeout",
@@ -401,7 +417,12 @@ async def evaluate_model(
             hallucination_free: bool | None = None
             judge_reason: str | None = None
             judge_error: str | None = None
-            if judge is not None and answer and error is None:
+            if (
+                judge is not None
+                and answer
+                and error is None
+                and safe_refusal_reason is None
+            ):
                 facts = tuple(option for group in turn.required_any for option in group)
                 reference = build_reference(turn.relevant_ids, reference_map or {})
                 try:
@@ -433,6 +454,8 @@ async def evaluate_model(
                     "hallucinationFree": hallucination_free,
                     "judgeReason": judge_reason,
                     "judgeError": judge_error,
+                    "safeRefusal": safe_refusal_reason is not None,
+                    "safeRefusalReason": safe_refusal_reason,
                     **grade,
                 }
             )
@@ -451,11 +474,15 @@ async def evaluate_model(
         )
     all_turn_rows = [row for case_row in rows for row in case_row["turns"]]
     answered_turns = [row for row in all_turn_rows if row.get("answer")]
+    substantive_answer_turns = [
+        row for row in answered_turns if not row.get("safeRefusal")
+    ]
     unsupported_turns = [
         row
-        for row in answered_turns
+        for row in substantive_answer_turns
         if not row["sourceMatch"] and row.get("error") is None
     ]
+    safe_refusal_turns = [row for row in all_turn_rows if row.get("safeRefusal")]
     judged_rows = [row for row in all_turn_rows if row.get("factualCorrect") is not None]
     factual_passed = sum(1 for row in judged_rows if row["factualCorrect"])
     hallucinated = sum(1 for row in judged_rows if row.get("hallucinationFree") is False)
@@ -474,7 +501,11 @@ async def evaluate_model(
         "toolCallMax": max((row["toolCalls"] for row in all_turn_rows), default=0),
         "unsupportedTurns": len(unsupported_turns),
         "unsupportedRate": round(
-            len(unsupported_turns) / max(len(answered_turns), 1), 4
+            len(unsupported_turns) / max(len(substantive_answer_turns), 1), 4
+        ),
+        "safeRefusalTurns": len(safe_refusal_turns),
+        "safeRefusalRate": round(
+            len(safe_refusal_turns) / max(len(all_turn_rows), 1), 4
         ),
         "judgedTurns": len(judged_rows),
         "factualPassRate": round(factual_passed / len(judged_rows), 4) if judged_rows else None,
@@ -502,6 +533,16 @@ def parse_args() -> argparse.Namespace:
         help="Configured model ID to use as an LLM judge (optional; factual/consistency check)",
     )
     parser.add_argument("--report", type=Path, required=True)
+    parser.add_argument(
+        "--metrics",
+        type=Path,
+        help="Turn metrics JSONL; defaults to <report-stem>-metrics.jsonl",
+    )
+    parser.add_argument(
+        "--observability-report",
+        type=Path,
+        help="Aggregated metrics JSON; defaults to <report-stem>-observability.json",
+    )
     parser.add_argument(
         "--dynamic-evidence-budget",
         action="store_true",
@@ -535,6 +576,20 @@ async def async_main() -> None:
     args = parse_args()
     if args.timeout_seconds is not None and args.timeout_seconds <= 0:
         raise ValueError("timeout-seconds must be positive")
+    derived_metrics, derived_observability = evaluation_artifact_paths(args.report)
+    metrics_path = (
+        args.metrics
+        or (
+            Path(os.environ["TRPG_TURN_METRICS_PATH"])
+            if os.environ.get("TRPG_TURN_METRICS_PATH")
+            else derived_metrics
+        )
+    ).resolve()
+    observability_path = (args.observability_report or derived_observability).resolve()
+    metrics_path.parent.mkdir(parents=True, exist_ok=True)
+    metrics_path.unlink(missing_ok=True)
+    os.environ["TRPG_TURN_METRICS_PATH"] = str(metrics_path)
+
     config = load_config(args.config)
     requested = {value.strip() for value in args.models.split(",") if value.strip()}
     models = [model for model in config.models if model.id in requested]
@@ -587,6 +642,13 @@ async def async_main() -> None:
     result = {"libraryRevision": manifest.revision, "models": reports}
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    if metrics_path.exists():
+        observability = aggregate_observability(load_jsonl(metrics_path))
+        observability_path.parent.mkdir(parents=True, exist_ok=True)
+        observability_path.write_text(
+            json.dumps(observability, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
 
 
 def main() -> None:

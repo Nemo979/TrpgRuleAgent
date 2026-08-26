@@ -4,7 +4,14 @@ import unittest
 from dataclasses import replace
 from types import SimpleNamespace
 
-from trpg_app.fact_ledger import FactLedger, FactRecord, ValidationIssue
+from trpg_app.fact_ledger import (
+    DraftClaimContract,
+    DraftPathSpec,
+    FactLedger,
+    FactRecord,
+    RepairPathMapping,
+    ValidationIssue,
+)
 from trpg_app.fact_ledger_adapter import (
     FACT_LEDGER_ADAPTER_PROTOCOL_VERSION,
     AdapterKey,
@@ -57,6 +64,29 @@ class StubAdapter:
         self.validate_calls += 1
         return (ValidationIssue("capacity", "capacity is inconsistent"),) if "9" in content else ()
 
+    def draft_path_specs(self, ledger):
+        return (DraftPathSpec("answer.entries[{key}].capacity"),)
+
+    def required_draft_paths(self, ledger):
+        return ("answer.entries[entry-a].capacity",)
+
+    def draft_claim_contracts(self, ledger):
+        return (
+            DraftClaimContract(
+                "answer.entries[entry-a].capacity",
+                evidence_refs=("D1",),
+            ),
+        )
+
+    def repair_path_mappings(self, ledger):
+        return (
+            RepairPathMapping(
+                "answer.entries[{key}].raw_capacity",
+                "answer.entries[{key}].capacity",
+                ("capacity",),
+            ),
+        )
+
 
 def evidence(*, ruleset_id="catalog", document_id="entry-a"):
     return [("D1", {"id": document_id, "rulesetId": ruleset_id, "title": "A", "content": "capacity 8"})]
@@ -73,6 +103,33 @@ class FactLedgerAdapterRegistryTest(unittest.TestCase):
         self.assertEqual(runtime.status, AdapterStatus.MATCHED)
         self.assertEqual(runtime.public(), {"count": 1})
         self.assertEqual([item.code for item in runtime.validate("capacity 9")], ["capacity"])
+        self.assertEqual(
+            runtime.draft_path_specs(),
+            (DraftPathSpec("answer.entries[{key}].capacity"),),
+        )
+        self.assertEqual(
+            runtime.required_draft_paths(),
+            ("answer.entries[entry-a].capacity",),
+        )
+        self.assertEqual(
+            runtime.draft_claim_contracts(),
+            (
+                DraftClaimContract(
+                    "answer.entries[entry-a].capacity",
+                    evidence_refs=("D1",),
+                ),
+            ),
+        )
+        self.assertEqual(
+            runtime.repair_path_mappings(),
+            (
+                RepairPathMapping(
+                    "answer.entries[{key}].raw_capacity",
+                    "answer.entries[{key}].capacity",
+                    ("capacity",),
+                ),
+            ),
+        )
         self.assertEqual((adapter.build_calls, adapter.public_calls, adapter.validate_calls), (1, 1, 1))
 
         for identity in (
@@ -179,6 +236,18 @@ class FactLedgerAdapterRegistryTest(unittest.TestCase):
         self.assertEqual(result.validate("answer"), ())
         self.assertEqual(result.status, AdapterStatus.VALIDATION_FAILED)
 
+        class NonCanonicalRequiredPathAdapter(StubAdapter):
+            def required_draft_paths(self, ledger):
+                return ("answer.other[value]",)
+
+        result = FactLedgerRegistry((NonCanonicalRequiredPathAdapter(),)).build(
+            IDENTITY,
+            "compare",
+            evidence(),
+        )
+        self.assertEqual(result.required_draft_paths(), ())
+        self.assertEqual(result.status, AdapterStatus.PUBLICATION_FAILED)
+
         class ForgedIssueAdapter(StubAdapter):
             def validate(self, content, ledger):
                 return (
@@ -196,6 +265,53 @@ class FactLedgerAdapterRegistryTest(unittest.TestCase):
         )
         self.assertEqual(result.validate("answer"), ())
         self.assertEqual(result.status, AdapterStatus.VALIDATION_FAILED)
+
+        class NonCanonicalRepairTargetAdapter(StubAdapter):
+            def repair_path_mappings(self, ledger):
+                return (
+                    RepairPathMapping(
+                        "answer.entries[{key}].raw_capacity",
+                        "answer.other[{key}]",
+                        ("capacity",),
+                    ),
+                )
+
+        result = FactLedgerRegistry((NonCanonicalRepairTargetAdapter(),)).build(
+            IDENTITY,
+            "compare",
+            evidence(),
+        )
+        self.assertEqual(result.repair_path_mappings(), ())
+        self.assertEqual(result.status, AdapterStatus.PUBLICATION_FAILED)
+
+        class IncompleteClaimContractAdapter(StubAdapter):
+            def draft_claim_contracts(self, ledger):
+                return ()
+
+        result = FactLedgerRegistry((IncompleteClaimContractAdapter(),)).build(
+            IDENTITY,
+            "compare",
+            evidence(),
+        )
+        self.assertEqual(result.draft_claim_contracts(), ())
+        self.assertEqual(result.status, AdapterStatus.PUBLICATION_FAILED)
+
+        class ForgedClaimContractAdapter(StubAdapter):
+            def draft_claim_contracts(self, ledger):
+                return (
+                    DraftClaimContract(
+                        "answer.entries[entry-a].capacity",
+                        evidence_refs=("FORGED",),
+                    ),
+                )
+
+        result = FactLedgerRegistry((ForgedClaimContractAdapter(),)).build(
+            IDENTITY,
+            "compare",
+            evidence(),
+        )
+        self.assertEqual(result.draft_claim_contracts(), ())
+        self.assertEqual(result.status, AdapterStatus.PUBLICATION_FAILED)
 
     def test_rejects_forged_or_non_core_ledgers(self) -> None:
         class ForgedEvidenceAdapter(StubAdapter):

@@ -12,6 +12,7 @@ from trpg_app.answer_evaluation import (
     _normalize,
     _parse_judge_response,
     build_reference,
+    evaluation_artifact_paths,
     evaluate_model,
     expand_history,
     grade_turn,
@@ -65,6 +66,17 @@ class _FakeLibrary:
 
 
 class AnswerEvaluationTest(unittest.TestCase):
+    def test_derives_metrics_and_observability_paths_from_report(self) -> None:
+        metrics, observability = evaluation_artifact_paths(
+            Path("/private/tmp/stage3-result.json")
+        )
+
+        self.assertEqual(metrics, Path("/private/tmp/stage3-result-metrics.jsonl"))
+        self.assertEqual(
+            observability,
+            Path("/private/tmp/stage3-result-observability.json"),
+        )
+
     def test_loads_multi_turn_cases(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "cases.jsonl"
@@ -348,6 +360,34 @@ class AnswerEvaluationTest(unittest.TestCase):
         self.assertFalse(turn["sourceMatch"])
         self.assertEqual(report["unsupportedTurns"], 1)
         self.assertEqual(report["unsupportedRate"], 1.0)
+
+    def test_evaluate_counts_safe_refusal_separately(self) -> None:
+        class _Judge:
+            calls = 0
+
+            async def __call__(self, _input):
+                type(self).calls += 1
+                return {"factual_correct": True, "hallucination_free": True}
+
+        cases = [AnswerCase("c1", (AnswerTurn("硬度？", ("p",), (("60",),)),))]
+        events = [
+            {"type": "safe_refusal", "reason": "repair_validation_failed"},
+            {"type": "text_delta", "delta": "候选答案未通过服务器事实校验。"},
+            {"type": "sources", "sources": []},
+            {"type": "done"},
+        ]
+
+        report = self._run_with_judge(cases, [events], _Judge())
+
+        turn = report["cases"][0]["turns"][0]
+        self.assertTrue(turn["safeRefusal"])
+        self.assertEqual(turn["safeRefusalReason"], "repair_validation_failed")
+        self.assertEqual(report["safeRefusalTurns"], 1)
+        self.assertEqual(report["safeRefusalRate"], 1.0)
+        self.assertEqual(report["unsupportedTurns"], 0)
+        self.assertEqual(report["unsupportedRate"], 0.0)
+        self.assertEqual(_Judge.calls, 0)
+        self.assertEqual(report["judgedTurns"], 0)
 
     def test_evaluate_handles_timeout_as_error(self) -> None:
         class _TimeoutRunner:

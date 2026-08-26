@@ -43,8 +43,11 @@ npm run report:observability:pf
 Stage 3 同时聚合 Planner 是否使用、任务总数/完成数/失败数、Planner/Executor 耗时，以及合成
 契约版本、检查数、未决输入数和缺证据检查数；这些字段仍然只包含布尔值和数值，不包含计划查询、
 任务摘要、问题或规则正文。
-Stage 3.2 继续记录 Fact Ledger 版本、事实记录数和候选答案校验问题数。Ledger 内容、失败句子和
-重试提示不会写入 turn metrics。
+Stage 3.2 继续记录 Fact Ledger 版本、事实记录数和候选答案校验问题数。结构化修补额外记录
+`factRepairAttempted`、`factRepairApplied`、`factRepairPatchCount`、`factRepairSafeRefusal`、
+稳定失败原因，以及草稿解析、修补和确定性渲染耗时；报告聚合 patch 数和三段延迟。Ledger 内容、
+失败句子、草稿、patch 和修补提示不会写入 turn metrics。`usage.calls` 用于直接比较未修补的一次
+生成与触发修补的两次生成；修补路径的硬上限由集成测试固定为两次模型调用。
 与已有报告比较时直接调用聚合器：
 
 ```bash

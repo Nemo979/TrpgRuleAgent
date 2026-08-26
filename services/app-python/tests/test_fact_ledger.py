@@ -64,7 +64,7 @@ class FactLedgerTest(unittest.TestCase):
         self.assertEqual(
             PF1E_FACT_LEDGER_ADAPTER.public(value),
             {
-                "version": 1,
+                "version": 2,
                 "class_levels": [
                     {
                         "class": "法师",
@@ -98,7 +98,26 @@ class FactLedgerTest(unittest.TestCase):
                         "source": "S2",
                     }
                 ],
+                "prestige_spell_advancements": [],
                 "feat_count": 2,
+                "feats": [],
+                "feat_slots": [],
+                "base_attack": [],
+                "spells": [],
+                "draft_path_templates": {
+                    "class_allocation": "answer.build.levels",
+                    "prestige_requirements": "answer.classes[<class>].requirements",
+                    "level_feats": "answer.levels[<level>].feats",
+                    "level_spell_progression": "answer.levels[<level>].spells",
+                    "level_spell_slots": "answer.levels[<level>].spell_slots[<spell_level>]",
+                    "feat": "answer.feats[<name>]",
+                    "named_spell": "answer.spells[<name>]",
+                    "spell_level": "answer.spells[<name>].level",
+                    "spell_school": "answer.spells[<name>].school",
+                    "spell_duration": "answer.spells[<name>].duration",
+                    "spell_saving_throw": "answer.spells[<name>].saving_throw",
+                    "equipment_stats": "answer.equipment.stats",
+                },
             },
         )
 
@@ -131,6 +150,48 @@ class FactLedgerTest(unittest.TestCase):
 7级法师可以获得4环法术位。[S1]
 """
         self.assertEqual(validate_pf1e_fact_answer(answer, ledger()), ())
+
+    def test_rejects_shifted_compact_spell_slot_rows_and_accepts_explicit_vector(self) -> None:
+        expected = {
+                ("spell_slot_count", "answer.levels[5].spell_slots[1]"),
+                ("spell_slot_count", "answer.levels[5].spell_slots[2]"),
+                ("spell_slot_count", "answer.levels[5].spell_slots[3]"),
+        }
+        for shifted in (
+            "法师5级时1环4位、2环3位、3环2位。[S1]",
+            "5级法师法术位：4个1环，3个2环，2个3环。[S1]",
+        ):
+            with self.subTest(shifted=shifted):
+                issues = validate_pf1e_fact_answer(shifted, ledger())
+                self.assertEqual(
+                    {(issue.code, issue.path) for issue in issues},
+                    expected,
+                )
+        self.assertEqual(
+            validate_pf1e_fact_answer(
+                "法师5级每日法术位4/3/2/1（0/1/2/3环）。[S1]",
+                ledger(),
+            ),
+            (),
+        )
+
+    def test_required_spell_paths_only_cover_levels_present_in_evidence(self) -> None:
+        value = build_pf1e_fact_ledger(
+            "规划5到10级法师法术",
+            [("S1", {"title": "法师（Wizard）", "content": WIZARD})],
+        )
+
+        self.assertEqual(
+            PF1E_FACT_LEDGER_ADAPTER.required_draft_paths(value),
+            (
+                "answer.build.levels",
+                "answer.summary[spell_progression]",
+                "answer.levels[5].spells",
+                "answer.levels[7].spells",
+                "answer.levels[9].spells",
+                "answer.levels[10].spells",
+            ),
+        )
 
     def test_rejects_named_feat_missing_from_read_evidence(self) -> None:
         value = build_pf1e_fact_ledger(
