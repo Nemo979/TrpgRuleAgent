@@ -10,14 +10,16 @@ from typing import Any, Iterable, Protocol, runtime_checkable
 
 from .fact_ledger import (
     FACT_LEDGER_CORE_SCHEMA_VERSION,
+    DraftPathSpec,
+    DraftClaimContract,
     EvidenceDocument,
     FactLedger,
+    RepairPathMapping,
     ValidationIssue,
-    DraftPathSpec,
 )
 
 
-FACT_LEDGER_ADAPTER_PROTOCOL_VERSION = 2
+FACT_LEDGER_ADAPTER_PROTOCOL_VERSION = 14
 
 
 def _identity_part(value: str) -> str:
@@ -80,6 +82,20 @@ class FactLedgerAdapter(Protocol):
         ...
 
     def draft_path_specs(self, ledger: FactLedger) -> tuple[DraftPathSpec, ...]:
+        ...
+
+    def required_draft_paths(self, ledger: FactLedger) -> tuple[str, ...]:
+        ...
+
+    def draft_claim_contracts(
+        self, ledger: FactLedger
+    ) -> tuple[DraftClaimContract, ...]:
+        ...
+
+    def repair_path_mappings(
+        self,
+        ledger: FactLedger,
+    ) -> tuple[RepairPathMapping, ...]:
         ...
 
 
@@ -177,6 +193,91 @@ class FactLedgerRuntime:
         except Exception as error:
             self.status = AdapterStatus.PUBLICATION_FAILED
             self.reason = f"adapter draft path publication failed: {type(error).__name__}"
+            return ()
+
+    def required_draft_paths(self) -> tuple[str, ...]:
+        if not self.active:
+            return ()
+        assert self.adapter is not None and self.ledger is not None
+        try:
+            paths = tuple(self.adapter.required_draft_paths(self.ledger))
+            if any(not isinstance(path, str) or not path for path in paths):
+                raise TypeError("adapter required draft path is invalid")
+            if len(set(paths)) != len(paths):
+                raise ValueError("adapter required draft paths must be unique")
+            specs = self.draft_path_specs()
+            if not self.active:
+                return ()
+            # Import at the publication boundary to keep the protocol module
+            # independent of the structured-answer implementation at import time.
+            from .fact_ledger_repair import canonicalize_draft_path
+
+            if any(canonicalize_draft_path(path, specs) != path for path in paths):
+                raise ValueError("adapter required draft path must be canonical")
+            return paths
+        except Exception as error:
+            self.status = AdapterStatus.PUBLICATION_FAILED
+            self.reason = f"adapter required draft path publication failed: {type(error).__name__}"
+            return ()
+
+    def draft_claim_contracts(self) -> tuple[DraftClaimContract, ...]:
+        if not self.active:
+            return ()
+        assert self.adapter is not None and self.ledger is not None
+        try:
+            contracts = tuple(self.adapter.draft_claim_contracts(self.ledger))
+            if any(not isinstance(item, DraftClaimContract) for item in contracts):
+                raise TypeError("adapter draft claim contract is invalid")
+            paths = [item.path for item in contracts]
+            if len(set(paths)) != len(paths):
+                raise ValueError("adapter draft claim contract paths must be unique")
+            required = self.required_draft_paths()
+            if not self.active:
+                return ()
+            if tuple(paths) != required:
+                raise ValueError("adapter draft claim contracts must cover required paths")
+            registered = set(self.ledger.registered_evidence_refs)
+            published = {
+                ref
+                for item in contracts
+                for ref in (
+                    *item.evidence_refs,
+                    *(ref for option in item.selection_options for ref in option.evidence_refs),
+                )
+            }
+            if published - registered:
+                raise ValueError("adapter draft claim contract references unregistered evidence")
+            return contracts
+        except Exception as error:
+            self.status = AdapterStatus.PUBLICATION_FAILED
+            self.reason = f"adapter draft claim contract publication failed: {type(error).__name__}"
+            return ()
+
+    def repair_path_mappings(self) -> tuple[RepairPathMapping, ...]:
+        if not self.active:
+            return ()
+        assert self.adapter is not None and self.ledger is not None
+        try:
+            mappings = tuple(self.adapter.repair_path_mappings(self.ledger))
+            if any(not isinstance(item, RepairPathMapping) for item in mappings):
+                raise TypeError("adapter repair path mapping is invalid")
+            if len(set(mappings)) != len(mappings):
+                raise ValueError("adapter repair path mappings must be unique")
+            specs = self.draft_path_specs()
+            if not self.active:
+                return ()
+            from .fact_ledger_repair import canonicalize_draft_path_template
+
+            if any(
+                canonicalize_draft_path_template(item.target_path_template, specs)
+                != item.target_path_template
+                for item in mappings
+            ):
+                raise ValueError("adapter repair target path template must be canonical")
+            return mappings
+        except Exception as error:
+            self.status = AdapterStatus.PUBLICATION_FAILED
+            self.reason = f"adapter repair path publication failed: {type(error).__name__}"
             return ()
 
 

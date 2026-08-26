@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import re
 import unicodedata
 from dataclasses import dataclass, replace
@@ -13,6 +14,8 @@ from typing import Any, Awaitable, Callable, Sequence
 from .chat import run_rule_turn
 from .config import ModelConfig, load_config
 from .libraries import Library, LibraryManifest
+from .observability_report import aggregate as aggregate_observability
+from .observability_report import load_jsonl
 
 # Status values emitted by trpg_app.chat during tool execution. Counting these
 # events gives an observational proxy for how many retrieval/read tool calls a
@@ -22,6 +25,16 @@ TOOL_STATUS_EVENTS = ("searching", "reading")
 # most 10 decisions and one tool per decision, plus recovery searches, so a well
 # behaved turn stays well under this. Used only to flag runaway tool usage.
 TOOL_CALL_BUDGET = 12
+
+
+def evaluation_artifact_paths(report: Path) -> tuple[Path, Path]:
+    """Derive fresh per-run metrics and observability companions from --report."""
+
+    stem = report.stem
+    return (
+        report.with_name(f"{stem}-metrics.jsonl"),
+        report.with_name(f"{stem}-observability.json"),
+    )
 
 
 @dataclass(frozen=True)
@@ -521,6 +534,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument(
+        "--metrics",
+        type=Path,
+        help="Turn metrics JSONL; defaults to <report-stem>-metrics.jsonl",
+    )
+    parser.add_argument(
+        "--observability-report",
+        type=Path,
+        help="Aggregated metrics JSON; defaults to <report-stem>-observability.json",
+    )
+    parser.add_argument(
         "--dynamic-evidence-budget",
         action="store_true",
         help="Enable the deterministic Stage 1 evidence policy for this run",
@@ -553,6 +576,20 @@ async def async_main() -> None:
     args = parse_args()
     if args.timeout_seconds is not None and args.timeout_seconds <= 0:
         raise ValueError("timeout-seconds must be positive")
+    derived_metrics, derived_observability = evaluation_artifact_paths(args.report)
+    metrics_path = (
+        args.metrics
+        or (
+            Path(os.environ["TRPG_TURN_METRICS_PATH"])
+            if os.environ.get("TRPG_TURN_METRICS_PATH")
+            else derived_metrics
+        )
+    ).resolve()
+    observability_path = (args.observability_report or derived_observability).resolve()
+    metrics_path.parent.mkdir(parents=True, exist_ok=True)
+    metrics_path.unlink(missing_ok=True)
+    os.environ["TRPG_TURN_METRICS_PATH"] = str(metrics_path)
+
     config = load_config(args.config)
     requested = {value.strip() for value in args.models.split(",") if value.strip()}
     models = [model for model in config.models if model.id in requested]
@@ -605,6 +642,13 @@ async def async_main() -> None:
     result = {"libraryRevision": manifest.revision, "models": reports}
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    if metrics_path.exists():
+        observability = aggregate_observability(load_jsonl(metrics_path))
+        observability_path.parent.mkdir(parents=True, exist_ok=True)
+        observability_path.write_text(
+            json.dumps(observability, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
 
 
 def main() -> None:

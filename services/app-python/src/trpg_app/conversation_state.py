@@ -11,6 +11,7 @@ _FIELDS = (
     "追加特技",
     "角色类型",
     "职业",
+    "变体",
     "种族",
     "真身",
     "正体",
@@ -23,7 +24,7 @@ _FIELD_ALIASES = {
     "基本特性": "基本特技",
     "正体": "真身",
 }
-_ENTITY_FIELDS = ("真身", "职业", "种族", "角色类型")
+_ENTITY_FIELDS = ("真身", "职业", "变体", "种族", "角色类型")
 _CATEGORY_TERMS = ("弱点", "特技", "技能", "专长", "能力", "属性")
 _ABILITY_NAMES = ("力量", "敏捷", "体质", "智力", "感知", "魅力")
 _ABILITY_PATTERN = "|".join(_ABILITY_NAMES)
@@ -52,6 +53,9 @@ class ConversationState:
     plannedDipLevels: dict[str, int] = field(default_factory=dict)
     rolePreference: str | None = None
     race: str | None = None
+    characterClass: str | None = None
+    archetype: str | None = None
+    pointBuyBudget: int | None = None
     abilityScores: dict[str, int] = field(default_factory=dict)
     feats: list[str] = field(default_factory=list)
     spells: list[str] = field(default_factory=list)
@@ -82,6 +86,26 @@ class ConversationState:
                 value = _clean_value(match.group("value"))
                 if value:
                     self.facts[field_name] = value
+
+        # Compact character-sheet shorthand such as “职业通灵者，变体虚空之声”
+        # is common in Chinese TRPG conversations. Keep it bounded to explicit
+        # field labels and punctuation-delimited values.
+        for match in re.finditer(
+            r"(?P<field>职业|变体|种族)\s*(?:为|是|=|：|:)?\s*"
+            r"(?P<value>[^，,。！？!?；;\n]{1,40})",
+            content,
+        ):
+            value = _clean_value(match.group("value"))
+            if value:
+                self.facts[match.group("field")] = value
+        if "种族" not in self.facts:
+            race_match = re.search(
+                r"(?:^|[，,。！？!?；;])\s*(?P<race>[\u4e00-\u9fff]{1,8}族)"
+                r"\s*(?=$|[，,。！？!?；;])",
+                content,
+            )
+            if race_match:
+                self.facts["种族"] = race_match.group("race")
 
         self._observe_structured_state(content)
 
@@ -116,6 +140,14 @@ class ConversationState:
         for field_name, value in self.facts.items():
             if field_name == "种族":
                 self.race = value
+            elif field_name == "职业":
+                self.characterClass = value
+            elif field_name == "变体":
+                self.archetype = value
+
+        point_buy = _extract_point_buy_budget(content)
+        if point_buy is not None:
+            self.pointBuyBudget = point_buy
 
         preference = _extract_role_preference(content)
         if preference is not None:
@@ -143,6 +175,9 @@ class ConversationState:
                 "plannedDipLevels": self.plannedDipLevels,
                 "rolePreference": self.rolePreference,
                 "race": self.race,
+                "characterClass": self.characterClass,
+                "archetype": self.archetype,
+                "pointBuyBudget": self.pointBuyBudget,
                 "abilityScores": self.abilityScores,
                 "feats": self.feats,
                 "spells": self.spells,
@@ -162,6 +197,9 @@ class ConversationState:
             or self.plannedDipLevels
             or self.rolePreference
             or self.race
+            or self.characterClass
+            or self.archetype
+            or self.pointBuyBudget is not None
             or self.abilityScores
             or self.feats
             or self.spells
@@ -178,6 +216,9 @@ class ConversationState:
                 len(self.plannedDipLevels),
                 int(bool(self.rolePreference)),
                 int(bool(self.race)),
+                int(bool(self.characterClass)),
+                int(bool(self.archetype)),
+                int(self.pointBuyBudget is not None),
                 len(self.abilityScores),
                 len(self.feats),
                 len(self.spells),
@@ -219,6 +260,20 @@ class ConversationState:
             "",
         )
         combined = f"{latest_user_message} {query}"
+        is_ability_build_question = any(
+            term in combined
+            for term in (
+                "购点",
+                "point buy",
+                "属性",
+                "力量",
+                "敏捷",
+                "体质",
+                "智力",
+                "感知",
+                "魅力",
+            )
+        )
         is_selection = bool(
             re.search(r"选择(?:了)?.+(?:作为|为).+", latest_user_message)
         )
@@ -232,6 +287,14 @@ class ConversationState:
             additions.append(entity)
         elif self.task and re.search(r"(?:下一步|接下来)", combined):
             additions.append(self.task)
+        if is_ability_build_question:
+            additions.extend(
+                value
+                for value in (self.race, self.characterClass, self.archetype)
+                if value
+            )
+            if self.pointBuyBudget is not None:
+                additions.append(f"{self.pointBuyBudget}点购点")
         if self.task and _is_task_scoped_entity_lookup(combined):
             additions.append(self.task)
         base = (
@@ -251,6 +314,7 @@ def _extract_character_level(content: str) -> int | None:
         r"(?:角色|人物|总)?(?:等级|级别)\s*(?:为|是|=|：|:)\s*(?P<level>\d+)",
         rf"(?P<level>\d+)\s*级?\s*(?:{'|'.join(_CLASS_HINTS)})",
         r"(?P<level>\d+)\s*级(?:角色|人物)",
+        r"(?<!\d)(?P<level>\d+)\s*级(?=$|[，,。！？!?；;\s])",
     )
     for pattern in patterns:
         match = re.search(pattern, content)
@@ -288,7 +352,8 @@ def _extract_class_levels(
             continue
         segment = segment_match.group(0).strip()
         level_match = re.search(
-            r"(?P<level>\d+)\s*级?\s*(?P<class>[^\s\d][^\s]*)", segment
+            r"(?P<level>\d+)\s*级\s*(?P<class>[^\s\d，,。！？!?；;][^\s，,。！？!?；;]*)",
+            segment,
         )
         if level_match:
             class_name = _clean_class_name(level_match.group("class"))
@@ -306,6 +371,21 @@ def _extract_class_levels(
                 levels[class_name] = int(level_match.group("level"))
                 break
     return levels
+
+
+def _extract_point_buy_budget(content: str) -> int | None:
+    patterns = (
+        r"(?<!\d)(?P<budget>\d{1,2})\s*(?:点)?\s*(?:购点|购买点|point\s*buy|buy)(?:法)?",
+        r"(?:购点|购买点|point\s*buy)\s*(?:法|预算|为|是|=|：|:)?\s*"
+        r"(?P<budget>\d{1,2})\s*点?",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, content, re.IGNORECASE)
+        if match:
+            budget = int(match.group("budget"))
+            if 1 <= budget <= 99:
+                return budget
+    return None
 
 
 def _extract_planned_class_levels(content: str) -> dict[str, int | None]:

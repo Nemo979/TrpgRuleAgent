@@ -29,6 +29,7 @@ models:
     max_output_tokens: 8192
     request_timeout_seconds: 120
     max_retries: 1
+    disable_thinking: true
 
   - id: agnes-2.5-flash
     label: Agnes 2.5 Flash

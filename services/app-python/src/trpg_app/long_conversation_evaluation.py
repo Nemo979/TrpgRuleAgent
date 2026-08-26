@@ -9,6 +9,7 @@ from typing import Any, Sequence
 
 from .answer_evaluation import expand_history
 from .context_budget import ContextBudget
+from .chat import _select_prior_assistant_artifact
 from .conversation_state import ConversationState
 from .observability import estimate_tokens, summarize_messages
 
@@ -60,6 +61,8 @@ def evaluate_long_cases(cases: Sequence[dict[str, Any]]) -> dict[str, Any]:
     revision_correct = 0
     probe_total = 0
     probe_correct = 0
+    artifact_probe_total = 0
+    artifact_probe_correct = 0
     for case in cases:
         history = list(case["expandedHistory"])
         state = ConversationState.from_messages(history)
@@ -124,6 +127,31 @@ def evaluate_long_cases(cases: Sequence[dict[str, Any]]) -> dict[str, Any]:
             )
             probe_correct += int(probe_passed)
 
+        artifact_probe = case.get("artifactProbe")
+        artifact_probe_passed = True
+        if artifact_probe is not None:
+            if not isinstance(artifact_probe, dict):
+                raise ValueError(f"invalid artifactProbe in {case['id']}")
+            artifact_probe_total += 1
+            latest_user_message = str(
+                artifact_probe.get("latestUserMessage", "")
+            )
+            artifact = _select_prior_assistant_artifact(
+                [
+                    *history,
+                    {"role": "user", "content": latest_user_message},
+                ],
+                latest_user_message,
+            )
+            artifact_probe_passed = all(
+                str(value) in artifact
+                for value in artifact_probe.get("mustContain", [])
+            ) and all(
+                str(value) not in artifact
+                for value in artifact_probe.get("mustNotContain", [])
+            )
+            artifact_probe_correct += int(artifact_probe_passed)
+
         passed = bool(
             len(correct_paths) == len(expected)
             and violations == 0
@@ -131,6 +159,7 @@ def evaluate_long_cases(cases: Sequence[dict[str, Any]]) -> dict[str, Any]:
             and latest_preserved
             and revision_matches_expectation
             and probe_passed
+            and artifact_probe_passed
         )
         original_summary = summarize_messages(history)
         kept_summary = summarize_messages(kept)
@@ -153,6 +182,7 @@ def evaluate_long_cases(cases: Sequence[dict[str, Any]]) -> dict[str, Any]:
                 "revisionMismatch": actual_revision_mismatch,
                 "revisionContractPassed": revision_matches_expectation,
                 "probePassed": probe_passed,
+                "artifactProbePassed": artifact_probe_passed,
                 "passed": passed,
             }
         )
@@ -178,6 +208,9 @@ def evaluate_long_cases(cases: Sequence[dict[str, Any]]) -> dict[str, Any]:
         ),
         "revisionMismatchAccuracy": round(revision_correct / case_count, 4),
         "queryProbeAccuracy": round(probe_correct / max(probe_total, 1), 4),
+        "artifactReferenceAccuracy": round(
+            artifact_probe_correct / max(artifact_probe_total, 1), 4
+        ),
         "cases": rows,
     }
 

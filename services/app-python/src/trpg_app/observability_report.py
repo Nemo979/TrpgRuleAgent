@@ -54,6 +54,13 @@ _METRICS = {
         "context",
         "factValidationIssueCount",
     ),
+    "factDraft.contractCount": ("context", "factDraftContractCount"),
+    "factDraft.serverClaimCount": ("context", "factDraftServerClaimCount"),
+    "factDraft.selectionClaimCount": ("context", "factDraftSelectionClaimCount"),
+    "factDraft.selectionValueCount": ("context", "factDraftSelectionValueCount"),
+    "factDraft.freeTextClaimCount": ("context", "factDraftFreeTextClaimCount"),
+    "factDraft.semanticFallbackCount": ("context", "factDraftSemanticFallbackCount"),
+    "factDraft.selectionFallbackCount": ("context", "factDraftSelectionFallbackCount"),
     "latency.factLedgerBuildSeconds": ("context", "factLedgerBuildSeconds"),
     "latency.factLedgerValidationSeconds": (
         "context",
@@ -134,6 +141,14 @@ def aggregate(records: list[dict[str, Any]]) -> dict[str, Any]:
         ("factRepairSafeRefusal", "factRepairSafeRefusal"),
         ("factRepairFailureReason", "factRepairFailureReason"),
         ("factRepairTargetFailureReason", "factRepairTargetFailureReason"),
+        ("factDraftParseFailureReason", "factDraftParseFailureReason"),
+        ("factRepairPatchFailureReason", "factRepairPatchFailureReason"),
+        ("factDraftJsonRecoveryAttempted", "factDraftJsonRecoveryAttempted"),
+        ("factDraftJsonRecoveryApplied", "factDraftJsonRecoveryApplied"),
+        ("factDraftContractRecoveryAttempted", "factDraftContractRecoveryAttempted"),
+        ("factDraftContractRecoveryApplied", "factDraftContractRecoveryApplied"),
+        ("factRepairJsonRecoveryAttempted", "factRepairJsonRecoveryAttempted"),
+        ("factRepairJsonRecoveryApplied", "factRepairJsonRecoveryApplied"),
     ):
         counts: dict[str, int] = {}
         for record in records:
@@ -151,6 +166,20 @@ def aggregate(records: list[dict[str, Any]]) -> dict[str, Any]:
             key = str(value)
             issue_code_counts[key] = issue_code_counts.get(key, 0) + 1
     dimensions["factValidationIssueCode"] = dict(sorted(issue_code_counts.items()))
+    for dimension, context_field in (
+        ("factResidualValidationIssueCode", "factResidualValidationIssueCodes"),
+        ("factResidualPathTemplate", "factResidualPathTemplates"),
+    ):
+        counts: dict[str, int] = {}
+        for record in records:
+            context = record.get("context", {})
+            values = context.get(context_field, []) if isinstance(context, dict) else []
+            if not isinstance(values, list):
+                continue
+            for value in values:
+                key = str(value)
+                counts[key] = counts.get(key, 0) + 1
+        dimensions[dimension] = dict(sorted(counts.items()))
     reported_calls = sum(int(record.get("usage", {}).get("reportedCalls", 0)) for record in records)
     estimated_calls = sum(int(record.get("usage", {}).get("estimatedCalls", 0)) for record in records)
     truncated_turns = sum(

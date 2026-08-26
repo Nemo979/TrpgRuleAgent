@@ -78,6 +78,35 @@ MiMo 错误答案离线负样本回放 6/6 被拒绝，正样本和错误首稿�
 严格三元组注册表、PF1E Adapter 等价迁移和 GSS/失败降级门均已落地；Repair Patch 接口尚未实现。
 下一步进行 PF1E 覆盖扩展和结构化修补，不直接再次运行外部 A/B。
 
+完成 Adapter v3 canonical path/alias 整改和本地一次 patch 金线后，经再次明确授权执行同六题真实
+MiMo A/B。Planner 对照自动门 6/6、严格 0/6；路径契约 Fact Ledger 自动与严格均为 0/6，4 题
+安全拒答、2 题仅完成局部目标。修补尝试 1 次但因 `path_not_found` 未应用；平均延迟增加 10.82%，
+平均模型 token 增加 4.31%。发布门仍失败，下一动作回到本地真实输出形状回放。
+
+required-path 第二轮整改后的同六题真实 A/B 为 Planner 自动 4/6、严格 0/6；Fact Ledger 自动
+1/6、严格 0/6、4/6 安全拒答。实验组首次应用 5 个真实局部 patch，但完整复验仍失败；另一轮
+修补以 `path_ambiguous` 拒绝。平均延迟增加 75.01%，平均模型 token 增加 25.80%。
+
+PF1E Adapter v5 的同六题真实 A/B 为 Planner 自动 5/6、严格 0/6；Fact Ledger 自动 0/6、
+严格 0/6、5/6 安全拒答。紧凑法术表错误已被检出，但 3 次实际 patch 调用全部不合 Schema；
+平均延迟增加 71.76%，平均模型 token 增加 62.13%。
+
+2026-08-15 已完成后续纯本地协议整改：受限 sibling mapping、`duplicate_path` 独立分类、逐目标
+完整 repair operation 骨架及 invalid patch 脱敏分类均已落地。Python App 237/237、Retrieval
+64/64、Vitest 268/268、全部 TypeScript 检查及两套 Web 生产构建通过；未运行新的外部评测，
+两个 Feature Flag 继续默认关闭。
+
+经 2026-08-18 明确授权完成 v6 同六题真实 A/B：正式 Planner 对照自动 5/6、来源 6/6、严格
+0/6；实验组自动 0/6、来源 1/6、严格 0/6、5/6 安全拒答。实验组一次合规 5-operation patch
+成功应用但完整复验失败，四次草稿在结构边界拒答。平均延迟增加 77.59%，平均模型 token 增加
+25.79%；质量、误拒与成本门均未通过。
+
+2026-08-20 已完成 v7 纯本地回归，未调用外部模型。服务器 required draft 骨架、canonical path
+强绑定、唯一 prose-wrapped JSON 恢复和逐 issue 目标隔离均已加入确定性测试；PF1E 法术位 sibling
+mapping 也已覆盖完整 patch/revalidation/publish 金线。全量门为 Python App 242/242、Retrieval
+64/64、Vitest 268/268、全部 TypeScript 检查和两套 Web 构建通过。该结果只证明本地协议整改，
+不代表真实质量门通过；两个 Feature Flag 继续默认关闭，真实 v7 A/B 必须重新取得外发授权。
+
 ## 命令
 
 ```bash
@@ -93,3 +122,91 @@ npm run eval:complex:pf:planner
 ```
 
 原始模型报告不得提交仓库。
+
+经 2026-08-20 明确授权完成 v7 同六题真实 A/B：Planner 对照自动 5/6、来源 6/6、严格 0/6；
+实验组自动 0/6、来源 0/6、严格 0/6、6/6 安全拒答。5 次修补尝试中 3 次应用合规 patch，但均
+未通过完整复验；另有目标未映射、patch 字段无效和草稿证据引用无效各一次。实验组没有再出现
+required-path 相关草稿失败，但平均模型 token 增加 77.92%。两组按用户要求曾短暂并行，延迟仅作
+方向性参考。质量、误拒与成本门继续失败，两个 Feature Flag 保持默认关闭。
+
+v7 失败后的 v8 纯本地整改已完成：内部 claim path marker 让 Validator 按结构化 path 而非自然
+语言等级标签定位专长槽，并把非法具名选项直接映射回原 claim；Patch Schema v2 仅保留有序
+replacement 数组，服务器重建所有固定字段。合成回归覆盖 marker 注入拒绝和无等级文字 replacement
+的完整复验发布金线。Python App 246/246、Retrieval 64/64、Vitest 268/268、全部 TypeScript 检查
+及两套 Web 构建通过；未运行新的外部评测，两个 Feature Flag 继续默认关闭。
+
+经 2026-08-20 明确授权完成 v8 同六题真实 A/B：Planner 对照自动 5/6、来源 6/6、严格 0/6；
+实验组自动 0/6、来源 1/6、严格 0/6、5/6 安全拒答。两次 Patch v2 均成功应用且没有目标映射、
+Schema 或固定字段失败，其中一次消除了非法具名选项；但两题都残留专长槽错误。另有两次草稿
+Evidence 无效和一次字段错误。工具调用均为 52，实验组平均模型 token 增加 40.98%；并行运行的
+延迟只作方向性参考。质量、误拒和成本门继续失败，两个 Feature Flag 保持默认关闭。
+
+2026-08-22 已完成 v9 纯本地协议整改，未运行新的外部评测。PF1E 逐级专长 required claim 不再
+要求模型生成自由文本，而是从 Adapter 发布的已读专长 catalog 返回精确数量的不同选项；服务器
+据此重建正文和 Evidence。其他 required claim 的 Evidence 同样由服务器绑定。Python App
+251/251、Retrieval 64/64、Vitest 268/268、全部类型检查与两套 Web 构建通过。两个 Feature Flag
+继续默认关闭；真实 v9 A/B 必须重新取得外发授权。
+
+经 2026-08-23 明确授权完成真实 v9 A/B。Planner 对照自动 5/6、来源 6/6、严格 0/6；实验组
+自动与来源均为 0/6、严格 0/6、6/6 安全拒答。Adapter v9 六题均匹配，但全部草稿在外层字段
+边界以 `schema_fields` 拒绝，零次进入 Validator/Repair。实验组平均 token 增加 4.36%，平均延迟
+增加 22.83%，p95 增加 76.10%；两组并行，延迟仅作方向性参考。发布门失败，两个 Flag 保持关闭。
+
+2026-08-24 已完成 v10 纯本地协议整改，未运行外部评测。required draft wire format 从完整
+envelope 收缩为 `{"values":[...]}`；服务器按固定顺序重建全部 claim、path、正文模板与 Evidence。
+边界回归覆盖额外字段、错误形状、错误数量、重复/越界选择及伪造引用。Python App 254/254、
+Retrieval 64/64、Vitest 268/268、全部类型检查和两套 Web 构建通过。两个 Flag 继续默认关闭。
+
+经新的明确外发授权完成 v10 同六题真实 A/B。Planner 对照自动 5/6、来源 6/6、严格 0/6；
+实验组自动 0/6、来源 2/6、严格 0/6、4/6 安全拒答。最小 values 协议让 5/6 草稿通过解析，
+2/6 直接发布，三题进入验证或修补；其中一次应用 4 个 replacement 后因残余专长槽问题未通过
+完整复验。两份发布答案仍有法术环级偏移或任务未完成，严格均失败。
+
+两组工具调用均为 52；实验组平均 token 增加 43.68%、平均模型调用增加 33.33%、平均延迟增加
+91.93%、p95 增加 48.08%。两组并行，延迟仅作方向性参考。质量、误拒、延迟与成本门失败，两个
+Flag 保持默认关闭；下一轮先做确定性法术进度与最小 Repair values 的本地整改。
+
+2026-08-24 已完成 v11 纯本地协议整改，未运行外部评测。法师逐级最高法术环级与基础每日法术位
+改由服务器从职业表渲染，模型只能为这些槽返回 `null`。Repair 输出收缩为单字段 values 数组，
+类型化专长修补必须再次满足精确数量、唯一性和有限 catalog；固定目标和 Evidence 仍由服务器恢复。
+`bonus_feat_scope` 在缺少对应等级 claim 时只允许按唯一实际文本定位。
+
+Python App 259/259、Retrieval 64/64、Vitest 268/268、全部 TypeScript 检查、两套 Web 构建及
+`git diff --check` 通过。两个 Flag 继续默认关闭；使用同六题执行真实 v11 A/B 前必须重新取得
+明确外发授权。
+
+经 2026-08-25 明确授权完成真实 v11 A/B。Planner 对照自动 5/6、来源 6/6、严格 0/6；实验组
+自动 1/6、来源 1/6、严格 0/6、5/6 安全拒答。实验失败分布为两次
+`invalid_answer_draft`、一次 `empty`、一次 `repair_validation_failed`、一次
+`invalid_repair_patch`。唯一发布的护甲施法题中，服务器法术进度全部正确，但自由文本 claim 的
+事实与服务器分配 Evidence 不对应，严格失败。
+
+本次命令未配置 `TRPG_TURN_METRICS_PATH`，没有 token、延迟、模型调用和失败子分类数据，不据此
+推断成本。质量和误拒门失败，两个 Flag 保持默认关闭；下一轮先做 server claim 零 wire 槽、
+自由文本语义类型化和评测 metrics 自动派生的本地整改。
+
+2026-08-25 已完成上述 v12 本地整改，未运行外部评测。Adapter 协议 v10 / PF1E Adapter v12
+从 draft 与 Repair wire 中移除全部 server-owned 槽，新增服务器执行的 topic 语义约束，并兼容
+MiMo Repair 的精确单层 `required_output.values` 包装。评测入口按报告名自动派生并聚合 metrics，
+不再依赖手工设置环境变量。Python App 262/262、Retrieval 64/64、Vitest 268/268、两套类型检查、
+两套 Web 构建和 `git diff --check` 全部通过；两个 Flag 继续默认关闭。下一门为获得针对 v12 的
+明确外发授权后执行同六题真实 A/B。
+
+经针对 v12 的明确授权完成真实评测：Planner 对照自动 6/6、来源 6/6、严格 0/6；实验自动 0/6、
+来源 1/6、严格 0/6、5/6 安全拒答。自动 metrics 完整生成，实验平均 token +40.44%、模型调用
++33.33%、平均延迟 +45.38%、p95 +95.08%。所有发布门失败，两个 Flag 继续默认关闭。
+
+2026-08-25 已完成 v13 本地整改，未再次外发。语义值改为服务器 topic 子句抽取；专长 evidence
+支持叙述式条目并按普通/职业/种族奖励槽使用有序有限域；奥法骑士施法推进服务器化；draft 与
+Repair JSON-only 恢复及 contract 计数进入隐私安全 metrics。Python App 268/268、Retrieval
+64/64、Vitest 268/268、两套类型检查、两套 Web 构建和 diff 检查通过。真实 v13 A/B 需新授权。
+
+经明确授权完成 v13 真实评测：对照自动 5/6、来源 6/6、严格 0/6；实验自动与来源 1/6、严格
+0/6、2/6 安全拒答、3/6 模型超时。只有三份实验 turn metrics，因此不以完成子集推断完整六题
+成本；平均总延迟下界为 226.1775 秒，p95 下界为 300 秒。JSON-only 恢复和 Repair 均未触发，
+两个完成拒答仍为 `semantic_scope`。所有发布门继续失败，两个 Flag 保持关闭。
+
+v14 后续纯本地整改已完成：自由文本无合法 topic 子句时使用服务器局部 semantic fallback，新增
+`factDraft.semanticFallbackCount`；Fact Ledger 结构化生成证据正文总量限制为 48,000 字符并保留
+全部来源身份，普通 Planner 对照路径不变。Python App 270/270、Retrieval 64/64、Vitest
+268/268、两套类型检查、两套生产构建与 diff 检查通过。本轮未外发，真实 v14 A/B 需重新授权。

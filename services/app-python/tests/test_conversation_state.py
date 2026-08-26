@@ -5,6 +5,30 @@ from trpg_app.conversation_state import ConversationState
 
 
 class ConversationStateTest(unittest.TestCase):
+    def test_tracks_compact_pf1e_build_shorthand_without_fake_class_name(self) -> None:
+        state = ConversationState.from_messages(
+            [
+                {
+                    "role": "user",
+                    "content": "我有一个初步bd，20buy,5级，猫族，职业通灵者，变体虚空之声",
+                },
+                {"role": "user", "content": "角色等级为5级"},
+                {"role": "user", "content": "车卡规则选用20点购点法"},
+            ]
+        )
+
+        self.assertEqual(state.characterLevel, 5)
+        self.assertEqual(state.classLevels, {})
+        self.assertNotIn("级", state.classLevels)
+        self.assertEqual(state.race, "猫族")
+        self.assertEqual(state.characterClass, "通灵者")
+        self.assertEqual(state.archetype, "虚空之声")
+        self.assertEqual(state.pointBuyBudget, 20)
+        context = json.loads(state.prompt_context())
+        self.assertEqual(context["pointBuyBudget"], 20)
+        self.assertEqual(context["characterClass"], "通灵者")
+        self.assertEqual(context["archetype"], "虚空之声")
+
     def test_tracks_structured_character_state_across_four_user_rounds(self) -> None:
         state = ConversationState.from_messages(
             [
@@ -182,6 +206,24 @@ class ConversationStateTest(unittest.TestCase):
         )
 
         self.assertEqual(state.field_count(), 6)
+
+    def test_enriches_point_buy_review_with_relevant_build_state(self) -> None:
+        state = ConversationState.from_messages(
+            [
+                {
+                    "role": "user",
+                    "content": "20buy，5级，猫族，职业通灵者，变体虚空之声",
+                }
+            ]
+        )
+
+        query = state.enrich_search_query(
+            "属性购点和种族调整",
+            "结合猫族会-2感知，检查一下20点购点属性分配建议是否正确",
+        )
+
+        for expected in ("猫族", "通灵者", "虚空之声", "20点购点"):
+            self.assertIn(expected, query)
 
 
 if __name__ == "__main__":

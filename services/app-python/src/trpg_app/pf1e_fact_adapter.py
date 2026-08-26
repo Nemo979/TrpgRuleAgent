@@ -14,12 +14,16 @@ import re
 from typing import Any, Iterable
 
 from .fact_ledger import (
+    DraftClaimContract,
     DraftPathSpec,
+    DraftSelectionOption,
+    DraftSelectionGroup,
     EvidenceDocument,
     FactDerivation,
     FactLedger as GenericFactLedger,
     FactRecord,
     FactStatus,
+    RepairPathMapping,
     ValidationIssue,
 )
 from .fact_ledger_adapter import (
@@ -80,9 +84,26 @@ class PrestigeRequirements:
 
 
 @dataclass(frozen=True)
+class PrestigeSpellAdvancement:
+    class_name: str
+    starts_at_level: int
+    progression_text: str
+    source_label: str
+
+    def public(self) -> dict[str, Any]:
+        return {
+            "class": self.class_name,
+            "starts_at_level": self.starts_at_level,
+            "progression": self.progression_text,
+            "source": self.source_label,
+        }
+
+
+@dataclass(frozen=True)
 class FeatFact:
     name: str
     prerequisites: str
+    effect: str
     category: str
     source_label: str
 
@@ -90,6 +111,7 @@ class FeatFact:
         return {
             "name": self.name,
             "prerequisites": self.prerequisites,
+            "effect": self.effect,
             "category": self.category,
             "source": self.source_label,
         }
@@ -163,6 +185,9 @@ class PF1EFactData:
     class_levels: dict[tuple[str, int], ClassLevelFact] = field(default_factory=dict)
     bonus_feat_scopes: list[BonusFeatScope] = field(default_factory=list)
     prestige_requirements: list[PrestigeRequirements] = field(default_factory=list)
+    prestige_spell_advancements: list[PrestigeSpellAdvancement] = field(
+        default_factory=list
+    )
     feats: dict[str, FeatFact] = field(default_factory=dict)
     feat_slots: list[FeatSlotFact] = field(default_factory=list)
     base_attack: dict[tuple[str, int], BaseAttackFact] = field(default_factory=dict)
@@ -188,6 +213,9 @@ class PF1EFactData:
             "bonus_feat_scopes": [item.public() for item in self.bonus_feat_scopes],
             "prestige_requirements": [
                 item.public() for item in self.prestige_requirements
+            ],
+            "prestige_spell_advancements": [
+                item.public() for item in self.prestige_spell_advancements
             ],
             "feat_count": len(self.feats),
             "feats": [
@@ -241,6 +269,7 @@ class PF1EFactData:
             len(self.class_levels)
             + len(self.bonus_feat_scopes)
             + len(self.prestige_requirements)
+            + len(self.prestige_spell_advancements)
             + len(self.feats)
             + len(self.feat_slots)
             + len(self.base_attack)
@@ -273,6 +302,25 @@ _WIZARD_SLOT_COUNT = re.compile(
     r"(\d+)\s*个\s*(\d+)\s*环",
     re.MULTILINE,
 )
+_WIZARD_LEVEL_CLAUSE = re.compile(
+    r"(?<!\d)(\d+)\s*级(?:法师)?(?:时)?([^。；;\n]{0,220})",
+    re.MULTILINE,
+)
+_SPELL_LEVEL_FIRST_SLOT = re.compile(
+    r"(\d+)\s*环(?:基础)?(?:每日)?(?:法术位)?\s*(?:为|有|[:：])?\s*"
+    r"(\d+)\s*(?:个|位)"
+)
+_SPELL_COUNT_FIRST_SLOT = re.compile(
+    r"(\d+)\s*(?:个|位)\s*(\d+)\s*环(?:法术位)?"
+)
+_SPELL_SLOT_VECTOR = re.compile(
+    r"(?:每日)?法术位(?:为|提升|[:：])?\s*"
+    r"((?:\d+|[-—])(?:\s*/\s*(?:\d+|[-—])){1,9})\s*"
+    r"[（(]((?:\d+\s*/\s*)*\d+)\s*环[）)]"
+)
+_VALIDATION_CLAIM_PATH = re.compile(
+    r"^\[\[TRPGCLAIMPATH:(answer(?:\.[A-Za-z_][A-Za-z0-9_]*|\[[^\]\n]{1,80}\])+)]\]$"
+)
 _NUMERIC_STAT = re.compile(r"\d+\s*gp|\d+d\d+|[+-]\d+%|[+-]\d+\s*(?:AC|攻击|伤害)", re.I)
 _SCHOOL_NAMES = (
     "防护系",
@@ -284,6 +332,7 @@ _SCHOOL_NAMES = (
     "死灵系",
     "变化系",
 )
+_MAX_SELECTION_OPTIONS_PER_GROUP = 40
 
 
 def _goal_relevant_feat_names(
@@ -353,6 +402,7 @@ def _build_pf1e_data(
             _parse_human_feat_slot(ledger, label, content)
         if "进阶要求" in content:
             _parse_prestige_requirements(ledger, label, title, content)
+            _parse_prestige_spell_advancement(ledger, label, title, content)
         if "专长" in title or "专长列表" in content:
             _parse_feat_rows(ledger, label, content)
         if "学派" in content and "环位" in content:
@@ -556,9 +606,14 @@ def _parse_spell(
     title: str,
     content: str,
 ) -> None:
-    if not re.search(r"(?m)^\s*学派\s*$", content) or not re.search(
-        r"(?m)^\s*环位\s*$", content
-    ):
+    has_standalone_fields = bool(
+        re.search(r"(?m)^\s*学派\s*$", content)
+        and re.search(r"(?m)^\s*环位\s*$", content)
+    )
+    has_inline_fields = bool(
+        re.search(r"学派\s*.+?\s+环位\s*.+?\s+施法时间", content)
+    )
+    if not has_standalone_fields and not has_inline_fields:
         return
     raw_name = re.split(r"[（(\n]", title.strip(), maxsplit=1)[0].strip()
     name_match = re.search(r"[\u4e00-\u9fff]+", raw_name)
@@ -566,12 +621,18 @@ def _parse_spell(
     if not name:
         return
     school_text = _standalone_field(content, "学派", "环位")
+    if not school_text:
+        match = re.search(r"学派\s*(.+?)\s+环位\s*", content)
+        school_text = match.group(1).strip() if match else ""
     school = next((item for item in _SCHOOL_NAMES if item in school_text), "")
     level_text = _standalone_field(
         content,
         "环位",
         "施法时间|成分|距离|目标|区域|效果|持续时间|豁免|法术抗力",
     )
+    if not level_text:
+        match = re.search(r"环位\s*(.+?)\s+施法时间\s*", content)
+        level_text = match.group(1).strip() if match else ""
     class_levels: dict[str, int] = {}
     for class_names, level_text_value in re.findall(
         r"([\u4e00-\u9fff]+(?:/[\u4e00-\u9fff]+)*)\s*(\d+)",
@@ -582,7 +643,13 @@ def _parse_spell(
     if not school or not class_levels:
         return
     duration = _standalone_field(content, "持续时间", "豁免|法术抗力")
+    if not duration:
+        match = re.search(r"持续时间\s*(.+?)\s+豁免\s*", content)
+        duration = match.group(1).strip() if match else ""
     saving_throw = _standalone_field(content, "豁免", "法术抗力")
+    if not saving_throw:
+        match = re.search(r"豁免\s*(.+?)\s+法术抗力\s*", content)
+        saving_throw = match.group(1).strip() if match else ""
     ledger.spells.setdefault(
         name,
         SpellFact(
@@ -611,6 +678,29 @@ def _parse_prestige_requirements(
         )
 
 
+def _parse_prestige_spell_advancement(
+    ledger: PF1EFactData,
+    label: str,
+    title: str,
+    content: str,
+) -> None:
+    match = re.search(
+        r"每日法术：从(\d+)级开始(?=[^。]*奥术施法职业)[^。]*",
+        content,
+    )
+    if match is None:
+        return
+    name = next((item for item in _CLASS_NAMES if item in title), title.strip())
+    ledger.prestige_spell_advancements.append(
+        PrestigeSpellAdvancement(
+            class_name=name,
+            starts_at_level=int(match.group(1)),
+            progression_text="现有奥术施法职业等级+1",
+            source_label=label,
+        )
+    )
+
+
 def _parse_feat_rows(ledger: PF1EFactData, label: str, content: str) -> None:
     for line in content.splitlines():
         if "|" not in line or re.match(r"^\s*\|?\s*---", line):
@@ -629,8 +719,63 @@ def _parse_feat_rows(ledger: PF1EFactData, label: str, content: str) -> None:
         if name:
             ledger.feats.setdefault(
                 name,
-                FeatFact(name, cells[1], cells[3], label),
+                FeatFact(name, cells[1], cells[2], cells[3], label),
             )
+    _parse_narrative_feat_entries(ledger, label, content)
+
+
+_NARRATIVE_FEAT_HEADING = re.compile(
+    r"^\s*(?P<name>[\u4e00-\u9fff·]{2,20})"
+    r"(?=\s*(?:[（(〔]|[A-Z][A-Za-z]))"
+)
+_NON_FEAT_HEADINGS = {
+    "先决条件",
+    "专长效果",
+    "通常情况",
+    "通常状况",
+    "特殊说明",
+    "特别说明",
+    "表现描述符",
+    "表现学派",
+    "表现魔法来源",
+}
+
+
+def _parse_narrative_feat_entries(
+    ledger: PF1EFactData,
+    label: str,
+    content: str,
+) -> None:
+    """Parse bounded prose feat entries that are not published as table rows."""
+
+    lines = content.splitlines()
+    for marker_index, line in enumerate(lines):
+        marker = line.strip()
+        if not marker.startswith(("先决条件：", "先决条件:", "专长效果：", "专长效果:")):
+            continue
+        heading_index: int | None = None
+        heading_match: re.Match[str] | None = None
+        for candidate_index in range(marker_index - 1, max(-1, marker_index - 11), -1):
+            candidate = lines[candidate_index].strip()
+            match = _NARRATIVE_FEAT_HEADING.match(candidate)
+            if match is None or match.group("name") in _NON_FEAT_HEADINGS:
+                continue
+            heading_index = candidate_index
+            heading_match = match
+            break
+        if heading_index is None or heading_match is None:
+            continue
+        name = heading_match.group("name")
+        heading_blob = " ".join(lines[heading_index:marker_index])
+        category_match = re.search(r"〔([^〕]{1,40})〕", heading_blob)
+        category = category_match.group(1).strip() if category_match else ""
+        prerequisites = ""
+        if marker.startswith(("先决条件：", "先决条件:")):
+            prerequisites = re.split(r"[：:]", marker, maxsplit=1)[1].strip()
+        ledger.feats.setdefault(
+            name,
+            FeatFact(name, prerequisites, "", category, label),
+        )
 
 
 def _validate_citations(content: str, ledger: PF1EFactData) -> list[FactValidationIssue]:
@@ -686,6 +831,12 @@ def _validate_prestige_requirements(
                     fact.class_name in line
                     and re.search(r"BAB|基本攻击", line, re.I)
                     and re.search(r"要求|进阶条件|条件满足|满足.*条件", line)
+                    and not re.search(
+                        r"(?:不包含|并不包含|没有|无需)[^。；\n]{0,24}(?:BAB|基本攻击)|"
+                        r"(?:BAB|基本攻击)[^。；\n]{0,24}(?:不是|不在|不属于)",
+                        line,
+                        re.I,
+                    )
                 ):
                     issues.append(
                         FactValidationIssue(
@@ -761,6 +912,11 @@ def _level_sections(content: str) -> dict[int, str]:
         if not line:
             continue
         level: int | None = None
+        path_match = _VALIDATION_CLAIM_PATH.fullmatch(line)
+        if path_match:
+            level_match = re.match(r"answer\.levels\[(\d+)]", path_match.group(1))
+            current_level = int(level_match.group(1)) if level_match else None
+            continue
         if "|" in line:
             first_cell = re.sub(r"[^\d级]", "", line.strip("|").split("|", 1)[0])
             match = re.fullmatch(r"(\d+)级?", first_cell)
@@ -832,6 +988,8 @@ def _validate_feat_timeline(
     content: str,
     ledger: PF1EFactData,
 ) -> list[FactValidationIssue]:
+    if not _requires_level_feat_choices(ledger.goal):
+        return []
     slots = _relevant_feat_slots(ledger)
     if not slots:
         return []
@@ -841,8 +999,11 @@ def _validate_feat_timeline(
         by_level.setdefault(fact.level, []).append(fact)
     issues: list[FactValidationIssue] = []
     for level, facts in sorted(by_level.items()):
+        section = sections.get(level, "")
+        if "不能安全生成具体选择" in section:
+            continue
         expected = sum(item.count for item in facts)
-        actual = _selection_count(sections.get(level, ""), ledger)
+        actual = _selection_count(section, ledger)
         if actual >= expected:
             continue
         sources = tuple(dict.fromkeys(item.source_label for item in facts))
@@ -873,14 +1034,34 @@ def _selected_feats_by_level(
 
 
 def _declared_attribute(content: str, attribute: str) -> int | None:
-    values = [
-        int(value)
-        for value in re.findall(
-            rf"{re.escape(attribute)}(?:属性)?\s*(?:为|达到|=|：|:)?\s*(\d+)",
-            content,
+    values: list[int] = []
+    for clause in re.split(r"[。；;\n]", content):
+        if "先决条件" in clause or "需要" in clause:
+            continue
+        values.extend(
+            int(value)
+            for value in re.findall(
+                rf"{re.escape(attribute)}(?:属性)?\s*(?:为|达到|=|：|:)?\s*(\d+)",
+                clause,
+            )
         )
-    ]
     return max(values) if values else None
+
+
+def _conditioned_attribute(content: str, attribute: str, required: int) -> bool:
+    for clause in re.split(r"[。；;\n]", content):
+        if not re.search(r"如果|若|条件|满足", clause):
+            continue
+        values = [
+            int(value)
+            for value in re.findall(
+                rf"{re.escape(attribute)}(?:属性)?\s*(?:为|达到|>=|≥|=|：|:)?\s*(\d+)",
+                clause,
+            )
+        ]
+        if values and max(values) >= required:
+            return True
+    return False
 
 
 def _validate_feat_prerequisites(
@@ -956,7 +1137,11 @@ def _validate_feat_prerequisites(
             ):
                 required = int(required_text)
                 actual = _declared_attribute(content, attribute)
-                if actual is None or actual < required:
+                if (actual is None or actual < required) and not _conditioned_attribute(
+                    content,
+                    attribute,
+                    required,
+                ):
                     actual_text = actual if actual is not None else "未知"
                     issues.append(
                         FactValidationIssue(
@@ -1019,6 +1204,52 @@ def _validate_spell_progression(
                     evidence_refs=(fact.source_label,),
                 )
             )
+    for level_text, body in _WIZARD_LEVEL_CLAUSE.findall(content):
+        level = int(level_text)
+        fact = ledger.class_levels.get(("法师", level))
+        if fact is None:
+            continue
+        compact_claims = [
+            (int(spell_level), int(count))
+            for spell_level, count in _SPELL_LEVEL_FIRST_SLOT.findall(body)
+        ]
+        compact_claims.extend(
+            (int(spell_level), int(count))
+            for count, spell_level in _SPELL_COUNT_FIRST_SLOT.findall(body)
+        )
+        vector = _SPELL_SLOT_VECTOR.search(body)
+        if vector:
+            counts = [
+                None if value in {"-", "—"} else int(value)
+                for value in re.split(r"\s*/\s*", vector.group(1))
+            ]
+            spell_levels = [
+                int(value) for value in re.split(r"\s*/\s*", vector.group(2))
+            ]
+            if len(counts) == len(spell_levels):
+                compact_claims.extend(
+                    (spell_level, count)
+                    for spell_level, count in zip(spell_levels, counts)
+                    if count is not None
+                )
+        for spell_level, claimed_count in compact_claims:
+            if spell_level >= len(fact.spell_slots):
+                continue
+            expected_count = fact.spell_slots[spell_level]
+            if expected_count is not None and claimed_count != expected_count:
+                issues.append(
+                    FactValidationIssue(
+                        "spell_slot_count",
+                        (
+                            f"法师{level}级的{spell_level}环基础每日法术位应为 "
+                            f"{expected_count}，候选答案写为 {claimed_count}"
+                        ),
+                        path=f"answer.levels[{level}].spell_slots[{spell_level}]",
+                        expected=expected_count,
+                        actual=claimed_count,
+                        evidence_refs=(fact.source_label,),
+                    )
+                )
     return issues
 
 
@@ -1205,29 +1436,35 @@ def _validate_named_recommendations(
     if "专长" not in ledger.goal:
         return []
     issues: list[FactValidationIssue] = []
-    for match in re.finditer(
-        r"(?:建议选择|可选择|选择[：:]|替代专长[：:为])\s*"
-        r"(?:\*\*|[‘’“”])?([\u4e00-\u9fffA-Za-z]+)",
-        content,
-    ):
-        name = match.group(1).strip()
-        if name in {"一个", "其他", "任意", "符合", "新的"}:
+    claim_path = ""
+    for line in content.splitlines():
+        marker = _VALIDATION_CLAIM_PATH.fullmatch(line.strip())
+        if marker:
+            claim_path = marker.group(1)
             continue
-        if name in {"法术掌握", "法术熟稔"} and any(
-            name in scope.allowed_categories
-            or "法术掌握" in scope.allowed_categories
-            for scope in ledger.bonus_feat_scopes
+        for match in re.finditer(
+            r"(?:建议选择|可选择|选择[：:]|替代专长[：:为])\s*"
+            r"(?:\*\*|[‘’“”])?([\u4e00-\u9fffA-Za-z]+)",
+            line,
         ):
-            continue
-        if name not in ledger.feats:
-            issues.append(
-                FactValidationIssue(
-                    "unsupported_named_option",
-                    f"推荐的专长 {name} 未出现在本轮已读专长条目中",
-                    path=f"answer.feats[{name}]",
-                    actual=name,
+            name = match.group(1).strip()
+            if name in {"一个", "其他", "任意", "符合", "新的"}:
+                continue
+            if name in {"法术掌握", "法术熟稔"} and any(
+                name in scope.allowed_categories
+                or "法术掌握" in scope.allowed_categories
+                for scope in ledger.bonus_feat_scopes
+            ):
+                continue
+            if name not in ledger.feats:
+                issues.append(
+                    FactValidationIssue(
+                        "unsupported_named_option",
+                        f"推荐的专长 {name} 未出现在本轮已读专长条目中",
+                        path=claim_path or f"answer.feats[{name}]",
+                        actual=name,
+                    )
                 )
-            )
     return issues
 
 
@@ -1245,7 +1482,7 @@ def _goal_level_range(goal: str) -> tuple[int, int] | None:
 
 
 PF1E_ADAPTER_ID = "pathfinder-1e"
-PF1E_ADAPTER_VERSION = 3
+PF1E_ADAPTER_VERSION = 16
 PF1E_ADAPTER_KEY = AdapterKey(
     library_id="pathfinder-1e",
     system="Pathfinder",
@@ -1276,6 +1513,494 @@ PF1E_DRAFT_PATH_SPECS = (
     DraftPathSpec("answer.other[{key}]"),
     DraftPathSpec("answer.sections[{section}].claims[{claim}]"),
 )
+
+PF1E_REPAIR_PATH_MAPPINGS = (
+    RepairPathMapping(
+        "answer.levels[{level}].spell_slots[{spell_level}]",
+        "answer.levels[{level}].spells",
+        ("spell_slot_count",),
+    ),
+)
+
+
+def _required_draft_paths(data: PF1EFactData) -> tuple[str, ...]:
+    """Publish exact claim coverage derived only from the server-owned goal."""
+
+    goal = data.goal
+    paths: list[str] = []
+    if re.search(r"\d+\s*(?:到|至|[-—~])\s*\d+\s*级|升级|成长|兼职|进阶", goal):
+        paths.append("answer.build.levels")
+    if re.search(r"必须先|先核对|只有|否则|如果|未达到|满足.*才", goal):
+        paths.append("answer.summary[conditional_branch]")
+    if _goal_fact_summary(data)[0]:
+        paths.append("answer.summary[goal_facts]")
+    if re.search(r"专长|feat", goal, re.IGNORECASE):
+        paths.append("answer.summary[feat_eligibility]")
+        if _requires_level_feat_choices(goal):
+            paths.extend(
+                f"answer.levels[{level}].feats"
+                for level in sorted({item.level for item in _relevant_feat_slots(data)})
+            )
+    if re.search(r"法术|施法|奥术|神术|\d+\s*环|spell", goal, re.IGNORECASE):
+        paths.append("answer.summary[spell_progression]")
+        level_range = _goal_level_range(goal)
+        if "法师" in goal and level_range is not None:
+            paths.extend(
+                f"answer.levels[{level}].spells"
+                for level in range(level_range[0], level_range[1] + 1)
+                if ("法师", level) in data.class_levels
+            )
+    if re.search(r"装备|武器|盔甲|护甲|盾牌|价格|伤害", goal):
+        paths.append("answer.equipment.stats")
+    if re.search(r"指定(?:的)?法术环级|指定环级", goal):
+        paths.append("answer.summary[missing_input]")
+    return tuple(dict.fromkeys(paths))
+
+
+def _requires_level_feat_choices(goal: str) -> bool:
+    """Distinguish a full feat timeline from eligibility/comparison requests."""
+
+    return bool(
+        re.search(
+            r"逐级[^。；]{0,20}专长|专长[^。；]{0,20}逐级|"
+            r"每级[^。；]{0,20}专长|专长升级(?:路线|方案)|专长时间线",
+            goal,
+        )
+    )
+
+
+def _claim_evidence_refs(data: PF1EFactData, path: str) -> tuple[str, ...]:
+    """Select bounded provenance from parsed facts for one required claim."""
+
+    refs: list[str] = []
+    if path == "answer.build.levels":
+        refs.extend(item.source_label for item in data.class_levels.values())
+        refs.extend(item.source_label for item in data.base_attack.values())
+        refs.extend(item.source_label for item in data.prestige_requirements)
+    elif path == "answer.summary[conditional_branch]":
+        refs.extend(item.source_label for item in data.prestige_requirements)
+        refs.extend(item.source_label for item in data.class_levels.values())
+        refs.extend(item.source_label for item in data.base_attack.values())
+    elif path == "answer.summary[feat_eligibility]":
+        refs.extend(item.source_label for item in _relevant_feat_slots(data))
+        refs.extend(item.source_label for item in data.feats.values())
+        refs.extend(item.source_label for item in data.bonus_feat_scopes)
+        refs.extend(item.source_label for item in data.base_attack.values())
+    elif path == "answer.summary[spell_progression]":
+        refs.extend(item.source_label for item in data.class_levels.values())
+        refs.extend(item.source_label for item in data.spells.values())
+        refs.extend(item.source_label for item in data.prestige_spell_advancements)
+    elif path == "answer.summary[goal_facts]":
+        refs.extend(_goal_fact_summary(data)[1])
+    elif match := re.fullmatch(r"answer\.levels\[(\d+)]\.spells", path):
+        level = int(match.group(1))
+        refs.extend(
+            item.source_label
+            for item in data.class_levels.values()
+            if item.level == level
+        )
+    elif path == "answer.equipment.stats":
+        refs.extend(
+            label for label, content in data.evidence.items() if _NUMERIC_STAT.search(content)
+        )
+    if not refs:
+        refs.extend(ref for record in _records(data) for ref in record.evidence_refs)
+    return tuple(dict.fromkeys(refs))
+
+
+def _wizard_progression_text(fact: ClassLevelFact) -> str:
+    """Render class-table progression without delegating numeric facts to a model."""
+
+    if fact.max_spell_level is None:
+        raise ValueError("wizard progression requires an available spell level")
+    spell_levels = tuple(range(fact.max_spell_level + 1))
+    slot_values = tuple(fact.spell_slots[level] for level in spell_levels)
+    if any(value is None for value in slot_values):
+        raise ValueError("wizard progression has an incomplete slot vector")
+    slots = "/".join(str(value) for value in slot_values)
+    levels = "/".join(str(level) for level in spell_levels)
+    return (
+        f"{fact.level}级法师最高可施放{fact.max_spell_level}环法术，"
+        f"每日法术位为{slots}（{levels}环）。"
+    )
+
+
+def _spell_progression_summary_text(data: PF1EFactData) -> str:
+    parts = ["法师逐级最高法术环级与每日法术位由已读职业表确定，见逐级规则结论。"]
+    parts.extend(
+        (
+            f"{fact.class_name}1级不增加现有奥术施法职业等级；从{fact.starts_at_level}级开始，"
+            f"每次升级按{fact.progression_text}推进每日法术。"
+        )
+        for fact in data.prestige_spell_advancements
+    )
+    return "".join(parts)
+
+
+def _feat_eligibility_text(data: PF1EFactData) -> str:
+    slots_by_level: dict[int, int] = {}
+    for slot in _relevant_feat_slots(data):
+        slots_by_level[slot.level] = slots_by_level.get(slot.level, 0) + slot.count
+    slot_text = "、".join(
+        f"{level}级{count}个" for level, count in sorted(slots_by_level.items())
+    )
+    names = _goal_relevant_feat_names(data.goal, data.feats)
+    feat_text = "、".join(
+        f"{name}（先决条件：{data.feats[name].prerequisites or '无'}）"
+        for name in names
+    )
+    parts = []
+    declared = [
+        f"{attribute}为{value}"
+        for attribute in ("力量", "敏捷", "体质", "智力", "感知", "魅力")
+        if (value := _declared_attribute(data.goal, attribute)) is not None
+    ]
+    if declared:
+        parts.append(f"题目声明的角色属性为：{'、'.join(declared)}。")
+    if slot_text:
+        parts.append(f"已读规则给出的专长选择槽为：{slot_text}。")
+    if feat_text:
+        parts.append(f"目标专长的已读先决条件为：{feat_text}。")
+    return "".join(parts) or "专长选择必须满足已读槽位数量和先决条件。"
+
+
+def _goal_fact_summary(data: PF1EFactData) -> tuple[str, tuple[str, ...]]:
+    """Render goal-named facts only when their registered evidence was parsed.
+
+    This is intentionally a small PF1E release corpus bridge.  It prevents a
+    model from dropping the exact facts that caused retrieval for the current
+    goal, while refusing to complete facts that are absent from this turn's
+    registered evidence.
+    """
+
+    goal = data.goal
+    parts: list[str] = []
+    refs: list[str] = []
+
+    if "奥法骑士" in goal:
+        for fact in data.prestige_requirements:
+            if fact.class_name != "奥法骑士":
+                continue
+            parts.append(
+                f"奥法骑士的已读进阶要求为：{'；'.join(fact.requirements)}。"
+            )
+            if not re.search(r"BAB|基本攻击", "\n".join(fact.requirements), re.I):
+                parts.append("已读奥法骑士进阶要求不包含BAB或基础攻击加值门槛。")
+            refs.append(fact.source_label)
+
+    if "人类" in goal:
+        human_slots = [
+            item
+            for item in data.feat_slots
+            if item.source_type == "ancestry_bonus"
+            and item.source_name == "人类"
+            and item.level == 1
+        ]
+        if human_slots:
+            parts.append("人类角色在1级获得一个额外专长。")
+            refs.extend(item.source_label for item in human_slots)
+
+    fighter_sources = [
+        (label, content)
+        for label, content in data.evidence.items()
+        if "武器和防具擅长：战士擅长使用所有的简易武器和军用武器" in content
+        and "盾牌（包括塔盾）" in content
+    ]
+    if "战士" in goal and re.search(r"擅长|装备|武器|盔甲|护甲|盾牌", goal):
+        if fighter_sources:
+            parts.append(
+                "战士擅长所有简易武器、军用武器、所有类型盔甲和盾牌（包括塔盾）。"
+            )
+            refs.extend(label for label, _content in fighter_sources)
+
+    fighter_bonus = [
+        item
+        for item in data.feat_slots
+        if item.source_type == "class_bonus" and item.source_name == "战士"
+    ]
+    if "战士" in goal and "专长" in goal and fighter_bonus:
+        parts.append("战士在1级以及之后的每个偶数战士等级获得一项战士奖励专长。")
+        refs.extend(item.source_label for item in fighter_bonus)
+
+    if "法师护甲" in goal:
+        mage_armor = data.spells.get("法师护甲")
+        if mage_armor is not None:
+            evidence = data.evidence.get(mage_armor.source_label, "")
+            if "AC提供+4护甲加值" in evidence and "没有奥术失败率" in evidence:
+                parts.append(
+                    "法师护甲为受术者提供+4护甲加值，没有防具检定减值、没有奥术失败率，也不会降低速度。"
+                )
+                refs.append(mage_armor.source_label)
+
+    if "油腻术" in goal:
+        grease = data.spells.get("油腻术")
+        if grease is not None:
+            saving = grease.saving_throw or "见法术正文的反射豁免规则"
+            parts.append(
+                f"油腻术属于{grease.school}，持续时间为{grease.duration}，豁免为{saving}；"
+                "区域内生物需通过反射豁免，否则倒地。"
+            )
+            refs.append(grease.source_label)
+            spell_focus = data.feats.get("法术专攻")
+            if spell_focus is not None and spell_focus.effect:
+                school = grease.school.removesuffix("系")
+                parts.append(
+                    f"若围绕油腻术配置专长，可选择法术专攻（{school}）；"
+                    f"其已读效果为{spell_focus.effect}。"
+                )
+                refs.append(spell_focus.source_label)
+
+    return "".join(parts), tuple(dict.fromkeys(refs))
+
+
+def _claim_value_description(path: str) -> str:
+    if path == "answer.build.levels":
+        return "只写职业等级分配和每个分支的适用条件；不得写装备、专长名称或法术位数值。"
+    if path == "answer.summary[conditional_branch]":
+        return "只写题目要求的 if/else 条件判断及采用哪个分支；不得重复逐级法术位、专长表或装备数值。"
+    if path == "answer.equipment.stats":
+        return "只比较题目要求的装备、擅长、价格或防御数据并给出购买结论；不得写职业等级或专长时间线。"
+    return "只写该 canonical topic 对应的结论，不得重复其他 topic 的事实。"
+
+
+def _claim_semantic_terms(path: str) -> tuple[tuple[tuple[str, ...], ...], tuple[str, ...]]:
+    if path == "answer.build.levels":
+        return (("级",), ("法师", "战士", "奥法骑士")), (
+            "AC", "护甲", "盾牌", "每日法术位", "选择专长",
+        )
+    if path == "answer.summary[conditional_branch]":
+        return (("如果", "否则", "满足", "不满足", "条件", "分支"),), ()
+    if path == "answer.equipment.stats":
+        return (("装备", "武器", "盔甲", "护甲", "盾牌", "价格", "gp", "AC"),), (
+            "每日法术位", "最高可施放", "选择专长", "职业构成",
+        )
+    return (), ()
+
+
+def _semantic_fallback_text(data: PF1EFactData, path: str) -> str:
+    """Return a bounded server sentence when a model supplies no legal topic clause."""
+
+    if path == "answer.build.levels":
+        classes = tuple(
+            name for name in ("法师", "战士", "奥法骑士") if name in data.goal
+        )
+        class_text = "、".join(classes) or "相关职业"
+        level_range = _goal_level_range(data.goal)
+        range_text = (
+            f"{level_range[0]}到{level_range[1]}级"
+            if level_range is not None
+            else "题目所述等级"
+        )
+        return f"无法从合法的职业子句安全确定{range_text}{class_text}等级分配，不臆测具体路线。"
+    if path == "answer.summary[conditional_branch]":
+        return "按题目条件执行：条件满足时采用前一分支；条件不满足时采用否则分支。"
+    if path == "answer.equipment.stats":
+        return "已读装备证据不足以安全完成武器、盔甲、护甲或盾牌的具体比较，不臆测购买结论。"
+    return ""
+
+
+def _feat_matches_slot(fact: FeatFact, slot: FeatSlotFact) -> bool:
+    if not slot.allowed_categories:
+        return True
+    for category in slot.allowed_categories:
+        if "战斗" in category and "战斗" in fact.category:
+            return True
+        if "超魔" in category and "超魔" in fact.category:
+            return True
+        if "物品制造" in category and (
+            "造物" in fact.category or "物品制造" in fact.category
+        ):
+            return True
+        if "法术掌握" in category and fact.name in {"法术掌握", "法术熟稔"}:
+            return True
+    return False
+
+
+def _feat_slot_label(slot: FeatSlotFact) -> str:
+    if slot.source_type == "general":
+        return "普通专长"
+    if slot.source_type == "class_bonus":
+        return f"{slot.source_name}奖励专长"
+    if slot.source_type == "ancestry_bonus":
+        return f"{slot.source_name}奖励专长"
+    return f"{slot.source_name}专长"
+
+
+def _ranked_feat_option_names(
+    data: PF1EFactData,
+    slot: FeatSlotFact,
+) -> tuple[str, ...]:
+    relevant = set(_goal_relevant_feat_names(data.goal, data.feats))
+    spell_goal = bool(re.search(r"法术|施法|控制|奥术", data.goal))
+
+    def rank(fact: FeatFact) -> tuple[int, int, int, str]:
+        semantic_match = spell_goal and bool(
+            re.search(r"法术|施法|奥术|超魔", fact.name + fact.category + fact.prerequisites)
+        )
+        return (
+            0 if fact.name in relevant else 1,
+            0 if semantic_match else 1,
+            0 if not fact.prerequisites else 1,
+            fact.name,
+        )
+
+    candidates = sorted(
+        (fact for fact in data.feats.values() if _feat_matches_slot(fact, slot)),
+        key=rank,
+    )
+    return tuple(
+        fact.name for fact in candidates[:_MAX_SELECTION_OPTIONS_PER_GROUP]
+    )
+
+
+def _draft_claim_contracts(data: PF1EFactData) -> tuple[DraftClaimContract, ...]:
+    contracts: list[DraftClaimContract] = []
+    slots_by_level: dict[int, list[FeatSlotFact]] = {}
+    for slot in _relevant_feat_slots(data):
+        slots_by_level.setdefault(slot.level, []).append(slot)
+    for path in _required_draft_paths(data):
+        if path == "answer.summary[goal_facts]":
+            goal_text, goal_refs = _goal_fact_summary(data)
+            contracts.append(
+                DraftClaimContract(
+                    path=path,
+                    evidence_refs=goal_refs,
+                    server_text=goal_text,
+                )
+            )
+            continue
+        if path == "answer.build.levels" and re.search(
+            r"指定(?:的)?法术环级|指定环级", data.goal
+        ) and data.class_levels:
+            contracts.append(
+                DraftClaimContract(
+                    path=path,
+                    evidence_refs=_claim_evidence_refs(data, path),
+                    server_text=(
+                        "题目未给出要保持的具体法术环级，因此暂不生成具体法师/战士等级分配；"
+                        "先明确目标环级后，再按法师职业表核对可用的兼职等级。"
+                    ),
+                )
+            )
+            continue
+        if path == "answer.summary[feat_eligibility]":
+            contracts.append(
+                DraftClaimContract(
+                    path=path,
+                    evidence_refs=_claim_evidence_refs(data, path),
+                    server_text=_feat_eligibility_text(data),
+                )
+            )
+            continue
+        if path == "answer.summary[spell_progression]":
+            contracts.append(
+                DraftClaimContract(
+                    path=path,
+                    evidence_refs=_claim_evidence_refs(data, path),
+                    server_text=_spell_progression_summary_text(data),
+                )
+            )
+            continue
+        if path == "answer.summary[missing_input]":
+            contracts.append(
+                DraftClaimContract(
+                    path=path,
+                    evidence_refs=_claim_evidence_refs(data, path),
+                    server_text="题目没有给出要保持的具体法术环级；必须先明确目标环级，再选择对应兼职分支。",
+                )
+            )
+            continue
+        spell_match = re.fullmatch(r"answer\.levels\[(\d+)]\.spells", path)
+        if spell_match:
+            level = int(spell_match.group(1))
+            fact = data.class_levels.get(("法师", level))
+            if fact is not None and fact.max_spell_level is not None:
+                contracts.append(
+                    DraftClaimContract(
+                        path=path,
+                        evidence_refs=(fact.source_label,),
+                        server_text=_wizard_progression_text(fact),
+                    )
+                )
+                continue
+        match = re.fullmatch(r"answer\.levels\[(\d+)]\.feats", path)
+        if match:
+            level = int(match.group(1))
+            slots = slots_by_level.get(level, [])
+            count = sum(item.count for item in slots)
+            selection_groups = tuple(
+                DraftSelectionGroup(
+                    label=_feat_slot_label(slot),
+                    count=slot.count,
+                    option_values=_ranked_feat_option_names(data, slot),
+                )
+                for slot in slots
+                if len(_ranked_feat_option_names(data, slot)) >= slot.count
+            )
+            groups_cover_slots = len(selection_groups) == len(slots)
+            option_names = tuple(
+                dict.fromkeys(
+                    value
+                    for group in selection_groups
+                    for value in group.option_values
+                )
+            )
+            options = tuple(
+                DraftSelectionOption(name, (data.feats[name].source_label,))
+                for name in option_names
+            )
+            if count and groups_cover_slots and len(options) >= count:
+                contracts.append(
+                    DraftClaimContract(
+                        path=path,
+                        evidence_refs=tuple(
+                            dict.fromkeys(item.source_label for item in slots)
+                        ),
+                        selection_count=count,
+                        selection_options=options,
+                        selection_groups=selection_groups,
+                        allow_selection_fallback=True,
+                        text_template=f"{level}级选择专长：{{values}}。",
+                        value_description="按该等级的全部专长槽选择不同的已读专长；每个选择必须满足先决条件和奖励专长范围。",
+                    )
+                )
+                continue
+            if count:
+                contracts.append(
+                    DraftClaimContract(
+                        path=path,
+                        evidence_refs=tuple(
+                            dict.fromkeys(item.source_label for item in slots)
+                        ),
+                        server_text=(
+                            f"{level}级规则要求选择{count}个专长，但已读证据只提供"
+                            f"{len(options)}个且未覆盖全部槽位的可验证候选，不能安全生成具体选择。"
+                        ),
+                    )
+                )
+                continue
+        required_term_groups, forbidden_terms = _claim_semantic_terms(path)
+        if path in {"answer.build.levels", "answer.summary[conditional_branch]"}:
+            prestige_requirements = "\n".join(
+                requirement
+                for fact in data.prestige_requirements
+                for requirement in fact.requirements
+            )
+            if data.prestige_requirements and not re.search(
+                r"BAB|基本攻击", prestige_requirements, re.I
+            ):
+                forbidden_terms = (*forbidden_terms, "BAB", "基础攻击")
+        contracts.append(
+            DraftClaimContract(
+                path=path,
+                evidence_refs=_claim_evidence_refs(data, path),
+                value_description=_claim_value_description(path),
+                semantic_fallback_text=_semantic_fallback_text(data, path),
+                required_term_groups=required_term_groups,
+                forbidden_terms=forbidden_terms,
+            )
+        )
+    return tuple(contracts)
 
 
 def _records(data: PF1EFactData) -> tuple[FactRecord, ...]:
@@ -1318,6 +2043,18 @@ def _records(data: PF1EFactData) -> tuple[FactRecord, ...]:
                 predicate="prestige_requirements",
                 value=fact.public(),
                 value_type="requirements",
+                evidence_refs=(fact.source_label,),
+            )
+        )
+    for fact in data.prestige_spell_advancements:
+        records.append(
+            FactRecord(
+                adapter_id=PF1E_ADAPTER_ID,
+                adapter_version=PF1E_ADAPTER_VERSION,
+                subject=fact.class_name,
+                predicate="prestige_spell_advancement",
+                value=fact.public(),
+                value_type="progression",
                 evidence_refs=(fact.source_label,),
             )
         )
@@ -1440,6 +2177,25 @@ class PF1EFactLedgerAdapter:
     ) -> tuple[DraftPathSpec, ...]:
         _adapter_data(ledger)
         return PF1E_DRAFT_PATH_SPECS
+
+    def required_draft_paths(
+        self,
+        ledger: GenericFactLedger,
+    ) -> tuple[str, ...]:
+        return _required_draft_paths(_adapter_data(ledger))
+
+    def draft_claim_contracts(
+        self,
+        ledger: GenericFactLedger,
+    ) -> tuple[DraftClaimContract, ...]:
+        return _draft_claim_contracts(_adapter_data(ledger))
+
+    def repair_path_mappings(
+        self,
+        ledger: GenericFactLedger,
+    ) -> tuple[RepairPathMapping, ...]:
+        _adapter_data(ledger)
+        return PF1E_REPAIR_PATH_MAPPINGS
 
 
 PF1E_FACT_LEDGER_ADAPTER = PF1EFactLedgerAdapter()

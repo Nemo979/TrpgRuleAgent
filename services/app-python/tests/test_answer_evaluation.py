@@ -12,6 +12,7 @@ from trpg_app.answer_evaluation import (
     _normalize,
     _parse_judge_response,
     build_reference,
+    evaluation_artifact_paths,
     evaluate_model,
     expand_history,
     grade_turn,
@@ -65,6 +66,17 @@ class _FakeLibrary:
 
 
 class AnswerEvaluationTest(unittest.TestCase):
+    def test_derives_metrics_and_observability_paths_from_report(self) -> None:
+        metrics, observability = evaluation_artifact_paths(
+            Path("/private/tmp/stage3-result.json")
+        )
+
+        self.assertEqual(metrics, Path("/private/tmp/stage3-result-metrics.jsonl"))
+        self.assertEqual(
+            observability,
+            Path("/private/tmp/stage3-result-observability.json"),
+        )
+
     def test_loads_multi_turn_cases(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "cases.jsonl"

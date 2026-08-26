@@ -9,6 +9,7 @@ import time
 import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Callable, Protocol
+from urllib.parse import urlparse
 
 from openai import AsyncOpenAI
 
@@ -28,8 +29,10 @@ from .context_budget import ContextBudget
 from .conversation_state import ConversationState
 from .evidence_policy import EvidenceBudgetPolicy, EvidenceBudgetProfile
 from .fact_ledger import (
+    DraftClaimContract,
     DraftPathSpec,
     FACT_LEDGER_CORE_SCHEMA_VERSION,
+    RepairPathMapping,
     ValidationIssue,
     ValidationSeverity,
 )
@@ -41,8 +44,14 @@ from .fact_ledger_repair import (
     StructuredAnswerError,
     apply_repair_patch,
     build_repair_targets,
+    classify_draft_parse_failure,
+    classify_draft_path_template,
+    classify_repair_patch_failure,
+    draft_contract_recovery_instruction,
+    json_only_recovery_instruction,
     parse_answer_draft,
     parse_repair_patch,
+    render_answer_draft_for_validation,
     repair_instruction,
     structured_draft_instruction,
     timed_render,
@@ -56,6 +65,7 @@ from .observability import (
     log_turn_metrics,
     summarize_messages,
 )
+from .point_buy_audit import PointBuyAudit, build_point_buy_audit
 from .query_intent import QueryIntent, QueryPlan, build_query_plan, classify_intent
 from .query_decomposition import (
     QueryDecomposition,
@@ -80,6 +90,12 @@ logger = logging.getLogger("uvicorn.error")
 # transient-service envelopes. Once the preamble is safe, later provider
 # deltas are forwarded immediately instead of waiting for the full answer.
 _ANSWER_STREAM_GUARD_CHARACTERS = 96
+
+# Structured Fact Ledger generation consumes server-owned contracts rather than
+# asking the model to rediscover every full document. Keep every registered
+# source label visible, but bound each document body so slow providers do not
+# spend the entire evaluation timeout rereading a 60k+ character evidence blob.
+_STRUCTURED_EVIDENCE_MAX_CHARACTERS = 48_000
 
 
 _PROVIDER_REFUSAL_PATTERNS = (
@@ -295,6 +311,9 @@ class OpenAIModelGateway:
     def _extra_body(self) -> dict[str, Any] | None:
         if not self.model.disable_thinking:
             return None
+        hostname = (urlparse(self.model.base_url).hostname or "").lower()
+        if hostname == "xiaomimimo.com" or hostname.endswith(".xiaomimimo.com"):
+            return {"thinking": {"type": "disabled"}}
         return {"chat_template_kwargs": {"enable_thinking": False}}
 
 
@@ -694,6 +713,9 @@ async def run_rule_turn(
         ),
         "",
     )
+    prior_assistant_artifact = _select_prior_assistant_artifact(
+        messages, latest_user_message
+    )
     route_decision: RouteDecision | None = None
     decomposition = QueryDecomposition()
     complex_plan: ComplexPlan | None = None
@@ -709,6 +731,7 @@ async def run_rule_turn(
         )
     )
     fact_validation_issue_codes: list[str] = []
+    draft_claim_contracts: tuple[DraftClaimContract, ...] = ()
     repair_metrics = RepairMetrics()
     planner_seconds = 0.0
     executor_seconds = 0.0
@@ -959,6 +982,22 @@ async def run_rule_turn(
                     if fact_ledger.ledger is not None
                     else 0
                 ),
+                "factDraftContractCount": len(draft_claim_contracts),
+                "factDraftServerClaimCount": sum(
+                    bool(contract.server_text) for contract in draft_claim_contracts
+                ),
+                "factDraftSelectionClaimCount": sum(
+                    bool(contract.selection_count) for contract in draft_claim_contracts
+                ),
+                "factDraftSelectionValueCount": sum(
+                    contract.selection_count for contract in draft_claim_contracts
+                ),
+                "factDraftFreeTextClaimCount": sum(
+                    not contract.server_text and not contract.selection_count
+                    for contract in draft_claim_contracts
+                ),
+                "factDraftSemanticFallbackCount": repair_metrics.semantic_fallback_count,
+                "factDraftSelectionFallbackCount": repair_metrics.selection_fallback_count,
                 "factValidationIssueCount": len(fact_validation_issue_codes),
                 "factValidationIssueCodes": fact_validation_issue_codes,
                 "factLedgerBuildSeconds": round(fact_ledger.build_seconds, 6),
@@ -973,6 +1012,36 @@ async def run_rule_turn(
                 "factRepairFailureReason": repair_metrics.failure_reason or "none",
                 "factRepairTargetFailureReason": (
                     repair_metrics.target_failure_reason or "none"
+                ),
+                "factDraftParseFailureReason": (
+                    repair_metrics.draft_parse_failure_reason or "none"
+                ),
+                "factRepairPatchFailureReason": (
+                    repair_metrics.repair_patch_failure_reason or "none"
+                ),
+                "factDraftJsonRecoveryAttempted": (
+                    repair_metrics.draft_json_recovery_attempted
+                ),
+                "factDraftJsonRecoveryApplied": (
+                    repair_metrics.draft_json_recovery_applied
+                ),
+                "factDraftContractRecoveryAttempted": (
+                    repair_metrics.draft_contract_recovery_attempted
+                ),
+                "factDraftContractRecoveryApplied": (
+                    repair_metrics.draft_contract_recovery_applied
+                ),
+                "factRepairJsonRecoveryAttempted": (
+                    repair_metrics.repair_json_recovery_attempted
+                ),
+                "factRepairJsonRecoveryApplied": (
+                    repair_metrics.repair_json_recovery_applied
+                ),
+                "factResidualValidationIssueCodes": list(
+                    repair_metrics.residual_issue_codes
+                ),
+                "factResidualPathTemplates": list(
+                    repair_metrics.residual_path_templates
                 ),
                 "factDraftParseSeconds": round(
                     repair_metrics.draft_parse_seconds,
@@ -1183,6 +1252,9 @@ async def run_rule_turn(
             fact_ledger_payload: dict[str, Any] | None = None
             answer_validator: Callable[[str], tuple[ValidationIssue, ...]] | None = None
             draft_path_specs: tuple[DraftPathSpec, ...] = ()
+            required_draft_paths: tuple[str, ...] = ()
+            draft_claim_contracts = ()
+            repair_path_mappings: tuple[RepairPathMapping, ...] = ()
             if enable_fact_ledger:
                 fact_ledger = build_default_fact_ledger_runtime(
                     library.manifest,
@@ -1198,6 +1270,12 @@ async def run_rule_turn(
                     fact_ledger.validate("")
                 if fact_ledger.active:
                     draft_path_specs = fact_ledger.draft_path_specs()
+                if fact_ledger.active:
+                    required_draft_paths = fact_ledger.required_draft_paths()
+                if fact_ledger.active:
+                    draft_claim_contracts = fact_ledger.draft_claim_contracts()
+                if fact_ledger.active:
+                    repair_path_mappings = fact_ledger.repair_path_mappings()
                 if fact_ledger.active:
                     fact_ledger_payload = candidate_payload
                     answer_validator = fact_ledger.validate
@@ -1215,8 +1293,13 @@ async def run_rule_turn(
                 ),
                 answer_validator=answer_validator,
                 draft_path_specs=draft_path_specs,
+                required_draft_paths=required_draft_paths,
+                draft_claim_contracts=draft_claim_contracts,
+                repair_path_mappings=repair_path_mappings,
                 validation_issue_codes=fact_validation_issue_codes,
                 repair_metrics=repair_metrics,
+                prior_assistant_artifact=prior_assistant_artifact,
+                conversation_state=state,
             ):
                 yield event
             _emit_turn_metrics("planner_finish", final_answer_tokens[0])
@@ -1232,6 +1315,8 @@ async def run_rule_turn(
             controller=controller,
             request_id=request_id,
             decision_index=len(complex_plan.tasks),
+            prior_assistant_artifact=prior_assistant_artifact,
+            conversation_state=state,
         ):
             yield event
         _emit_turn_metrics("planner_no_evidence", final_answer_tokens[0])
@@ -1312,6 +1397,8 @@ async def run_rule_turn(
                 citations,
                 timer,
                 final_answer_tokens,
+                prior_assistant_artifact=prior_assistant_artifact,
+                conversation_state=state,
             ):
                 yield event
             _emit_turn_metrics("decomposition_finish", final_answer_tokens[0])
@@ -1369,6 +1456,8 @@ async def run_rule_turn(
                         controller=controller,
                         request_id=request_id,
                         decision_index=decision_index,
+                        prior_assistant_artifact=prior_assistant_artifact,
+                        conversation_state=state,
                     ):
                         yield event
                     _emit_turn_metrics("model_skipped_tools", final_answer_tokens[0])
@@ -1395,12 +1484,22 @@ async def run_rule_turn(
                         controller=controller,
                         request_id=request_id,
                         decision_index=decision_index,
+                        prior_assistant_artifact=prior_assistant_artifact,
+                        conversation_state=state,
                     ):
                         yield event
                     _emit_turn_metrics("model_stopped_without_evidence", final_answer_tokens[0])
                     return
                 raise RuntimeError("模型未读取规则证据")
-            async for event in _stream_final_answer(gateway, conversation, citations, timer, final_answer_tokens):
+            async for event in _stream_final_answer(
+                gateway,
+                conversation,
+                citations,
+                timer,
+                final_answer_tokens,
+                prior_assistant_artifact=prior_assistant_artifact,
+                conversation_state=state,
+            ):
                 yield event
             _emit_turn_metrics("model_finish", final_answer_tokens[0])
             return
@@ -1605,11 +1704,21 @@ async def run_rule_turn(
                     controller=controller,
                     request_id=request_id,
                     decision_index=decision_index,
+                    prior_assistant_artifact=prior_assistant_artifact,
+                    conversation_state=state,
                 ):
                     yield event
                 _emit_turn_metrics("model_finished_without_evidence", final_answer_tokens[0])
                 return
-            async for event in _stream_final_answer(gateway, conversation, citations, timer, final_answer_tokens):
+            async for event in _stream_final_answer(
+                gateway,
+                conversation,
+                citations,
+                timer,
+                final_answer_tokens,
+                prior_assistant_artifact=prior_assistant_artifact,
+                conversation_state=state,
+            ):
                 yield event
             _emit_turn_metrics("model_finish", final_answer_tokens[0])
             return
@@ -1672,6 +1781,8 @@ async def run_rule_turn(
                 controller=controller,
                 request_id=request_id,
                 decision_index=decision_index,
+                prior_assistant_artifact=prior_assistant_artifact,
+                conversation_state=state,
             ):
                 yield event
             _emit_turn_metrics(execution.stop_reason, final_answer_tokens[0])
@@ -1697,6 +1808,8 @@ async def run_rule_turn(
         controller=controller,
         request_id=request_id,
         decision_index=10,
+        prior_assistant_artifact=prior_assistant_artifact,
+        conversation_state=state,
     ):
         yield event
     _emit_turn_metrics("decision_limit", final_answer_tokens[0])
@@ -1753,13 +1866,21 @@ async def _stream_structured_validated_answer(
     validation_issue_codes: list[str] | None,
     metrics: RepairMetrics,
     draft_path_specs: tuple[DraftPathSpec, ...] = (),
+    required_draft_paths: tuple[str, ...] = (),
+    draft_claim_contracts: tuple[DraftClaimContract, ...] = (),
+    repair_path_mappings: tuple[RepairPathMapping, ...] = (),
 ) -> AsyncIterator[dict[str, Any]]:
     registered_refs = tuple(citations.labels())
     draft_conversation = [
         *answer_conversation,
         {
             "role": "system",
-            "content": structured_draft_instruction(draft_path_specs),
+            "content": structured_draft_instruction(
+                draft_path_specs,
+                required_draft_paths,
+                registered_refs,
+                draft_claim_contracts,
+            ),
         },
     ]
     raw_draft = await _collect_structured_model_output(
@@ -1779,19 +1900,118 @@ async def _stream_structured_validated_answer(
         yield {"type": "done"}
         return
     parse_started = time.monotonic()
+    draft_error: StructuredAnswerError | None = None
     try:
-        draft = parse_answer_draft(raw_draft, registered_refs, draft_path_specs)
+        draft = parse_answer_draft(
+            raw_draft,
+            registered_refs,
+            draft_path_specs,
+            required_draft_paths,
+            draft_claim_contracts,
+        )
     except StructuredAnswerError as error:
+        draft_error = error
+        metrics.draft_parse_failure_reason = classify_draft_parse_failure(error)
+        if metrics.draft_parse_failure_reason == "invalid_json":
+            metrics.draft_parse_seconds += time.monotonic() - parse_started
+            metrics.draft_json_recovery_attempted = True
+            recovered_raw = await _collect_structured_model_output(
+                gateway,
+                [
+                    *draft_conversation,
+                    {"role": "assistant", "content": raw_draft},
+                    {
+                        "role": "system",
+                        "content": json_only_recovery_instruction("draft"),
+                    },
+                ],
+                timer,
+                record_as_repair=False,
+                metrics=metrics,
+            )
+            parse_started = time.monotonic()
+            if not _answer_quality_issue(recovered_raw):
+                try:
+                    draft = parse_answer_draft(
+                        recovered_raw,
+                        registered_refs,
+                        draft_path_specs,
+                        required_draft_paths,
+                        draft_claim_contracts,
+                    )
+                    draft_error = None
+                    raw_draft = recovered_raw
+                    metrics.draft_json_recovery_applied = True
+                except StructuredAnswerError as recovered_error:
+                    draft_error = recovered_error
+                    metrics.draft_parse_failure_reason = classify_draft_parse_failure(
+                        recovered_error
+                    )
+        elif metrics.draft_parse_failure_reason in {
+            "values_fields",
+            "values_count",
+            "values_shape",
+        }:
+            metrics.draft_parse_seconds += time.monotonic() - parse_started
+            metrics.draft_contract_recovery_attempted = True
+            expected_value_count = sum(
+                not contract.server_text for contract in draft_claim_contracts
+            )
+            recovered_raw = await _collect_structured_model_output(
+                gateway,
+                [
+                    *draft_conversation,
+                    {"role": "assistant", "content": raw_draft},
+                    {
+                        "role": "system",
+                        "content": draft_contract_recovery_instruction(
+                            expected_value_count
+                        ),
+                    },
+                ],
+                timer,
+                record_as_repair=False,
+                metrics=metrics,
+            )
+            parse_started = time.monotonic()
+            if not _answer_quality_issue(recovered_raw):
+                try:
+                    draft = parse_answer_draft(
+                        recovered_raw,
+                        registered_refs,
+                        draft_path_specs,
+                        required_draft_paths,
+                        draft_claim_contracts,
+                    )
+                    draft_error = None
+                    raw_draft = recovered_raw
+                    metrics.draft_contract_recovery_applied = True
+                except StructuredAnswerError as recovered_error:
+                    draft_error = recovered_error
+                    metrics.draft_parse_failure_reason = classify_draft_parse_failure(
+                        recovered_error
+                    )
+    metrics.draft_parse_seconds += time.monotonic() - parse_started
+    if draft_error is not None:
         metrics.safe_refusal = True
         metrics.failure_reason = "invalid_answer_draft"
-        logger.warning("structured_answer_rejected reason=%s", type(error).__name__)
+        logger.warning("structured_answer_rejected reason=%s", type(draft_error).__name__)
         yield {"type": "safe_refusal", "reason": metrics.failure_reason}
         yield {"type": "text_delta", "delta": _answer_quality_failure("fact_validation")}
         yield {"type": "sources", "sources": []}
         yield {"type": "done"}
         return
-    finally:
-        metrics.draft_parse_seconds += time.monotonic() - parse_started
+    fallback_by_path = {
+        contract.path: contract.semantic_fallback_text
+        for contract in draft_claim_contracts
+        if contract.semantic_fallback_text
+    }
+    metrics.semantic_fallback_count = sum(
+        fallback_by_path.get(claim.path) == claim.text
+        for claim in draft.claims
+        if claim.path in fallback_by_path
+    )
+    metrics.selection_fallback_count = draft.selection_fallback_count
     try:
         rendered = timed_render(draft, metrics)
     except Exception as error:  # Renderer is a server-owned publication boundary.
@@ -1803,14 +2023,22 @@ async def _stream_structured_validated_answer(
         yield {"type": "sources", "sources": []}
         yield {"type": "done"}
         return
-    issues = _error_issues(answer_validator, rendered)
+    issues = _error_issues(
+        answer_validator,
+        render_answer_draft_for_validation(draft),
+    )
     if validation_issue_codes is not None:
         validation_issue_codes[:] = list(dict.fromkeys(issue.code for issue in issues))
     metrics.issue_codes = tuple(dict.fromkeys(issue.code for issue in issues))
     if issues:
         metrics.attempted = True
         try:
-            targets = build_repair_targets(draft, issues)
+            targets = build_repair_targets(
+                draft,
+                issues,
+                repair_path_mappings,
+                draft_claim_contracts,
+            )
         except RepairTargetError as error:
             metrics.safe_refusal = True
             metrics.failure_reason = "unrepairable_issue"
@@ -1826,7 +2054,12 @@ async def _stream_structured_validated_answer(
             {"role": "assistant", "content": raw_draft},
             {
                 "role": "system",
-                "content": repair_instruction(draft, issues, targets),
+                "content": repair_instruction(
+                    draft,
+                    issues,
+                    targets,
+                    draft_claim_contracts,
+                ),
             },
         ]
         raw_patch = await _collect_structured_model_output(
@@ -1845,22 +2078,73 @@ async def _stream_structured_validated_answer(
             yield {"type": "done"}
             return
         merge_started = time.monotonic()
+        patch_error: StructuredAnswerError | None = None
         try:
-            patch = parse_repair_patch(raw_patch, registered_refs)
-            repaired = apply_repair_patch(draft, patch, targets)
-            metrics.patch_count = len(patch.operations)
-            metrics.applied = True
+            patch = parse_repair_patch(
+                raw_patch,
+                registered_refs,
+                targets,
+                draft_claim_contracts,
+            )
         except StructuredAnswerError as error:
+            patch_error = error
+            metrics.repair_patch_failure_reason = classify_repair_patch_failure(error)
+            if metrics.repair_patch_failure_reason == "invalid_json":
+                metrics.repair_seconds += time.monotonic() - merge_started
+                metrics.repair_json_recovery_attempted = True
+                recovered_patch = await _collect_structured_model_output(
+                    gateway,
+                    [
+                        *repair_conversation,
+                        {"role": "assistant", "content": raw_patch},
+                        {
+                            "role": "system",
+                            "content": json_only_recovery_instruction("repair"),
+                        },
+                    ],
+                    timer,
+                    record_as_repair=True,
+                    metrics=metrics,
+                )
+                merge_started = time.monotonic()
+                if not _answer_quality_issue(recovered_patch):
+                    try:
+                        patch = parse_repair_patch(
+                            recovered_patch,
+                            registered_refs,
+                            targets,
+                            draft_claim_contracts,
+                        )
+                        patch_error = None
+                        metrics.repair_json_recovery_applied = True
+                    except StructuredAnswerError as recovered_error:
+                        patch_error = recovered_error
+                        metrics.repair_patch_failure_reason = (
+                            classify_repair_patch_failure(recovered_error)
+                        )
+        if patch_error is None:
+            try:
+                repaired = apply_repair_patch(
+                    draft,
+                    patch,
+                    targets,
+                    draft_claim_contracts,
+                )
+                metrics.patch_count = len(patch.operations)
+                metrics.applied = True
+            except StructuredAnswerError as error:
+                patch_error = error
+                metrics.repair_patch_failure_reason = classify_repair_patch_failure(error)
+        metrics.repair_seconds += time.monotonic() - merge_started
+        if patch_error is not None:
             metrics.safe_refusal = True
             metrics.failure_reason = "invalid_repair_patch"
-            logger.warning("structured_repair_rejected reason=%s", type(error).__name__)
+            logger.warning("structured_repair_rejected reason=%s", type(patch_error).__name__)
             yield {"type": "safe_refusal", "reason": metrics.failure_reason}
             yield {"type": "text_delta", "delta": _answer_quality_failure("fact_validation")}
             yield {"type": "sources", "sources": []}
             yield {"type": "done"}
             return
-        finally:
-            metrics.repair_seconds += time.monotonic() - merge_started
         try:
             rendered = timed_render(repaired, metrics)
         except Exception as error:  # Do not publish a partially repaired draft.
@@ -1872,7 +2156,10 @@ async def _stream_structured_validated_answer(
             yield {"type": "sources", "sources": []}
             yield {"type": "done"}
             return
-        remaining = _error_issues(answer_validator, rendered)
+        remaining = _error_issues(
+            answer_validator,
+            render_answer_draft_for_validation(repaired),
+        )
         if remaining:
             if validation_issue_codes is not None:
                 validation_issue_codes[:] = list(
@@ -1882,6 +2169,15 @@ async def _stream_structured_validated_answer(
                 )
             metrics.issue_codes = tuple(
                 dict.fromkeys([*metrics.issue_codes, *(issue.code for issue in remaining)])
+            )
+            metrics.residual_issue_codes = tuple(
+                dict.fromkeys(issue.code for issue in remaining)
+            )
+            metrics.residual_path_templates = tuple(
+                dict.fromkeys(
+                    classify_draft_path_template(issue.path, draft_path_specs)
+                    for issue in remaining
+                )
             )
             metrics.safe_refusal = True
             metrics.failure_reason = "repair_validation_failed"
@@ -1910,11 +2206,44 @@ async def _stream_final_answer(
     validation_issue_codes: list[str] | None = None,
     repair_metrics: RepairMetrics | None = None,
     draft_path_specs: tuple[DraftPathSpec, ...] = (),
+    required_draft_paths: tuple[str, ...] = (),
+    draft_claim_contracts: tuple[DraftClaimContract, ...] = (),
+    repair_path_mappings: tuple[RepairPathMapping, ...] = (),
+    prior_assistant_artifact: str = "",
+    conversation_state: ConversationState | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
+    point_buy_result = _point_buy_audit_result(
+        conversation,
+        citations,
+        prior_assistant_artifact=prior_assistant_artifact,
+        conversation_state=conversation_state,
+    )
+    if point_buy_result is not None:
+        audit, point_buy_label, race_label = point_buy_result
+        rendered = audit.render_answer(
+            point_buy_label=point_buy_label,
+            race_label=race_label,
+        )
+        rendered_tokens = estimate_tokens(rendered)
+        yield {"type": "status", "status": "answering"}
+        for index in range(0, len(rendered), 24):
+            yield {"type": "text_delta", "delta": rendered[index : index + 24]}
+        yield {"type": "sources", "sources": citations.public()}
+        yield {"type": "done", "finalAnswerTokens": rendered_tokens}
+        if final_answer_tokens is not None:
+            final_answer_tokens[0] = rendered_tokens
+        return
     answer_conversation = _final_answer_conversation(
         conversation,
         citations,
         final_guidance=final_guidance,
+        max_evidence_characters=(
+            _STRUCTURED_EVIDENCE_MAX_CHARACTERS
+            if answer_validator is not None
+            else None
+        ),
+        prior_assistant_artifact=prior_assistant_artifact,
+        conversation_state=conversation_state,
     )
     yield {"type": "status", "status": "answering"}
     if answer_validator is not None:
@@ -1924,6 +2253,9 @@ async def _stream_final_answer(
             citations=citations,
             answer_validator=answer_validator,
             draft_path_specs=draft_path_specs,
+            required_draft_paths=required_draft_paths,
+            draft_claim_contracts=draft_claim_contracts,
+            repair_path_mappings=repair_path_mappings,
             timer=timer,
             final_answer_tokens=final_answer_tokens,
             validation_issue_codes=validation_issue_codes,
@@ -2036,6 +2368,8 @@ async def _finish_after_controller_stop(
     controller: ToolLoopController,
     request_id: str | None,
     decision_index: int,
+    prior_assistant_artifact: str = "",
+    conversation_state: ConversationState | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     priority_candidate_ids: list[str] = []
     # A compound route is completed deterministically and serially when the
@@ -2299,32 +2633,131 @@ async def _finish_after_controller_stop(
             ),
         }
     )
-    async for event in _stream_final_answer(gateway, conversation, citations):
+    async for event in _stream_final_answer(
+        gateway,
+        conversation,
+        citations,
+        prior_assistant_artifact=prior_assistant_artifact,
+        conversation_state=conversation_state,
+    ):
         yield event
+
+
+def _point_buy_audit_result(
+    conversation: list[dict[str, Any]],
+    citations: CitationRegistry,
+    *,
+    prior_assistant_artifact: str = "",
+    conversation_state: ConversationState | None = None,
+) -> tuple[PointBuyAudit, str, str] | None:
+    question = _latest_user_content(conversation)
+    artifact = prior_assistant_artifact or _select_prior_assistant_artifact(
+        conversation, question
+    )
+    state = conversation_state or ConversationState.from_messages(
+        [
+            {
+                "role": str(message.get("role", "")),
+                "content": str(message.get("content", "")),
+            }
+            for message in conversation
+            if message.get("role") in {"user", "assistant"}
+        ]
+    )
+    evidence_items = tuple(citations.by_document_id.values())
+    audit = build_point_buy_audit(
+        artifact=artifact,
+        budget=state.pointBuyBudget,
+        race=state.race,
+        evidence_documents=(document for _, document in evidence_items),
+    )
+    if audit is None:
+        return None
+
+    point_buy_label = next(
+        (
+            label
+            for label, document in evidence_items
+            if "购点" in str(document.get("content", ""))
+            and "原始属性" in str(document.get("content", ""))
+        ),
+        "",
+    )
+    race_label = next(
+        (
+            label
+            for label, document in evidence_items
+            if state.race
+            and (
+                state.race in str(document.get("title", ""))
+                or state.race in str(document.get("fullPath", ""))
+            )
+        ),
+        "",
+    )
+    if not point_buy_label or not race_label:
+        return None
+    return audit, point_buy_label, race_label
 
 
 def _final_answer_conversation(
     conversation: list[dict[str, Any]],
     citations: CitationRegistry,
     final_guidance: str = "",
+    max_evidence_characters: int | None = None,
+    prior_assistant_artifact: str = "",
+    conversation_state: ConversationState | None = None,
 ) -> list[dict[str, str]]:
     if not citations.by_document_id:
         return conversation
     question = _latest_user_content(conversation)
-    state = ConversationState.from_messages(
+    state = conversation_state or ConversationState.from_messages(
         [
             {"role": str(message.get("role", "")), "content": str(message.get("content", ""))}
             for message in conversation
             if message.get("role") in {"user", "assistant"}
         ]
     )
+    prior_artifact = prior_assistant_artifact or _select_prior_assistant_artifact(
+        conversation, question
+    )
+    evidence_items = tuple(citations.by_document_id.values())
+    point_buy_result = _point_buy_audit_result(
+        conversation,
+        citations,
+        prior_assistant_artifact=prior_artifact,
+        conversation_state=state,
+    )
+    point_buy_audit = point_buy_result[0] if point_buy_result is not None else None
+    deterministic_guidance = (
+        point_buy_audit.prompt_guidance() if point_buy_audit is not None else ""
+    )
+    combined_guidance = "\n\n".join(
+        item for item in (final_guidance, deterministic_guidance) if item
+    )
+    body_limit: int | None = None
+    if max_evidence_characters is not None and evidence_items:
+        header_characters = sum(
+            len(f"[{label}] {document['title']}\n路径：{document['fullPath']}\n正文：")
+            for label, document in evidence_items
+        ) + 2 * (len(evidence_items) - 1)
+        body_limit = max(
+            0,
+            (max_evidence_characters - header_characters) // len(evidence_items),
+        )
     evidence = "\n\n".join(
         (
             f"[{label}] {document['title']}\n"
             f"路径：{document['fullPath']}\n"
-            f"正文：{document['content']}"
+            "正文："
+            + (
+                str(document["content"])[:body_limit]
+                + ("\n[正文已由服务器按长度截断]" if len(str(document["content"])) > body_limit else "")
+                if body_limit is not None
+                else str(document["content"])
+            )
         )
-        for label, document in citations.by_document_id.values()
+        for label, document in evidence_items
     )
     build_guidance = ""
     if classify_intent(question) == QueryIntent.BUILD_ADVICE:
@@ -2350,6 +2783,9 @@ def _final_answer_conversation(
                 "用户已选择的不同字段默认只是并列状态；除非规则原文明示约束或对应"
                 "关系，不得声称一个字段会限定另一个字段。尤其不得根据表格位置、"
                 "出现顺序或名称相似自行推断对应关系。\n"
+                "如果提供了‘待审查的上一版助手草案’，它只是用户要求检查的对象，"
+                "不是规则事实或可引用来源。必须逐项用[S1]、[S2]等已读取证据复核；"
+                "可以检查其中的算术和内部一致性，但不得继承其断言或引用编号。\n"
                 f"{build_guidance}"
             ),
         },
@@ -2361,11 +2797,99 @@ def _final_answer_conversation(
                 "该状态需要用规则证据验证，不能覆盖规则原文；状态字段之间互不构成"
                 "约束，除非证据明确说明。\n"
                 f"本题字段解释：{state.answer_guidance(question) or '无'}\n\n"
-                + (f"受限任务执行结果：\n{final_guidance}\n\n" if final_guidance else "")
+                + (
+                    "待审查的上一版助手草案（不属于规则证据，不可作为事实来源）：\n"
+                    f"{prior_artifact}\n\n"
+                    if prior_artifact
+                    else ""
+                )
+                + (
+                    f"受限任务执行结果：\n{combined_guidance}\n\n"
+                    if combined_guidance
+                    else ""
+                )
                 + f"已读取证据：\n{evidence}"
             ),
         },
     ]
+
+
+_PRIOR_ARTIFACT_REFERENCE_PATTERN = re.compile(
+    r"(?:刚才|之前|前面|上面|上述|上一版|前一版|这个|该|原来|重新|再次)"
+    r".{0,16}(?:回答|答案|建议|方案|分配|表格|构筑|结果|内容|说法)"
+    r"|(?:检查|核对|复核|修正|修改|重算).{0,20}(?:建议|方案|分配|回答|答案|表格|结果)"
+)
+_PRIOR_ARTIFACT_TOPIC_TERMS = (
+    "购点",
+    "属性",
+    "分配",
+    "建议",
+    "方案",
+    "构筑",
+    "职业",
+    "变体",
+    "种族",
+    "等级",
+    "力量",
+    "敏捷",
+    "体质",
+    "智力",
+    "感知",
+    "魅力",
+    "猫族",
+    "通灵者",
+    "虚空之声",
+)
+_MAX_PRIOR_ASSISTANT_CANDIDATES = 8
+_MAX_PRIOR_ARTIFACT_CHARACTERS = 12_000
+
+
+def _select_prior_assistant_artifact(
+    conversation: list[dict[str, Any]], question: str
+) -> str:
+    """Return one bounded, untrusted assistant artifact for explicit review.
+
+    Assistant output never enters ``ConversationState`` and never becomes
+    evidence.  This selector only restores the object of a user's explicit
+    follow-up review request after final-answer context has been rebuilt.
+    """
+    if not _PRIOR_ARTIFACT_REFERENCE_PATTERN.search(question):
+        return ""
+
+    latest_user_index = next(
+        (
+            index
+            for index in range(len(conversation) - 1, -1, -1)
+            if conversation[index].get("role") == "user"
+        ),
+        len(conversation),
+    )
+    candidates = [
+        str(message.get("content", "")).strip()
+        for message in conversation[:latest_user_index]
+        if message.get("role") == "assistant"
+        and str(message.get("content", "")).strip()
+    ][-_MAX_PRIOR_ASSISTANT_CANDIDATES:]
+    if not candidates:
+        return ""
+
+    question_terms = {
+        term for term in _PRIOR_ARTIFACT_TOPIC_TERMS if term in question
+    }
+    scored: list[tuple[int, int, str]] = []
+    for recency, content in enumerate(candidates):
+        overlap = sum(1 for term in question_terms if term in content)
+        structural_bonus = int("|" in content and "分配" in question) * 2
+        scored.append((overlap * 10 + structural_bonus, recency, content))
+    score, _, selected = max(scored)
+    if score <= 0:
+        return ""
+    if len(selected) <= _MAX_PRIOR_ARTIFACT_CHARACTERS:
+        return selected
+    return (
+        selected[:_MAX_PRIOR_ARTIFACT_CHARACTERS]
+        + "\n[上一版助手草案已由服务器按长度截断]"
+    )
 
 
 def _latest_user_content(conversation: list[dict[str, Any]]) -> str:
